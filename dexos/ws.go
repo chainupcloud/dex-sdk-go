@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -57,13 +58,41 @@ type Stream struct {
 	Err <-chan error
 }
 
+// SubscribeOption 连接期过滤条件。
+//
+// 刻意做成**连接参数**而不是订阅协议:没有「订阅状态」这个东西,重连即完整,
+// 不需要在重连后重放订阅、也不会出现「以为订上了其实没有」的静默失败。
+// 代价是改条件要重连 —— 对做市不是问题,关注面在进程生命周期内不变。
+type SubscribeOption func(*subOpts)
+
+type subOpts struct {
+	markets  []uint16
+	accounts []uint32
+}
+
+// WithMarkets 只收这些市场的事件。
+func WithMarkets(m ...uint16) SubscribeOption {
+	return func(o *subOpts) { o.markets = append(o.markets, m...) }
+}
+
+// WithAccounts 只收这些账户的事件。Fill 的两条腿(maker/taker)任一命中即算。
+func WithAccounts(a ...uint32) SubscribeOption {
+	return func(o *subOpts) { o.accounts = append(o.accounts, a...) }
+}
+
 // Subscribe 连接事件流。ctx 取消即断开。
+//
+// 不带 option 时收**全量**。带了则是**并集**语义:市场或账户命中任一即投递 ——
+// 做市的典型诉求正是「市场 0 的全部行情,加上我自己账户的全部动静」,
+// 那是 OR 不是 AND。无作用域的系统事件(BlockBegun、治理类变更)始终投递。
+//
+//	st, _ := c.Subscribe(ctx, dexos.WithMarkets(0), dexos.WithAccounts(master))
 //
 // 自动重连:断线后按指数退避重试(250ms → 8s 封顶),直到 ctx 取消。
 //
 // **重连本身就意味着丢帧**:断开期间的事件不会补发。所以重连后同样应当重拉快照,
 // 与收到 Lost 时的处置一样。
-func (c *Client) Subscribe(ctx context.Context) (*Stream, error) {
+func (c *Client) Subscribe(ctx context.Context, opts ...SubscribeOption) (*Stream, error) {
 	u, err := url.Parse(c.BaseURL)
 	if err != nil {
 		return nil, fmt.Errorf("BaseURL 不合法:%w", err)
@@ -77,6 +106,27 @@ func (c *Client) Subscribe(ctx context.Context) (*Stream, error) {
 		return nil, fmt.Errorf("BaseURL 应为 http/https,得到 %q", u.Scheme)
 	}
 	u.Path = strings.TrimSuffix(u.Path, "/") + "/ws"
+
+	var o subOpts
+	for _, f := range opts {
+		f(&o)
+	}
+	q := url.Values{}
+	if len(o.markets) > 0 {
+		parts := make([]string, len(o.markets))
+		for i, m := range o.markets {
+			parts[i] = strconv.FormatUint(uint64(m), 10)
+		}
+		q.Set("markets", strings.Join(parts, ","))
+	}
+	if len(o.accounts) > 0 {
+		parts := make([]string, len(o.accounts))
+		for i, a := range o.accounts {
+			parts[i] = strconv.FormatUint(uint64(a), 10)
+		}
+		q.Set("accounts", strings.Join(parts, ","))
+	}
+	u.RawQuery = q.Encode()
 
 	events := make(chan Event, 1024)
 	lost := make(chan uint64, 16)
