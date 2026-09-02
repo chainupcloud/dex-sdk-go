@@ -7,8 +7,16 @@ DEX-OS 永续合约交易所的 Go SDK。围绕 **API 钱包(代理钱包)** 设
 go get github.com/chainupcloud/dex-sdk-go
 ```
 
-- REST 接口参考 → [docs/API.md](docs/API.md)
-- WebSocket 参考 → [docs/WEBSOCKET.md](docs/WEBSOCKET.md)
+## 文档
+
+| 文档 | 什么时候读 |
+|---|---|
+| [接入指南](docs/GETTING-STARTED.md) | **从这里开始** —— 从零到第一笔成交,每步都给出怎么确认成功 |
+| [做市接入](docs/MARKET-MAKING.md) | 高频报价:报价循环、原子换单、丢帧处置、错误恢复 |
+| [REST 参考](docs/API.md) | 接口字段与拒因表 |
+| [WebSocket 参考](docs/WEBSOCKET.md) | 事件流协议、事件目录、时延实测 |
+| [技术文档](docs/ARCHITECTURE.md) | 要改 SDK、移植到别的语言、或遇到「签名被拒但看不出为什么」 |
+| [故障排查](docs/TROUBLESHOOTING.md) | 按**症状**查,不是按错误码查 |
 
 ---
 
