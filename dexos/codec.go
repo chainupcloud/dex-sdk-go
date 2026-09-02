@@ -28,10 +28,16 @@ import "encoding/binary"
 const codecVersion byte = 0x01
 
 const (
-	tagCancelOrder  byte = 0x06
-	tagBatchCancel  byte = 0x0F
-	tagBatchPlace   byte = 0x31
-	tagBatchReplace byte = 0x3E
+	tagPlaceOrder        byte = 0x05
+	tagCancelOrder       byte = 0x06
+	tagSetLeverage       byte = 0x0A
+	tagBatchCancel       byte = 0x0F
+	tagCancelConditional byte = 0x12
+	tagCancelTwap        byte = 0x14
+	tagModifyOrder       byte = 0x15
+	tagScheduleCancel    byte = 0x16
+	tagBatchPlace        byte = 0x31
+	tagBatchReplace      byte = 0x3E
 )
 
 // Side 买卖方向。取值必须与内核的 put_side 一致。
@@ -184,6 +190,118 @@ func EncodeCancelOrder(account uint32, order OrderID) []byte {
 	e := &encoder{}
 	e.u8(codecVersion)
 	e.u8(tagCancelOrder)
+	e.u32(account)
+	e.u64(uint64(order))
+	return e.buf
+}
+
+// ── 以下命令此前在 HTTP 上够不着 ──
+//
+// 内核的 agent scope 白名单有 13 条命令,而网关固定形状的入口只覆盖 3 条。
+// 通用入口 POST /agent/exec 打通了其余的,这里补上它们的规范编码。
+//
+// 其中 ScheduleCancel 对做市是刚需:断线时报价留在簿上被单边吃穿,
+// 是做市商最怕的场景,而这个机制在内核里本来就是现成的。
+
+// EncodeScheduleCancel 断线保护(dead man's switch)。
+//
+// 布局:tag | account u32 | triggerMs u64 | nowMs u64
+//
+// triggerMs 到期时撤销该账户**全部**挂单/条件单/TWAP;传 0 清除开关。
+// 它是**绝对时刻**不是相对时长 —— 内核不读时钟,由命令携带。
+// 做市的用法是每轮报价顺手往后续一次,断了就自动生效。
+func EncodeScheduleCancel(account uint32, triggerMs, nowMs uint64) []byte {
+	e := &encoder{}
+	e.u8(codecVersion)
+	e.u8(tagScheduleCancel)
+	e.u32(account)
+	e.u64(triggerMs)
+	e.u64(nowMs)
+	return e.buf
+}
+
+// EncodeSetLeverage 自定义杠杆。
+//
+// 布局:tag | account u32 | market u16 | customImfPpm u32
+//
+// 只能**调高**保证金要求(降杠杆):低于市场基础 IMF 会被拒。
+// 注意它只抬高 IMR,不影响 MMR —— 所以改杠杆不会把健康账户推进可清算区间。
+func EncodeSetLeverage(account uint32, market uint16, customImfPpm uint32) []byte {
+	e := &encoder{}
+	e.u8(codecVersion)
+	e.u8(tagSetLeverage)
+	e.u32(account)
+	e.u16(market)
+	e.u32(customImfPpm)
+	return e.buf
+}
+
+// EncodePlaceOrder 单张下单。
+//
+// 布局:tag | account u32 | market u16 | side u8 | price u32 | lots u64
+//
+//	| tif u8 | reduceOnly u8 | goodTilMs u64 | nowMs u64 | router u32 | routerFeePpm u32
+//
+// 比 BatchPlace 的单项多了 goodTilMs(挂单过期时刻)与 router 两个字段 ——
+// 批量那条走不了带过期的单,需要 GTT 时用这个。
+func EncodePlaceOrder(account uint32, market uint16, side Side, price uint32, lots uint64,
+	tif TimeInForce, reduceOnly bool, goodTilMs, nowMs uint64, router, routerFeePpm uint32) []byte {
+	e := &encoder{}
+	e.u8(codecVersion)
+	e.u8(tagPlaceOrder)
+	e.u32(account)
+	e.u16(market)
+	e.u8(byte(side))
+	e.u32(price)
+	e.u64(lots)
+	e.u8(byte(tif))
+	e.boolean(reduceOnly)
+	e.u64(goodTilMs)
+	e.u64(nowMs)
+	e.u32(router)
+	e.u32(routerFeePpm)
+	return e.buf
+}
+
+// EncodeModifyOrder 改单 = **撤旧建新,非原子**。
+//
+// 布局:tag | account u32 | OrderId u64 | price u32 | lots u64 | tif u8 | reduceOnly u8
+//
+//	| goodTilMs u64 | nowMs u64
+//
+// 关键后果是**丢失时间优先**:同价位上原本排在前面的单,改完排到后面。
+// 这不是实现瑕疵而是语义 —— 做市要保住队列位置就别用改单,用 BatchReplace 整轮换。
+func EncodeModifyOrder(account uint32, order OrderID, price uint32, lots uint64,
+	tif TimeInForce, reduceOnly bool, goodTilMs, nowMs uint64) []byte {
+	e := &encoder{}
+	e.u8(codecVersion)
+	e.u8(tagModifyOrder)
+	e.u32(account)
+	e.u64(uint64(order))
+	e.u32(price)
+	e.u64(lots)
+	e.u8(byte(tif))
+	e.boolean(reduceOnly)
+	e.u64(goodTilMs)
+	e.u64(nowMs)
+	return e.buf
+}
+
+// EncodeCancelConditional 撤销未触发的条件单。布局同 CancelTwap。
+func EncodeCancelConditional(account uint32, order OrderID) []byte {
+	e := &encoder{}
+	e.u8(codecVersion)
+	e.u8(tagCancelConditional)
+	e.u32(account)
+	e.u64(uint64(order))
+	return e.buf
+}
+
+// EncodeCancelTwap 撤销 TWAP 母单:已成交的留下,未执行的切片彻底停掉。
+func EncodeCancelTwap(account uint32, order OrderID) []byte {
+	e := &encoder{}
+	e.u8(codecVersion)
+	e.u8(tagCancelTwap)
 	e.u32(account)
 	e.u64(uint64(order))
 	return e.buf

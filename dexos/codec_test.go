@@ -60,6 +60,17 @@ func TestGoldenCanonicalEncoding(t *testing.T) {
 			[]OrderID{NewOrderID(1, 8)}, nil),
 		"batch_replace_orders_only": EncodeBatchReplace(2, 5, nil,
 			[]BatchOrder{{Market: 1, Side: Sell, Price: 100, Lots: 1, TIF: GTC}}),
+
+		// 通用 /agent/exec 打通的那批
+		"schedule_cancel":       EncodeScheduleCancel(5, 1700000060000, 1700000000000),
+		"schedule_cancel_clear": EncodeScheduleCancel(5, 0, 1),
+		"set_leverage":          EncodeSetLeverage(6, 2, 200000),
+		"place_order": EncodePlaceOrder(3, 0, Sell, 50100, 7, IOC, true,
+			1700000099000, 1700000000000, 9, 250),
+		"modify_order": EncodeModifyOrder(3, NewOrderID(0, 11), 49950, 4, GTC, false,
+			1700000500000, 1700000000001),
+		"cancel_conditional": EncodeCancelConditional(3, NewOrderID(1, 77)),
+		"cancel_twap":        EncodeCancelTwap(3, NewOrderID(1, 78)),
 	}
 
 	seen := 0

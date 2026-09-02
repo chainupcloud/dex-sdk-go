@@ -112,6 +112,15 @@ func main() {
 		fmt.Printf("批量撤单 → %d 条事件 %s\n", len(ev), kinds(ev))
 	}
 
+	// 7b) 断线保护(dead man's switch)—— 经通用入口 /agent/exec。
+	//     做市必备:断线时报价留在簿上被单边吃穿,是最怕的场景。
+	//     正常跑时每轮报价顺手往后续一次,挂了就自动全撤。
+	an, err = c.AgentNonce(ctx, uint32(*account), api.Address())
+	must(err, "读 agent nonce")
+	ev, err = c.ScheduleCancel(ctx, api, uint32(*account), time.Now().Add(30*time.Second), an)
+	must(err, "设置断线保护")
+	fmt.Printf("断线保护 → %d 条事件 %s\n", len(ev), kinds(ev))
+
 	// 8) 撤销授权。撤完 agent 立刻失效 —— 是全局失效,不是标记过期。
 	mn, err = c.NextNonce(ctx, uint32(*account))
 	must(err, "读 master nonce")
