@@ -24,9 +24,19 @@ import (
 //
 //	{"seq": 12345, "kind": "Fill", "data": {...}}
 //
-// seq 是内核事件序号,**单调递增且无洞**。断线重连后若新的首条 seq 不等于
-// 上次 +1,说明中间有事件没收到 —— SDK 把这个差值报出来(见 Stream.Gap),
-// 由调用方决定是补拉快照还是接受。
+// **seq 是 Raft 日志序号,不是逐事件计数器。**同一条命令产出的多个事件共享同一个
+// seq(实测一条 BatchCancel 的 22 条 OrderCanceled 全是同一个 seq),而没有产生
+// 事件的日志条目会让它跳号。所以它只保证**非递减**,既不连续也不唯一 ——
+// 拿 seq 做丢帧检测会疯狂误报,而且**根本区分不出**「跳号是因为无事件的日志」
+// 还是「因为丢了帧」。
+//
+// 丢帧由服务端**显式下发**:
+//
+//	{"kind": "Lagged", "dropped": 128}
+//
+// 收到它意味着广播通道积压、中间那些事件永远拿不到了 —— 本地的持仓/盘口镜像
+// 已不可信,必须重拉快照。对做市这是正确性问题不是性能问题:丢一条自己的 Fill,
+// 之后就一直拿着错的仓位报价,而业务层完全看不出来。
 
 // Event 一条事件。
 type Event struct {
@@ -38,18 +48,21 @@ type Event struct {
 // Stream 事件流订阅。
 type Stream struct {
 	Events <-chan Event
-	// Gap 在检测到 seq 不连续时收到一条 (期望, 实际)。
-	// 收到它意味着**丢了事件**,持仓/盘口的本地镜像已不可信,应当重新拉快照。
-	Gap <-chan [2]uint64
+	// Lost 在服务端报告丢帧时收到丢弃条数。
+	//
+	// 这是**唯一**可靠的丢帧信号 —— seq 推不出来(见上)。收到即应重拉快照
+	// (/risk/:id、/book/:m),本地镜像已不可信。
+	Lost <-chan uint64
 	// Err 在流终止时收到原因;之后 Events 关闭。
 	Err <-chan error
 }
 
 // Subscribe 连接事件流。ctx 取消即断开。
 //
-// 自动重连:断线后按 backoff 重试,直到 ctx 取消。重连成功后若 seq 出现跳跃,
-// 会往 Gap 里投一条 —— 不静默吞掉,因为「少收了几条成交」对做市是致命的,
-// 而它在业务层完全看不出来。
+// 自动重连:断线后按指数退避重试(250ms → 8s 封顶),直到 ctx 取消。
+//
+// **重连本身就意味着丢帧**:断开期间的事件不会补发。所以重连后同样应当重拉快照,
+// 与收到 Lost 时的处置一样。
 func (c *Client) Subscribe(ctx context.Context) (*Stream, error) {
 	u, err := url.Parse(c.BaseURL)
 	if err != nil {
@@ -66,7 +79,7 @@ func (c *Client) Subscribe(ctx context.Context) (*Stream, error) {
 	u.Path = strings.TrimSuffix(u.Path, "/") + "/ws"
 
 	events := make(chan Event, 1024)
-	gaps := make(chan [2]uint64, 16)
+	lost := make(chan uint64, 16)
 	errc := make(chan error, 1)
 
 	go func() {
@@ -111,10 +124,23 @@ func (c *Client) Subscribe(ctx context.Context) (*Stream, error) {
 				if json.Unmarshal(raw, &ev) != nil {
 					continue // 解不动的单条跳过,不因为一条坏消息断整条流
 				}
-				if haveLast && ev.Seq != lastSeq+1 {
+				if ev.Kind == "Lagged" {
+					var d struct {
+						Dropped uint64 `json:"dropped"`
+					}
+					_ = json.Unmarshal(raw, &d)
 					select {
-					case gaps <- [2]uint64{lastSeq + 1, ev.Seq}:
-					default: // Gap 通道满了也不阻塞事件投递
+					case lost <- d.Dropped:
+					default: // 通道满也不阻塞事件投递:丢帧信号可以合并,事件不能堵
+					}
+					continue
+				}
+				// seq 只保证非递减。倒退是**服务端 bug**,不是丢帧 —— 单独报出来,
+				// 因为它意味着事件顺序不可信,比丢帧更严重。
+				if haveLast && ev.Seq < lastSeq {
+					select {
+					case lost <- 0: // 0 = 顺序异常,不是丢了 N 条
+					default:
 					}
 				}
 				lastSeq, haveLast = ev.Seq, true
@@ -129,5 +155,5 @@ func (c *Client) Subscribe(ctx context.Context) (*Stream, error) {
 		}
 	}()
 
-	return &Stream{Events: events, Gap: gaps, Err: errc}, nil
+	return &Stream{Events: events, Lost: lost, Err: errc}, nil
 }
