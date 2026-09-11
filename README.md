@@ -65,7 +65,7 @@ go get github.com/chainupcloud/dex-sdk-go
 
 ```go
 ctx := context.Background()
-c, cfg, err := dexos.Connect(ctx, "http://127.0.0.1:8080", 1)  // 1 = 本 SDK 期望的 codec 版本
+c, cfg, err := dexos.Connect(ctx, "http://127.0.0.1:8080")
 if err != nil { log.Fatal(err) }
 fmt.Println("链", cfg.ChainID, "入金地址", cfg.Deposit.SystemGateway)
 ```
@@ -78,8 +78,9 @@ fmt.Println("链", cfg.ChainID, "入金地址", cfg.Deposit.SystemGateway)
 | 入金地址(运营方重新部署过合约) | 钱打到没人监听的合约:链上扣了,账户里没有 |
 | codec 版本 | 规范编码变了,agent 代执行的哈希对不上,同样是一片 401 |
 
-`Connect` 的第二个参数就是为最后一项准备的:版本对不上**当场失败**,
-而不是让你在生产里对着 401 查半天。不想核对传 0。
+最后一项 `Connect` 会自动挡下:它拿节点的 `codecVer` 和 **SDK 自己实现的版本**
+(`dexos.CodecVersion`)比对,对不上**当场失败**,而不是让你在生产里对着 401 查半天。
+确实要跳过核对(例如只读行情、不签任何东西)用 `ConnectUnchecked`。
 
 仍然可以手动构造(知道自己在做什么时):
 
@@ -94,7 +95,7 @@ c := dexos.NewClient("http://127.0.0.1:8080", 31337)
 test 环境接以太坊 **Sepolia** 测试网,合约与账本都是真的,只是钱不值钱。
 
 ```go
-c, cfg, err := dexos.Connect(ctx, "http://<部署机 IP>:17807", 1)
+c, cfg, err := dexos.Connect(ctx, "http://<部署机 IP>:17807")
 ```
 
 | 参数 | 值 | 怎么来的 |

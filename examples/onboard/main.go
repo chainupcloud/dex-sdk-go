@@ -22,7 +22,7 @@ func main() {
 	ctx := context.Background()
 
 	// ── 1) 连接:参数自动发现 ──
-	c, cfg, err := dexos.Connect(ctx, *url, 1)
+	c, cfg, err := dexos.Connect(ctx, *url)
 	if err != nil {
 		log.Fatal(err)
 	}

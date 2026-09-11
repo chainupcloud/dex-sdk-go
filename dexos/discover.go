@@ -86,15 +86,32 @@ func NewClientFromConfig(baseURL string, cfg *Config) *Client {
 // 指纹核对不是洁癖:codec 版本决定**规范编码**,而 agent 代执行签的是编码后的
 // 哈希。版本对不上时每一笔都会被拒,错误信息却只有 401 —— 在这里当场失败,
 // 比在生产里查半天好。
-func Connect(ctx context.Context, baseURL string, wantCodecVer uint32) (*Client, *Config, error) {
+//
+// 比对的是 [CodecVersion] —— **本 SDK 自己实现的那个版本**,不需要调用方传。
+// 让调用方填一个 SDK 已经知道的数字,只会把魔数抄进每份接入文档,
+// 而抄错的后果恰恰就是这个函数要防的那件事。
+func Connect(ctx context.Context, baseURL string) (*Client, *Config, error) {
 	cfg, err := Discover(ctx, baseURL)
 	if err != nil {
 		return nil, nil, err
 	}
-	if wantCodecVer != 0 && cfg.CodecVer != wantCodecVer {
+	if cfg.CodecVer != CodecVersion {
 		return nil, nil, fmt.Errorf(
-			"dexos: codec 版本不匹配(节点 v%d,本 SDK 期望 v%d)—— 规范编码可能已变,"+
-				"继续下去每笔签名都会被拒", cfg.CodecVer, wantCodecVer)
+			"dexos: codec 版本不匹配(节点 v%d,本 SDK 实现 v%d)—— 规范编码已变,"+
+				"继续下去每笔签名都会被拒;请升级 SDK 或确认连对了节点",
+			cfg.CodecVer, CodecVersion)
+	}
+	return NewClientFromConfig(baseURL, cfg), cfg, nil
+}
+
+// ConnectUnchecked 跳过 codec 核对。
+//
+// 只在你**明确知道**版本不同但仍要连接时用(例如只读行情,不签任何东西)。
+// 要签名就别用它 —— 编码对不上时每一笔都会被拒,而错误信息只有 401。
+func ConnectUnchecked(ctx context.Context, baseURL string) (*Client, *Config, error) {
+	cfg, err := Discover(ctx, baseURL)
+	if err != nil {
+		return nil, nil, err
 	}
 	return NewClientFromConfig(baseURL, cfg), cfg, nil
 }

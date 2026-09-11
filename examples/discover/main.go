@@ -24,7 +24,7 @@ func main() {
 	ctx := context.Background()
 
 	// 一行拿到全部连接参数,并核对 codec 指纹
-	c, cfg, err := dexos.Connect(ctx, *url, 1)
+	c, cfg, err := dexos.Connect(ctx, *url)
 	if err != nil {
 		log.Fatal(err)
 	}

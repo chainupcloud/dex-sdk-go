@@ -27,6 +27,11 @@ import "encoding/binary"
 // 这正是金样对拍抓出来的第一个 bug,靠比对结构体定义永远发现不了。
 const codecVersion byte = 0x01
 
+// CodecVersion 本 SDK 实现的规范编码版本,与上面编码时写入的首字节**同源**。
+// [Connect] 用它和节点的 /config 比对 —— 两者分开维护迟早会走散,
+// 而走散的表现是签名一律被拒。
+const CodecVersion uint32 = uint32(codecVersion)
+
 const (
 	tagPlaceOrder        byte = 0x05
 	tagCancelOrder       byte = 0x06
