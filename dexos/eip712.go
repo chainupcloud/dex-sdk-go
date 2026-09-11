@@ -53,10 +53,15 @@ func wordAddr(a Address) []byte {
 	return w[:]
 }
 
-// Domain EIP-712 域。VerifyingContract 恒为零地址 —— dex-os 的验签在 STF 内,
-// 没有链上验证合约,填零地址是刻意的(与前端 ethers.ZeroAddress 一致)。
+// Domain EIP-712 域。
+//
+// VerifyingContract 当前恒为零地址 —— dex-os 的验签在 STF 内,没有链上验证合约,
+// 填零地址是刻意的(与前端 ethers.ZeroAddress 一致)。但它**是个字段而不是常量**:
+// 服务端的域里本来就有这一项,哪天它变成真地址,写死会让每一笔签名静默被拒,
+// 而错误信息只有 401。零值就是零地址,老用法不受影响。
 type Domain struct {
-	ChainID uint64
+	ChainID           uint64
+	VerifyingContract Address
 }
 
 func (d Domain) separator() []byte {
@@ -65,7 +70,7 @@ func (d Domain) separator() []byte {
 		Keccak256([]byte(domainName)),
 		Keccak256([]byte(domainVersion)),
 		wordU64(d.ChainID),
-		wordAddr(Address{}),
+		wordAddr(d.VerifyingContract),
 	)
 }
 

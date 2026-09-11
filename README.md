@@ -12,6 +12,7 @@ go get github.com/chainupcloud/dex-sdk-go
 | 文档 | 什么时候读 |
 |---|---|
 | [接入指南](docs/GETTING-STARTED.md) | **从这里开始** —— 从零到第一笔成交,每步都给出怎么确认成功 |
+| [`examples/discover`](examples/discover/main.go) | 只给一个 URL 完成 发现 → 授权 → 下单 |
 | [做市接入](docs/MARKET-MAKING.md) | 高频报价:报价循环、原子换单、丢帧处置、错误恢复 |
 | [REST 参考](docs/API.md) | 接口字段与拒因表 |
 | [WebSocket 参考](docs/WEBSOCKET.md) | 事件流协议、事件目录、时延实测 |
@@ -53,6 +54,91 @@ go get github.com/chainupcloud/dex-sdk-go
 | `BatchPlace` / `BatchCancel` / `BatchReplace` | **agent 地址**自己的 | `client.AgentNonce(ctx, master, agentAddr)` |
 
 混用得到的是 `NonceMismatch`,错误信息里看不出是哪个计数器错了 —— 这是最常见的接入坑。
+
+---
+
+## 连接
+
+**只需要一个网关地址。** 其余参数(chainId、EIP-712 域、入金地址、token 映射)
+由 `Connect` 向 `/config` 自动发现:
+
+```go
+ctx := context.Background()
+c, cfg, err := dexos.Connect(ctx, "http://127.0.0.1:8080", 1)  // 1 = 本 SDK 期望的 codec 版本
+if err != nil { log.Fatal(err) }
+fmt.Println("链", cfg.ChainID, "入金地址", cfg.Deposit.SystemGateway)
+```
+
+为什么不建议把这些值写死在自己的配置里 —— **填错的后果都很隐蔽**:
+
+| 填错什么 | 你会看到什么 |
+|---|---|
+| `chainId` | 每一笔签名 401,而盘口、K 线、持仓(只读)**全部正常** —— 看起来像「只有下单坏了」 |
+| 入金地址(运营方重新部署过合约) | 钱打到没人监听的合约:链上扣了,账户里没有 |
+| codec 版本 | 规范编码变了,agent 代执行的哈希对不上,同样是一片 401 |
+
+`Connect` 的第二个参数就是为最后一项准备的:版本对不上**当场失败**,
+而不是让你在生产里对着 401 查半天。不想核对传 0。
+
+仍然可以手动构造(知道自己在做什么时):
+
+```go
+c := dexos.NewClient("http://127.0.0.1:8080", 31337)
+```
+
+---
+
+## 连接 test 环境
+
+test 环境接以太坊 **Sepolia** 测试网,合约与账本都是真的,只是钱不值钱。
+
+```go
+c, cfg, err := dexos.Connect(ctx, "http://<部署机 IP>:17807", 1)
+```
+
+| 参数 | 值 | 怎么来的 |
+|---|---|---|
+| 网关地址 | `http://<部署机 IP>:17807` | 唯一需要别人告诉你的 |
+| chainId | `11155111`(Sepolia) | `Connect` 自动发现 |
+| 入金系统地址 | 随部署变化 | `cfg.Deposit.SystemGateway` |
+| USDC | 随部署变化 | `cfg.Deposit.Tokens[0].ERC20` |
+
+**别把地址抄进代码。** 运营方每次重建环境都会重新部署合约,地址随之改变 ——
+抄下来的那份很快就是过期的,而往过期的系统地址打钱是收不回来的。
+
+### 拿到账户与 API 钱包
+
+1. 浏览器打开 `http://<部署机 IP>:17807/app`,连接你自己的钱包
+2. 领水龙头拿 Sepolia ETH(gas)→ 铸 USDC → 入金
+
+   入金就是往系统地址发一笔**裸 `transfer`**,没有桥合约、没有 deposit 方法。
+   中继观察到之后,内核**自动开户**并把你的 EVM 地址绑上去 —— 没有注册接口,
+   也没有审批,付钱即开户。
+
+3. 页面里打开「API 钱包」:点「生成」→ 命名 → 选有效期 → 主钱包签一次授权
+
+   私钥**只显示这一次**,页面同时给出可直接粘贴的接入代码(含你的账户号)。
+   私钥不上传、不写入本地存储,刷新即丢失 —— 丢了重新生成一个再授权即可。
+
+4. 查自己的内核账户号:
+
+   ```bash
+   curl http://<部署机 IP>:17807/account/by-address/0x<你的地址>
+   # → {"accountId":7,"collateral":"50000000000",...}
+   ```
+
+   入金前查会返回 `address not registered`,那是正常的,不是错误。
+
+### 三个容易踩的
+
+- **没入金就下单** → `HTTP 400 {"error":"unknown trader (deposit first)"}`。
+  账户是入金时懒创建的,没有账户就没有可授权、可交易的对象。
+- **账户号是按入金先后分配的**,不能指定。低位账户号可能是保险基金、手续费账户、
+  做市账户 —— 后者由运营方的做市程序驱动,**它会周期性撤光该账户的全部挂单**。
+  拿到别人的账户号交易会看到「单挂上了又消失」,那不是 bug。
+- **入金到账时间随终局性配置变化**:`head` 是秒级,`finalized` 要等两个 epoch
+  (Sepolia 约 13 分钟)。`cfg.FinalityMode` 会告诉你当前是哪种,
+  别把「还没到账」当成「入金失败」。
 
 ---
 

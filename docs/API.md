@@ -21,6 +21,29 @@
 {"pkg":"0.1.0","snapshot_ver":19,"codec_ver":1,"build_id":"dev"}
 ```
 
+### `GET /config`
+
+**连接参数发现。** 有了它,接入方只需要知道一个网关地址 —— SDK 的
+`dexos.Connect` / `dexos.Discover` 就是读这里。
+
+```json
+{
+  "chainId": 11155111,
+  "domain": {"name":"dex-os","version":"1","verifyingContract":"0x0000…0000"},
+  "deposit": {
+    "systemGateway": "0x5E34…5d68",
+    "tokens": [{"token":0,"erc20":"0xc607…1c86","extraWeiDecimals":0,"finalized":true}]
+  },
+  "codecVer": 1, "snapshotVer": 19, "finalityMode": "head"
+}
+```
+
+`token` 映射取自**内核**(`LinkToken` 写进状态机,入金识别按它判定),不是另存的副本。
+
+`deposit.systemGateway` **可能缺失** —— 它是宿主/中继层概念,内核不认识它,
+只有部署信息被注入网关时才给得出。缺失意味着「这个节点没告诉你」,
+而不是「不需要入金地址」:此时应当向运营方索要,**不要猜**。
+
 ### `GET /markets`
 
 ```json
@@ -203,7 +226,8 @@ nonce 用 **agent 自己的**(`/agents/:master` 里的 `nextNonce`)。
 
 ## 接入检查清单
 
-1. `GET /version` 核 `codec_ver` —— 对不上先停,别去调签名
+1. `GET /config` 取连接参数并核 `codecVer` —— 对不上先停,别去调签名
+   (`GET /version` 也给同样的指纹,但不含链与合约信息)
 2. `chainId` 与节点一致,否则域分隔符不同,签名一律被拒
 3. 分清两个 nonce:master 的用于授权/撤销,agent 的用于交易
 4. 撤销后重新授权,agent nonce **不重置**,必须重读
