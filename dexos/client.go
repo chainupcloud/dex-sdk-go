@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -242,4 +243,46 @@ type EventEnvelope struct {
 type writeResp struct {
 	Status string          `json:"status"`
 	Events []EventEnvelope `json:"events"`
+}
+
+// AccountRef 地址 → 内核账户的映射结果。
+type AccountRef struct {
+	AccountID    uint32 `json:"accountId"`
+	Collateral   string `json:"collateral"`
+	NC           string `json:"nc"`
+	IMR          string `json:"imr"`
+	Withdrawable string `json:"withdrawable"`
+	NextNonce    uint64 `json:"nextNonce"`
+}
+
+// ErrNotRegistered 这个地址还没有内核账户。
+//
+// **不是错误状态,是正常的起点。** 账户在第一次入金时由状态机懒创建 ——
+// 没有注册接口,也没有审批。看到它就是「还没入过金」。
+var ErrNotRegistered = errors.New("dexos: 地址尚未注册内核账户(先入金)")
+
+// AccountByAddress 按 EVM 地址查内核账户号。
+//
+// 接入的第一步:你有钱包地址,但下单要填的是**内核账户号**,两者不是一回事。
+// 账户号按入金先后分配,不能指定,也不能从地址推导 —— 只能查。
+func (c *Client) AccountByAddress(ctx context.Context, addr string) (*AccountRef, error) {
+	var r AccountRef
+	err := c.do(ctx, http.MethodGet, "/account/by-address/"+addr, nil, &r)
+	if err != nil {
+		var ae *APIError
+		// 网关对未注册地址回 404/400 —— 转成具名错误,免得调用方去比对报文字符串
+		if errors.As(err, &ae) && (ae.Status == http.StatusNotFound || ae.Status == http.StatusBadRequest) {
+			return nil, ErrNotRegistered
+		}
+		return nil, err
+	}
+	return &r, nil
+}
+
+// SubaccountsOf 某 owner 名下的全部账户(主账户 + 子账户)。
+func (c *Client) SubaccountsOf(ctx context.Context, owner string) ([]uint32, error) {
+	var r struct {
+		Subaccounts []uint32 `json:"subaccounts"`
+	}
+	return r.Subaccounts, c.do(ctx, http.MethodGet, "/account/by-owner/"+owner, nil, &r)
 }

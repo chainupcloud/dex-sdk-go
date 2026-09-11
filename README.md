@@ -12,6 +12,7 @@ go get github.com/chainupcloud/dex-sdk-go
 | 文档 | 什么时候读 |
 |---|---|
 | [接入指南](docs/GETTING-STARTED.md) | **从这里开始** —— 从零到第一笔成交,每步都给出怎么确认成功 |
+| [`examples/onboard`](examples/onboard/main.go) | **从零接入**:生成地址 → 找账户 → 连接 → 交易 |
 | [`examples/discover`](examples/discover/main.go) | 只给一个 URL 完成 发现 → 授权 → 下单 |
 | [做市接入](docs/MARKET-MAKING.md) | 高频报价:报价循环、原子换单、丢帧处置、错误恢复 |
 | [REST 参考](docs/API.md) | 接口字段与拒因表 |
@@ -105,6 +106,57 @@ c, cfg, err := dexos.Connect(ctx, "http://<部署机 IP>:17807", 1)
 
 **别把地址抄进代码。** 运营方每次重建环境都会重新部署合约,地址随之改变 ——
 抄下来的那份很快就是过期的,而往过期的系统地址打钱是收不回来的。
+
+### 开发者从零接入的四步
+
+```bash
+go run ./examples/onboard -url http://<部署机 IP>:17807
+```
+
+**1. 地址** —— 用你已有的钱包,或让 SDK 生成一个:
+
+```go
+me, _ := dexos.GenerateSigner()          // 本地生成,私钥不出本进程
+fmt.Println(me.Address().Hex(), me.PrivateKeyHex())
+```
+
+**2. 入金** —— 往 `cfg.Deposit.SystemGateway` 发一笔 USDC 的**裸 `transfer`**。
+
+没有桥合约、没有 `deposit()` 方法。中继观察到之后,内核**自动开户**并绑定你的
+EVM 地址 —— 没有注册接口,也没有审批,付钱即开户。
+
+> **这一步 SDK 做不了。** 本 SDK 只管交易所 API,不含 EVM 能力(不签链上交易、
+> 不发 ERC20 transfer)。用前端页面、钱包,或 `go-ethereum` 自己发。
+
+**3. 找账户** —— 钱包地址 ≠ 内核账户号,两者不能互推,只能查:
+
+```go
+acc, err := c.AccountByAddress(ctx, me.Address().Hex())
+if errors.Is(err, dexos.ErrNotRegistered) {
+    // 还没入金。这不是错误,是正常起点。
+}
+fmt.Println("内核账户", acc.AccountID)
+```
+
+账户号**按入金先后分配**,不能指定。子账户用 `c.SubaccountsOf(ctx, addr)` 列。
+
+**4. 授权 API 钱包,然后交易**
+
+两条路都行:
+
+- **浏览器**(推荐给人用):`http://<部署机 IP>:17807/app` → 「API 钱包」→ 生成 →
+  命名 → 选有效期 → 主钱包签一次。私钥只显示一次,页面同时给出可粘贴的接入代码。
+- **代码**(推荐给自动化):见下方「快速开始」,`ApproveAgent` 一次即可。
+
+```go
+api, _ := dexos.NewSigner(apiWalletPrivHex)   // 上一步拿到的
+n, _ := c.AgentNonce(ctx, acc.AccountID, api.Address())
+c.BatchPlace(ctx, api, acc.AccountID, []dexos.BatchOrder{
+    {Market: 0, Side: dexos.Buy, Price: 70000, Lots: 1, TIF: dexos.GTC},
+}, n)
+```
+
+之后主账号私钥就可以收起来了 —— 日常交易只用 API 钱包,它**动不了钱**。
 
 ### 拿到账户与 API 钱包
 
