@@ -12,7 +12,8 @@ go get github.com/chainupcloud/dex-sdk-go
 | 文档 | 什么时候读 |
 |---|---|
 | [接入指南](docs/GETTING-STARTED.md) | **从这里开始** —— 从零到第一笔成交,每步都给出怎么确认成功 |
-| [`examples/onboard`](examples/onboard/main.go) | **从零接入**:生成地址 → 找账户 → 连接 → 交易 |
+| [`examples/session`](examples/session/main.go) | **最小接入**:URL + 一把 API 钱包私钥,下单撤单 |
+| [`examples/onboard`](examples/onboard/main.go) | 从零接入:生成地址 → 找账户 → 连接 → 交易 |
 | [`examples/discover`](examples/discover/main.go) | 只给一个 URL 完成 发现 → 授权 → 下单 |
 | [做市接入](docs/MARKET-MAKING.md) | 高频报价:报价循环、原子换单、丢帧处置、错误恢复 |
 | [REST 参考](docs/API.md) | 接口字段与拒因表 |
@@ -58,10 +59,54 @@ go get github.com/chainupcloud/dex-sdk-go
 
 ---
 
-## 连接
+## 初始化
 
-**只需要一个网关地址。** 其余参数(chainId、EIP-712 域、入金地址、token 映射)
-由 `Connect` 向 `/config` 自动发现:
+**一个网关地址 + 一把 API 钱包私钥,没有别的。**
+
+```go
+s, err := dexos.New(ctx, "http://<部署机 IP>:17807", "0x<API 钱包私钥>")
+if err != nil { log.Fatal(err) }
+
+s.Place(ctx, dexos.BatchOrder{Market: 0, Side: dexos.Buy, Price: 70000, Lots: 1, TIF: dexos.GTC})
+s.Replace(ctx, 0, oldSeqs, newQuotes)      // 原子换单
+```
+
+API 钱包私钥从前端拿:`/app` →「API 钱包」→ 生成 → 主钱包签一次授权,
+私钥只显示一次。
+
+对照 Hyperliquid:
+
+```python
+# HL:私钥 + 主钱包地址,两样
+exchange = Exchange(Account.from_key(API_KEY), URL, account_address=MAIN_ADDR)
+```
+
+少那一个参数不是为了短。**账户号是能推出来的** —— agent 地址在状态机里唯一绑定
+一个 master(绑第二个会被 `AgentAlreadyBound` 拒),所以让人再传一遍只是给抄错
+留位置,而抄错的表现是订单落到别人账户上(若那个号恰好存在)或一片看不出原因
+的拒绝。
+
+`New` 替你做掉三件容易错的事:
+
+| | 做错了会怎样 |
+|---|---|
+| 向 `/config` 发现链参数,核对 codec 版本 | chainId 填错 → 每笔签名 401,而盘口/K 线全正常,像「只有下单坏了」 |
+| 由 API 钱包地址反查它代表哪个账户 | 账户号抄错 → 订单落到别人账户,或一片拒绝 |
+| 读取并维护 **agent 自己的** nonce | 与 master 的 nonce 混用 → `NonceMismatch`,而错误信息看不出是哪个计数器 |
+
+`Session` 只在一处需要你留心:**同一把 API 钱包不要多进程并发**。nonce 是单调
+计数器,两个进程会互相打架。要并发就给每个进程一把自己的 API 钱包 ——
+同一个账户可以授权多把。
+
+需要更低层的控制(自己管 nonce、代多个账户操作)时,`Session.Client` 就是原来的
+`*Client`,所有方法照旧可用。
+
+---
+
+## 连接(低层)
+
+只要连接、不要绑定身份时用 `Connect`。其余参数(chainId、EIP-712 域、入金地址、
+token 映射)同样由 `/config` 自动发现:
 
 ```go
 ctx := context.Background()

@@ -44,6 +44,18 @@
 只有部署信息被注入网关时才给得出。缺失意味着「这个节点没告诉你」,
 而不是「不需要入金地址」:此时应当向运营方索要,**不要猜**。
 
+### `GET /agent/:addr`
+
+这把 API 钱包代表哪个账户。`dexos.New` 用它把身份补全 —— 所以接入方**不需要
+被告知内核账户号**。
+
+```json
+{"agent":"0xd864…d001","master":4,"validUntilMs":"1789…","expired":false,"nextNonce":3}
+```
+
+未授权或已撤销一律 **404**(两者在这里是同一件事:这把钥匙现在不代表任何人)。
+`nextNonce` 是 **agent 地址自己的**计数器,与 master 的 nonce 无关。
+
 ### `GET /markets`
 
 ```json
