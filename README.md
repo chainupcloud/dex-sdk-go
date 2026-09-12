@@ -50,12 +50,15 @@ go get github.com/chainupcloud/dex-sdk-go
 
 ### 两个 nonce,别混
 
+用 `Session` 的话**不用管这一节** —— 它替你维护。自己拿 `Client` 直接调时才相关:
+
 | 操作 | 用谁的 nonce | 怎么读 |
 |---|---|---|
 | `ApproveAgent` / `RevokeAgent` | **master 账户**的 | `client.NextNonce(ctx, master)` |
 | `BatchPlace` / `BatchCancel` / `BatchReplace` | **agent 地址**自己的 | `client.AgentNonce(ctx, master, agentAddr)` |
 
-混用得到的是 `NonceMismatch`,错误信息里看不出是哪个计数器错了 —— 这是最常见的接入坑。
+混用得到的是 `NonceMismatch`,错误信息里看不出是哪个计数器错了 —— 这是最常见的
+接入坑,也正是 `Session` 要替你挡掉的东西。
 
 ---
 
@@ -130,8 +133,12 @@ fmt.Println("链", cfg.ChainID, "入金地址", cfg.Deposit.SystemGateway)
 仍然可以手动构造(知道自己在做什么时):
 
 ```go
-c := dexos.NewClient("http://127.0.0.1:8080", 31337)
+c := dexos.NewClient("http://127.0.0.1:8080", chainID)   // chainID 要与节点一致
 ```
+
+**别把这里的数字抄成常量。** 不同部署的链不同(本地 anvil 是 31337,test 档接
+Sepolia 是 11155111),而填错的表现是每笔签名 401、行情却全正常 —— 看起来像
+「只有下单坏了」。拿不准就用 `Connect`。
 
 ---
 
@@ -195,14 +202,16 @@ fmt.Println("内核账户", acc.AccountID)
 - **代码**(推荐给自动化):见下方「快速开始」,`ApproveAgent` 一次即可。
 
 ```go
-api, _ := dexos.NewSigner(apiWalletPrivHex)   // 上一步拿到的
-n, _ := c.AgentNonce(ctx, acc.AccountID, api.Address())
-c.BatchPlace(ctx, api, acc.AccountID, []dexos.BatchOrder{
-    {Market: 0, Side: dexos.Buy, Price: 70000, Lots: 1, TIF: dexos.GTC},
-}, n)
+// 有了 API 钱包私钥,前面第 3 步的账户号其实也不用自己查了 ——
+// Session 会反查出来。这四步里真正必须人工做的只有「入金」那一步。
+s, _ := dexos.New(ctx, url, apiWalletPrivHex)
+s.Place(ctx, dexos.BatchOrder{Market: 0, Side: dexos.Buy, Price: 70000, Lots: 1, TIF: dexos.GTC})
 ```
 
 之后主账号私钥就可以收起来了 —— 日常交易只用 API 钱包,它**动不了钱**。
+
+> 上面第 3 步的 `AccountByAddress` 仍然有用:**入金之后、授权之前**你需要它来确认
+> 账户已经建起来。授权之后身份就由 API 钱包自己带着了。
 
 ### 拿到账户与 API 钱包
 
@@ -243,7 +252,22 @@ c.BatchPlace(ctx, api, acc.AccountID, []dexos.BatchOrder{
 ## 快速开始
 
 ```go
-c := dexos.NewClient("http://127.0.0.1:8080", 31337)
+s, _ := dexos.New(ctx, "http://127.0.0.1:8080", apiWalletPrivHex)
+
+s.Place(ctx, dexos.BatchOrder{
+    Market: 0, Side: dexos.Buy, Price: 117900, Lots: 1, TIF: dexos.PostOnly,
+})
+```
+
+API 钱包私钥从前端拿(`/app` →「API 钱包」→ 生成 → 主钱包签一次)。
+不想用前端、要在代码里完成授权,见下。
+
+### 在代码里授权 API 钱包
+
+授权是**主账号**的动作,用的是 master 的 nonce,所以这一步走低层 `Client`:
+
+```go
+c, _, _ := dexos.Connect(ctx, "http://127.0.0.1:8080")   // 链参数自动发现
 
 // 1) 本地生成 API 钱包。私钥不出本进程,交易所只拿到地址。
 api, _ := dexos.GenerateSigner()
@@ -254,11 +278,8 @@ owner, _ := dexos.NewSigner(masterPrivHex)
 n, _ := c.NextNonce(ctx, master)
 c.ApproveAgent(ctx, owner, master, api.Address(), time.Now().AddDate(0, 6, 0), n)
 
-// 3) 之后主账号密钥就可以收起来了。日常交易只用 api。
-an, _ := c.AgentNonce(ctx, master, api.Address())
-c.BatchPlace(ctx, api, master, []dexos.BatchOrder{
-    {Market: 0, Side: dexos.Buy, Price: 117900, Lots: 1, TIF: dexos.PostOnly},
-}, an)
+// 3) 主账号密钥就可以收起来了。日常交易用 Session,身份与 nonce 都不用再管。
+s, _ := dexos.New(ctx, "http://127.0.0.1:8080", api.PrivateKeyHex())
 ```
 
 完整生命周期(授权 → 下单 → 换单 → 撤单 → 撤销 → 反证)见
