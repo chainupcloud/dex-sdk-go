@@ -156,6 +156,9 @@ ApproveAgent(address owner,uint32 master,address agent,uint64 validUntilMs,uint6
 `validUntilMs` 为 `0` 表示永不过期。nonce 用 **master 账户**的。
 
 同一把 agent 可被**多个账户各自授权**;对同一 (账户, agent) 对重复授权 = 顺延有效期。
+
+注意 agent 的 nonce 按**地址**计、不按账户计:同一把 key 授权给多个账户时,
+这几个账户共用一条 nonce 序列,并行发单会互相踩(报 `NonceMismatch`,与授权无关)。
 拒因:`AgentExpired`(给的有效期已是过去)。
 
 ### `POST /agent/revoke`
@@ -164,7 +167,8 @@ ApproveAgent(address owner,uint32 master,address agent,uint64 validUntilMs,uint6
 RevokeAgent(address owner,uint32 master,address agent,uint64 nonce)
 ```
 
-幂等。撤销是**全局失效**,不是标记过期 —— 撤完该 agent 的任何签名立刻返回 `UnknownAgent`。
+幂等。撤的是 **(agent, master) 这一条**,不是标记过期 —— 撤完该 agent 替**这个账户**签的任何
+东西立刻返回 `UnknownAgent`;它若还被别的账户授权着,那些仍然有效,要各撤一次。
 
 ---
 
