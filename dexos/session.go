@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
+	"strings"
 	"time"
 )
 
@@ -42,11 +44,45 @@ type Session struct {
 // 去前端「API 钱包」里重新生成并授权一把。
 var ErrAgentNotAuthorized = errors.New("dexos: 这把 API 钱包未被授权(去前端重新授权)")
 
-type agentOwnerResp struct {
+// ErrAmbiguousAccount 这把 API 钱包被**多个**账户授权,而调用方没指明代谁。
+//
+// 不替调用方猜:猜错的表现是订单落到另一个子账户上 —— 仓位、保证金、风险
+// 全记在别处,而**没有任何报错**。宁可在初始化这一刻失败,也不要在第 300 笔
+// 成交之后才被人发现。
+//
+// 用 ForAccount 指明:
+//
+//	s, err := dexos.New(ctx, url, apiKey, dexos.ForAccount(7))
+var ErrAmbiguousAccount = errors.New("dexos: 这把 API 钱包被多个账户授权,请用 ForAccount 指明代哪个")
+
+// Grant 一条授权:某个账户授权了这把 API 钱包。
+type Grant struct {
 	Master       uint32 `json:"master"`
 	ValidUntilMs string `json:"validUntilMs"`
 	Expired      bool   `json:"expired"`
-	NextNonce    uint64 `json:"nextNonce"`
+}
+
+type agentOwnerResp struct {
+	// 该 agent 名下的全部授权。**一把 key 可以被多个账户各自授权** ——
+	// 主账户与各个子账户是分别同意的,所以撤销其中一个不影响其余。
+	Grants    []Grant `json:"grants"`
+	NextNonce uint64  `json:"nextNonce"`
+}
+
+// Option 调整 New 的行为。
+type Option func(*newOpts)
+
+type newOpts struct {
+	account    uint32
+	hasAccount bool
+}
+
+// ForAccount 指明这次会话代哪个账户。
+//
+// 只授权了一个账户时不必用它 —— 那种情况下账户是**能推出来的**,让人再传一遍
+// 只是给抄错留位置。被多个账户授权时则必须用,否则 New 返回 ErrAmbiguousAccount。
+func ForAccount(id uint32) Option {
+	return func(o *newOpts) { o.account, o.hasAccount = id, true }
 }
 
 // New 初始化一个交易会话。**这是大多数接入方唯一需要调用的构造函数。**
@@ -57,9 +93,22 @@ type agentOwnerResp struct {
 // 它做三件事,每一件都是接入时容易出错的地方:
 //
 //  1. 向 /config 发现链参数并核对 codec 版本(填错 → 每笔签名 401,而行情正常)
-//  2. 由 API 钱包地址反查它代表哪个账户(不必再被带外告知账户号)
+//  2. 由 API 钱包地址反查它被哪些账户授权(不必再被带外告知账户号)
 //  3. 读取并维护 agent 自己的 nonce(与 master 的 nonce 混用是最常见的坑)
-func New(ctx context.Context, baseURL, apiKeyHex string) (*Session, error) {
+//
+// # 一把 key 被多个账户授权时
+//
+// 主账户与每个子账户是**分别**授权同一把 API 钱包的(状态机按 (账户, agent)
+// 对记账,撤销其中一个不影响其余)。这时账户号就不再是能推出来的,必须指明:
+//
+//	s, err := dexos.New(ctx, url, apiKey, dexos.ForAccount(subAccountID))
+//
+// 不指明会得到 ErrAmbiguousAccount —— 这里刻意不挑一个默认值。
+func New(ctx context.Context, baseURL, apiKeyHex string, opts ...Option) (*Session, error) {
+	var o newOpts
+	for _, f := range opts {
+		f(&o)
+	}
 	agent, err := NewSigner(apiKeyHex)
 	if err != nil {
 		return nil, fmt.Errorf("dexos: API 钱包私钥无法解析:%w", err)
@@ -68,27 +117,81 @@ func New(ctx context.Context, baseURL, apiKeyHex string) (*Session, error) {
 	if err != nil {
 		return nil, err
 	}
-	var o agentOwnerResp
-	if err := c.do(ctx, http.MethodGet, "/agent/"+agent.Address().Hex(), nil, &o); err != nil {
+	var resp agentOwnerResp
+	if err := c.do(ctx, http.MethodGet, "/agent/"+agent.Address().Hex(), nil, &resp); err != nil {
 		var ae *APIError
 		if errors.As(err, &ae) && ae.Status == http.StatusNotFound {
 			return nil, ErrAgentNotAuthorized
 		}
 		return nil, err
 	}
-	if o.Expired {
-		return nil, fmt.Errorf("dexos: 这把 API 钱包的授权已过期 —— 去前端续期或重新生成")
+	g, err := pick(resp.Grants, o)
+	if err != nil {
+		return nil, err
 	}
 	var until uint64
-	fmt.Sscan(o.ValidUntilMs, &until)
+	fmt.Sscan(g.ValidUntilMs, &until)
 	return &Session{
 		Client:       c,
 		Config:       cfg,
 		Agent:        agent,
-		Account:      o.Master,
+		Account:      g.Master,
 		ValidUntilMs: until,
-		nonce:        o.NextNonce,
+		nonce:        resp.NextNonce,
 	}, nil
+}
+
+// pick 从授权列表里选出这次会话代哪个账户。
+//
+// 过期的授权**先剔除再判定**:一把 key 授权了主账户(已过期)与一个子账户
+// (仍有效)时,正确行为是直接用那个子账户,而不是报「有歧义」让人去指明一个
+// 本来就用不了的账户。
+func pick(grants []Grant, o newOpts) (Grant, error) {
+	live := grants[:0:0]
+	for _, g := range grants {
+		if !g.Expired {
+			live = append(live, g)
+		}
+	}
+	if o.hasAccount {
+		for _, g := range live {
+			if g.Master == o.account {
+				return g, nil
+			}
+		}
+		// 指定的账户没授权过这把 key。区分「压根没授权」与「授权已过期」——
+		// 前者要去前端授权,后者要去续期,处置不同。
+		for _, g := range grants {
+			if g.Master == o.account {
+				return Grant{}, fmt.Errorf(
+					"dexos: 账户 %d 对这把 API 钱包的授权已过期 —— 去前端续期或重新生成", o.account)
+			}
+		}
+		return Grant{}, fmt.Errorf(
+			"dexos: 账户 %d 没有授权这把 API 钱包(已授权的:%s)", o.account, masters(live))
+	}
+	switch len(live) {
+	case 0:
+		if len(grants) > 0 {
+			return Grant{}, fmt.Errorf("dexos: 这把 API 钱包的授权已全部过期 —— 去前端续期或重新生成")
+		}
+		return Grant{}, ErrAgentNotAuthorized
+	case 1:
+		return live[0], nil
+	default:
+		return Grant{}, fmt.Errorf("%w(已授权的:%s)", ErrAmbiguousAccount, masters(live))
+	}
+}
+
+func masters(g []Grant) string {
+	if len(g) == 0 {
+		return "无"
+	}
+	parts := make([]string, 0, len(g))
+	for _, x := range g {
+		parts = append(parts, strconv.FormatUint(uint64(x.Master), 10))
+	}
+	return strings.Join(parts, ", ")
 }
 
 // Resync 重新从服务端取 nonce。

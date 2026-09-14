@@ -145,7 +145,8 @@ ApproveAgent(address owner,uint32 master,address agent,uint64 validUntilMs,uint6
 
 `validUntilMs` 为 `0` 表示永不过期。nonce 用 **master 账户**的。
 
-拒因:`AgentAlreadyBound`(该地址已绑到别的 master)· `AgentExpired`(给的有效期已是过去)。
+同一把 agent 可被**多个账户各自授权**;对同一 (账户, agent) 对重复授权 = 顺延有效期。
+拒因:`AgentExpired`(给的有效期已是过去)。
 
 ### `POST /agent/revoke`
 
@@ -227,7 +228,6 @@ nonce 用 **agent 自己的**(`/agents/:master` 里的 `nextNonce`)。
 | `AgentExpired` | 授权已过有效期 |
 | `AgentScopeViolation` | 该命令不在 agent 白名单内(如提款) |
 | `AgentMasterMismatch` | 试图以非授权 master 的名义行动 |
-| `AgentAlreadyBound` | 该 agent 地址已绑到别的 master |
 | `InsufficientMargin` | 前置保证金检查未过 |
 | `PostOnlyWouldCross` | PostOnly 会立即穿越 |
 | `FokInsufficientLiquidity` | FOK 流动性不足 |
