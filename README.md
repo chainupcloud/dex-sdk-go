@@ -256,6 +256,11 @@ s.Place(ctx, dexos.BatchOrder{Market: 0, Side: dexos.Buy, Price: 70000, Lots: 1,
 - **入金到账时间随终局性配置变化**:`head` 是秒级,`finalized` 要等两个 epoch
   (Sepolia 约 13 分钟)。`cfg.FinalityMode` 会告诉你当前是哪种,
   别把「还没到账」当成「入金失败」。
+- **偶发的 `HTTP 412 {"error":"replica behind"}` 不是故障**。生产是读写分层的
+  (写打 Raft voter,读打只读副本),412 表示副本还没追上你刚写的那条日志 ——
+  它宁可明说落后,也不返回旧值。SDK 会自动带上位号头把这条链挂住;
+  真拿到 412 就是所有副本都落后了,重试即可。见
+  [读一致性](docs/API.md#读一致性read-your-writes)。
 
 ---
 

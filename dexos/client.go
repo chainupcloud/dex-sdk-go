@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"sync/atomic"
 	"time"
 )
 
@@ -25,6 +26,36 @@ type Client struct {
 	BaseURL string
 	Domain  Domain
 	HTTP    *http.Client
+
+	// seq 这个客户端见过的最大**提交位号**(Raft log index)。
+	//
+	// 它存在的唯一理由是只读副本:生产部署会把读打到 learner 上,而 learner
+	// 天然落后于 leader。没有这条链,「下单成功」之后紧跟的一次查询可能落到
+	// 还没应用这条日志的副本上 —— 返回的是**旧状态**,没有任何报错。
+	//
+	// 有了它,每个请求都带上 `x-dexos-min-seq`,副本要么给出不早于这次写的状态,
+	// 要么以 412 明确失败。单成员部署上这个头没有任何作用,零代价。
+	seq atomic.Uint64
+}
+
+// 读一致性的两个头:响应带回已应用/已提交位号,请求带上"我至少要看到哪"。
+const (
+	seqHeader    = "x-dexos-seq"
+	minSeqHeader = "x-dexos-min-seq"
+)
+
+// Seq 这个客户端见过的最大提交位号。多进程共用一个账户时可以把它传给对方,
+// 让另一端的读也挂在同一条链上。
+func (c *Client) Seq() uint64 { return c.seq.Load() }
+
+// ObserveSeq 把外部得知的位号并入(取较大者)。
+func (c *Client) ObserveSeq(v uint64) {
+	for {
+		cur := c.seq.Load()
+		if v <= cur || c.seq.CompareAndSwap(cur, v) {
+			return
+		}
+	}
 }
 
 // NewClient baseURL 形如 http://127.0.0.1:8080。chainID 必须与节点一致
@@ -62,11 +93,22 @@ func (c *Client) do(ctx context.Context, method, path string, in, out any) error
 	if in != nil {
 		req.Header.Set("content-type", "application/json")
 	}
+	if s := c.seq.Load(); s > 0 {
+		req.Header.Set(minSeqHeader, strconv.FormatUint(s, 10))
+	}
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
+	// 无论成败都推进位号:412 的响应里带的是**本地已应用**位号,
+	// 把它当成"我见过的最大值"会让下一次请求要求得更松,恰好是错的方向 ——
+	// 所以只在 2xx 上采信。
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		if v, err := strconv.ParseUint(resp.Header.Get(seqHeader), 10, 64); err == nil {
+			c.ObserveSeq(v)
+		}
+	}
 	raw, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return &APIError{Status: resp.StatusCode, Body: string(raw)}

@@ -223,6 +223,46 @@ nonce 用 **agent 自己的**(`/agents/:master` 里的 `nextNonce`)。
 
 ---
 
+## 读一致性:read-your-writes
+
+生产部署把读打到**只读副本**(Raft learner)上,副本天然落后于 leader。
+不处理的话,一次成功的写紧跟一次查询,可能读到**旧状态且没有任何报错** ——
+「下单成功」后面跟着「暂无委托」。
+
+协议只有两个头:
+
+| 头 | 方向 | 含义 |
+|---|---|---|
+| `x-dexos-seq` | 响应 | 写:这次写的**提交位号**(Raft log index);读:副本的**已应用位号** |
+| `x-dexos-min-seq` | 请求 | 「我至少要看到这条日志之后的状态」 |
+
+副本收到 `x-dexos-min-seq: N` 时:已应用 ≥ N 就作答;落后就最多等
+`READ_WAIT_MS`(默认 500ms);仍落后则返回 **412**,体里给出 `applied` 与 `required`:
+
+```json
+{"error":"replica behind","applied":8213,"required":8460}
+```
+
+**412 是好消息**:它意味着副本宁可明说落后,也不返回旧值。api 层收到 412 会先
+换一台副本重试,整池都落后才回落到 core。
+
+Go SDK **自动维护这条链** —— `Client` 记住见过的最大位号,每个请求自动带上,
+成功响应自动推进(`Client.Seq()` / `Client.ObserveSeq()` 可以跨进程手工传递)。
+单成员部署上这两个头没有任何作用,零代价。
+
+## 集群管理(admin)
+
+`x-admin-token` 鉴权,只在内网监听上暴露。
+
+| 端点 | 作用 |
+|---|---|
+| `GET /internal/cluster/status` | **本节点看到的**拓扑:leader / voters / learners / term / applied |
+| `POST /internal/cluster/add-learner` | `{"nodeId":4}` 加只读副本。必须打 leader;幂等 |
+| `POST /internal/cluster/membership` | `{"voters":[1,2,3]}` 设 voter **全集**(不是增量 —— 增量在重试下不幂等) |
+
+`status` 是"本节点看到的"而不是"集群的":follower 的视角可能落后。
+排障时分别问每一台,不一致的那台就是问题所在。
+
 ## 拒因
 
 写操作失败时返回 `{"error":"<拒因>"}`,HTTP 状态:
