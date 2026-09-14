@@ -104,7 +104,7 @@ exchange = Exchange(Account.from_key(API_KEY), URL, account_address=MAIN_ADDR)
 | | 做错了会怎样 |
 |---|---|
 | 向 `/config` 发现链参数,核对 codec 版本 | chainId 填错 → 每笔签名 401,而盘口/K 线全正常,像「只有下单坏了」 |
-| 由 API 钱包地址反查它代表哪个账户 | 账户号抄错 → 订单落到别人账户,或一片拒绝 |
+| 由 API 钱包地址反查它**被哪些账户授权** | 账户号抄错 → 订单落到别人账户,或一片拒绝 |
 | 读取并维护 **agent 自己的** nonce | 与 master 的 nonce 混用 → `NonceMismatch`,而错误信息看不出是哪个计数器 |
 
 `Session` 只在一处需要你留心:**同一把 API 钱包不要多进程并发**。nonce 是单调

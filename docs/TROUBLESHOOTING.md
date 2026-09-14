@@ -69,8 +69,7 @@ fmt.Printf("%x\n", dexos.Keccak256(cmd))      // 这就是 commandHash
 | `UnknownAgent` | 未授权,或已被撤销 | 重新授权(要主账号密钥) |
 | `AgentExpired` | 授权过期 | 同上,重复授权 = 更新有效期 |
 | `AgentScopeViolation` | 该命令不在 agent 白名单(如提款) | 用主账号做,不是 API 钱包能做的事 |
-| `AgentMasterMismatch` | 以非授权 master 的名义行动 | 检查 `account` 参数 |
-| `AgentAlreadyBound` | 该 agent 地址已绑到别的 master | **换地址,重试无用** |
+| `UnknownAgent` | 这个账户没有授权过这把 API 钱包(或已撤销) | 去前端为**那个账户**授权 |
 | `InsufficientMargin` | 前置保证金检查未过 | 减小规模,或看 `Risk().NC/IMR` |
 | `InsufficientCollateral` | 可提额不够 | 可提 = NC − IMR |
 | `PostOnlyWouldCross` | PostOnly 会立即穿越 | 价格挂到对手价之外 |
@@ -119,13 +118,24 @@ case n := <-st.Lost:
 
 ### 授权成功但下单报 `UnknownAgent`
 
-`account` 参数与授权时的 `master` 不是同一个。`Agents(ctx, master)` 查一下
-这个 agent 到底挂在谁名下。
+授权是按 **(账户, agent) 对**记的:给主账户授权过,不等于给子账户也授权了。
+`account` 参数指的那个账户,需要**它自己**授权这把 key。
 
-### `AgentAlreadyBound`
+用 `GET /agent/<agent 地址>` 看这把 key 到底被哪些账户授权了,或
+`Agents(ctx, master)` 从账户那一侧查。
 
-一个 agent 地址**只能绑一个 master**。这个地址已经被别人(或你的另一个账户)
-用过了。换一个地址 —— `GenerateSigner()` 生成新的即可,重试同一个永远不会好。
+### `ErrAmbiguousAccount`
+
+这把 key 被**多个**账户授权,而 `New` 没被告知代谁。它刻意不挑默认值 ——
+挑错的表现是订单落到另一个子账户上,仓位、保证金、风险全记在别处,
+**而且没有任何报错**。
+
+```go
+s, err := dexos.New(ctx, url, apiKey, dexos.ForAccount(7))
+```
+
+报错里会列出候选账户号。若你以为只授权过一个,那说明另一个账户也授权了同一把
+key —— 去前端逐个撤销多余的,或直接指明。
 
 ### 授权后 `Agents()` 里看不到
 

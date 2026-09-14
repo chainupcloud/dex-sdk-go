@@ -83,6 +83,16 @@ agents, _ := c.Agents(ctx, master)
 **授权完就把主账号私钥收起来。** 之后日常交易只用 `api`,主账号密钥只在续期或撤销时
 再拿出来一次。这是 API 钱包全部的意义 —— 见 [ARCHITECTURE.md](ARCHITECTURE.md#信任边界)。
 
+**要用同一把 key 交易子账户?** 再授权一次即可 —— 授权按 `(账户, agent)` 对记,
+每个账户各自同意。此后 `dexos.New` 需要你指明代谁:
+
+```go
+s, _ := dexos.New(ctx, url, api.PrivateKeyHex(), dexos.ForAccount(subAccountID))
+```
+
+不指明会得到 `ErrAmbiguousAccount` —— 它不替你挑默认值,因为挑错的表现是订单
+落到另一个子账户上,**而且没有任何报错**。
+
 ---
 
 ## 3 · 第一笔单

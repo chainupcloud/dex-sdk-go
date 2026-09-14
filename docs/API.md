@@ -46,15 +46,25 @@
 
 ### `GET /agent/:addr`
 
-这把 API 钱包代表哪个账户。`dexos.New` 用它把身份补全 —— 所以接入方**不需要
-被告知内核账户号**。
+这把 API 钱包被**哪些账户**授权。`dexos.New` 用它把身份补全 —— 所以接入方
+**不需要被告知内核账户号**。
 
 ```json
-{"agent":"0xd864…d001","master":4,"validUntilMs":"1789…","expired":false,"nextNonce":3}
+{"agent":"0xd864…d001","nextNonce":3,
+ "grants":[{"master":4,"validUntilMs":"0","expired":false},
+           {"master":9,"validUntilMs":"1789…","expired":false}]}
 ```
 
-未授权或已撤销一律 **404**(两者在这里是同一件事:这把钥匙现在不代表任何人)。
-`nextNonce` 是 **agent 地址自己的**计数器,与 master 的 nonce 无关。
+返回的是**列表**:主账户与各个子账户可以分别授权同一把 key(状态机按
+`(账户, agent)` 对记账),撤销其中一个不影响其余。只有一条时 `New` 直接用;
+多于一条**必须**用 `ForAccount` 指明,否则返回 `ErrAmbiguousAccount`。
+
+**一份授权都没有才 404**(没授权过与已全部撤销在这里是同一件事)。过期的条目
+照常返回并标 `expired` —— 「没授权」要去前端授权、「已过期」要去续期,
+处置不同,合并成一句会让人往错方向查。
+
+`nextNonce` 是 **agent 地址自己的**计数器,与 master 的 nonce 无关,
+也不随某一条授权被撤销而重置(防旧签名重放)。
 
 ### `GET /markets`
 
@@ -227,7 +237,6 @@ nonce 用 **agent 自己的**(`/agents/:master` 里的 `nextNonce`)。
 | `UnknownAgent` | agent 未授权或已被撤销 |
 | `AgentExpired` | 授权已过有效期 |
 | `AgentScopeViolation` | 该命令不在 agent 白名单内(如提款) |
-| `AgentMasterMismatch` | 试图以非授权 master 的名义行动 |
 | `InsufficientMargin` | 前置保证金检查未过 |
 | `PostOnlyWouldCross` | PostOnly 会立即穿越 |
 | `FokInsufficientLiquidity` | FOK 流动性不足 |
