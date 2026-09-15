@@ -65,7 +65,14 @@ func TestReadIdentityAndPrecisionCannotDefaultMissingFields(t *testing.T) {
 			c := NewClient(srv.URL, 1)
 			var err error
 			if tc.path == "/markets" {
-				_, err = c.Markets(context.Background())
+				markets, readErr := c.Markets(context.Background())
+				if readErr != nil || len(markets) != 1 {
+					t.Fatalf("缺元数据应保留该市场的显式未知状态: %v", readErr)
+				}
+				if markets[0].PriceDecimals != nil && markets[0].SizeDecimals != nil {
+					t.Fatal("缺精度被默认成0")
+				}
+				return
 			} else {
 				_, err = c.AccountByAddress(context.Background(), "0x1111111111111111111111111111111111111111")
 			}
@@ -73,6 +80,20 @@ func TestReadIdentityAndPrecisionCannotDefaultMissingFields(t *testing.T) {
 				t.Fatal("缺身份/精度字段被默认成 0")
 			}
 		})
+	}
+}
+
+func TestMarketNullMetadataPreservesOtherRows(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `{"markets":[{"market":7,"symbol":"BTC-USD","priceDecimals":0,"sizeDecimals":3,"quotePerTickLot":1000},{"market":9,"symbol":null,"priceDecimals":null,"sizeDecimals":null,"quotePerTickLot":1}]}`)
+	}))
+	defer srv.Close()
+	markets, err := NewClient(srv.URL, 1).Markets(context.Background())
+	if err != nil || len(markets) != 2 {
+		t.Fatalf("无关市场使目录整体不可读: %v", err)
+	}
+	if markets[0].PriceDecimals == nil || *markets[0].PriceDecimals != 0 || markets[1].PriceDecimals != nil || markets[1].SizeDecimals != nil {
+		t.Fatalf("缺元数据与合法零混淆: %+v", markets)
 	}
 }
 

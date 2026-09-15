@@ -151,7 +151,8 @@ key —— 去前端逐个撤销多余的,或直接指明。
 
 ```go
 m := markets[0]
-humanPrice := float64(order.Price) / math.Pow10(m.PriceDecimals)
+if m.PriceDecimals == nil { return fmt.Errorf("市场 %d 缺价格精度", m.Market) }
+// 人类价格 = order.Price × 10^(-*m.PriceDecimals)，使用 decimal 等精确十进制实现。
 ```
 
 `Lots` 同理,除以 `10^SizeDecimals`。

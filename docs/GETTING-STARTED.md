@@ -121,8 +121,8 @@ seqs, _ := c.OrderSeqs(ctx, master, 0)    // [337]
 ```go
 ms, _ := c.Markets(ctx)
 m := ms[0]
-// 人类价 = Price / 10^m.PriceDecimals
-// 人类量 = Lots  / 10^m.SizeDecimals
+// 先确认 m.PriceDecimals / m.SizeDecimals 非 nil（缺元数据不能当0）。
+// 人类价 = Price / 10^(*m.PriceDecimals)，人类量同理；金额转换使用十进制数。
 ```
 
 不替你转是刻意的:引入浮点之后,`0.1+0.2` 那类误差会直接进到订单价上。

@@ -163,8 +163,9 @@ type Market struct {
 	InitialMarginPpm       uint32 `json:"initialMarginPpm"`
 	MaintenanceFractionPpm uint32 `json:"maintenanceFractionPpm"`
 	QuotePerTickLot        uint64 `json:"quotePerTickLot"`
-	PriceDecimals          int    `json:"priceDecimals"`
-	SizeDecimals           int    `json:"sizeDecimals"`
+	// 元数据可缺失；nil 明确表示无法进行人类单位转换，不能当作0位精度。
+	PriceDecimals *int `json:"priceDecimals"`
+	SizeDecimals  *int `json:"sizeDecimals"`
 }
 
 func (c *Client) Markets(ctx context.Context) ([]Market, error) {
@@ -182,15 +183,16 @@ func (c *Client) Markets(ctx context.Context) ([]Market, error) {
 		var wire struct {
 			Market
 			ID              *uint16 `json:"market"`
-			PriceDecimals   *int    `json:"priceDecimals"`
-			SizeDecimals    *int    `json:"sizeDecimals"`
 			QuotePerTickLot *uint64 `json:"quotePerTickLot"`
 		}
-		if json.Unmarshal(raw, &wire) != nil || wire.ID == nil || wire.PriceDecimals == nil || wire.SizeDecimals == nil || wire.QuotePerTickLot == nil {
-			return nil, errors.New("dexos: 市场身份或精度字段缺失")
+		if json.Unmarshal(raw, &wire) != nil || wire.ID == nil {
+			return nil, errors.New("dexos: 市场身份字段缺失或响应无法解析")
+		}
+		if wire.QuotePerTickLot == nil {
+			return nil, fmt.Errorf("dexos: 市场 %d 缺 quotePerTickLot", *wire.ID)
 		}
 		market := wire.Market
-		market.Market, market.PriceDecimals, market.SizeDecimals, market.QuotePerTickLot = *wire.ID, *wire.PriceDecimals, *wire.SizeDecimals, *wire.QuotePerTickLot
+		market.Market, market.QuotePerTickLot = *wire.ID, *wire.QuotePerTickLot
 		out = append(out, market)
 	}
 	return out, nil

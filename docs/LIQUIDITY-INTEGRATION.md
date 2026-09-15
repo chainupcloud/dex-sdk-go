@@ -8,6 +8,8 @@
 
 `AccountByAddress` 只把 404 解释为未登记；`AgentGrants` 校验返回代理、每条账户/有效期及代理共享 nonce。代理不能由主账户地址代替。主钱包私钥不得传给策略；授权、入金由 owner 在策略外完成。
 
+`Market.PriceDecimals` / `SizeDecimals` 现为 `*int`：无元数据市场保留在目录中，精度为 nil；使用某个市场前须核对这两项，缺失时明确报告市场 ID 并停止该市场转换。不能把未知精度当 0，也不因无关市场缺元数据丢掉整个目录。
+
 ## 批量订单与未知结果
 
 `BatchPlace` / `BatchCancel` / `BatchReplace` 返回原始成功事件；缺任意输入项成功证据时同时返回 `ErrIncompleteBatch`。部分成功不能按压缩后的数组索引或价量配对，也不能把失败当未执行。
