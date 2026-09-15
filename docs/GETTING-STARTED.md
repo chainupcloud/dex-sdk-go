@@ -143,32 +143,36 @@ c.BatchCancel(ctx, api, master, 0, seqs, an)
 c.BatchReplace(ctx, api, master, 0, seqs, newQuotes, an)
 ```
 
-理由见 [MARKET-MAKING.md](MARKET-MAKING.md#为什么必须用原子换单)。
+语义与限制见 [MARKET-MAKING.md](MARKET-MAKING.md#换单与逐项结果)。
 
 ---
 
 ## 5 · 接事件流
 
 ```go
-st, _ := c.Subscribe(ctx)
+st, err := c.Subscribe(ctx)
+if err != nil { return err }
 for {
     select {
-    case ev := <-st.Events:
+    case ev, ok := <-st.Events:
+        if !ok { return <-st.Err }
         switch ev.Kind {
         case "Fill":          // 成交
         case "OrderAccepted": // 挂上
         case "OrderCanceled": // 撤掉
         case "OracleUpdated": // 喂价
         }
-    case n := <-st.Lost:
-        resync()              // 丢帧 → 本地镜像不可信,重拉快照
+    case n, ok := <-st.Lost:
+        if ok { log.Printf("丢帧 %d 条", n) }
+        return <-st.Err        // 终止；快照不能补回逐笔成交
     case err := <-st.Err:
         return err
     }
 }
 ```
 
-**顺序很重要:先订阅,再拉快照。** 反过来会在两步之间丢事件,而且丢得无声无息。
+先订阅再拉快照仍需明确水位衔接，不能仅凭调用顺序宣称历史完整。当前服务端前置见
+[做市完整性边界](LIQUIDITY-INTEGRATION.md)。
 
 ---
 
@@ -181,7 +185,7 @@ for {
 - [ ] 主账号私钥**不在**跑策略的机器上
 - [ ] 授权设了有效期,不是永久
 - [ ] `Stream.Lost` 有处理分支,不是丢弃
-- [ ] 重连后有 resync(重连本身就意味着丢帧)
+- [ ] 断线/坏帧后停止；可靠历史补齐并核对后才能重建连接（SDK 不自动重连）
 - [ ] 金额字段按**字符串**解析,没有转 float
 - [ ] 拒因做了分类:401 是签名问题、409 是 nonce、422 才是业务
 

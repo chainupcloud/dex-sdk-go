@@ -169,9 +169,31 @@ type Market struct {
 
 func (c *Client) Markets(ctx context.Context) ([]Market, error) {
 	var r struct {
-		Markets []Market `json:"markets"`
+		Markets []json.RawMessage `json:"markets"`
 	}
-	return r.Markets, c.do(ctx, http.MethodGet, "/markets", nil, &r)
+	if err := c.do(ctx, http.MethodGet, "/markets", nil, &r); err != nil {
+		return nil, err
+	}
+	if r.Markets == nil {
+		return nil, errors.New("dexos: 市场目录缺失")
+	}
+	out := make([]Market, 0, len(r.Markets))
+	for _, raw := range r.Markets {
+		var wire struct {
+			Market
+			ID              *uint16 `json:"market"`
+			PriceDecimals   *int    `json:"priceDecimals"`
+			SizeDecimals    *int    `json:"sizeDecimals"`
+			QuotePerTickLot *uint64 `json:"quotePerTickLot"`
+		}
+		if json.Unmarshal(raw, &wire) != nil || wire.ID == nil || wire.PriceDecimals == nil || wire.SizeDecimals == nil || wire.QuotePerTickLot == nil {
+			return nil, errors.New("dexos: 市场身份或精度字段缺失")
+		}
+		market := wire.Market
+		market.Market, market.PriceDecimals, market.SizeDecimals, market.QuotePerTickLot = *wire.ID, *wire.PriceDecimals, *wire.SizeDecimals, *wire.QuotePerTickLot
+		out = append(out, market)
+	}
+	return out, nil
 }
 
 // Level 盘口一档:[价格, 数量]。
@@ -322,8 +344,11 @@ func (c *Client) AccountByAddress(ctx context.Context, addr string) (*AccountRef
 	if err != nil || address.IsZero() {
 		return nil, errors.New("dexos: 账户地址不合法")
 	}
-	var r AccountRef
-	err = c.do(ctx, http.MethodGet, "/account/by-address/"+address.Hex(), nil, &r)
+	var response struct {
+		AccountRef
+		ID *uint32 `json:"accountId"`
+	}
+	err = c.do(ctx, http.MethodGet, "/account/by-address/"+address.Hex(), nil, &response)
 	if err != nil {
 		var ae *APIError
 		// 未登记是 404；400 是请求错误，不能伪装成账户准备状态。
@@ -332,7 +357,12 @@ func (c *Client) AccountByAddress(ctx context.Context, addr string) (*AccountRef
 		}
 		return nil, err
 	}
-	return &r, nil
+	if response.ID == nil {
+		return nil, errors.New("dexos: 地址映射缺 accountId")
+	}
+	ref := response.AccountRef
+	ref.AccountID = *response.ID
+	return &ref, nil
 }
 
 // SubaccountsOf 某 owner 名下的全部账户(主账户 + 子账户)。

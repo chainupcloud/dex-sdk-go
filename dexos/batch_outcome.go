@@ -30,7 +30,7 @@ func checkBatchOutcome(events []EventEnvelope, account uint32, orders []BatchOrd
 		switch ev.Kind {
 		case "OrderAccepted":
 			var a accepted
-			if json.Unmarshal(ev.Data, &a) != nil || a.Account == nil || a.Market == nil || a.Seq == nil || *a.Seq == 0 || *a.Seq > 1<<48-1 || a.Price == nil || a.Lots == nil || a.Filled == nil || a.Resting == nil || *a.Account != account || *a.Filled > *a.Lots {
+			if json.Unmarshal(ev.Data, &a) != nil || a.Account == nil || a.Market == nil || a.Seq == nil || *a.Seq > 1<<48-1 || a.Price == nil || a.Lots == nil || *a.Lots == 0 || a.Filled == nil || a.Resting == nil || *a.Account != account || *a.Filled > *a.Lots {
 				return fmt.Errorf("%w: OrderAccepted 字段缺失或身份不符", ErrIncompleteBatch)
 			}
 			id := NewOrderID(*a.Market, *a.Seq)
@@ -56,13 +56,14 @@ func checkBatchOutcome(events []EventEnvelope, account uint32, orders []BatchOrd
 			canceled++
 		}
 	}
-	if len(placed) != len(orders) || canceled != len(wantCancel) {
-		return fmt.Errorf("%w: 下单 %d/%d，撤单 %d/%d；失败项无法可靠关联", ErrIncompleteBatch, len(placed), len(orders), canceled, len(wantCancel))
+	if len(placed) != len(orders) || canceled != len(cancels) {
+		return fmt.Errorf("%w: 下单 %d/%d，撤单 %d/%d；失败项无法可靠关联", ErrIncompleteBatch, len(placed), len(orders), canceled, len(cancels))
 	}
 	// 仅在所有项均接受后，才可按内核 batch_place 的输入顺序校验，部分成功绝不压缩索引。
 	for i, a := range placed {
 		o := orders[i]
-		if *a.Market != o.Market || *a.Price != o.Price || *a.Lots != o.Lots {
+		lotsMatch := *a.Lots == o.Lots || (o.ReduceOnly && *a.Lots < o.Lots)
+		if *a.Market != o.Market || *a.Price != o.Price || !lotsMatch {
 			return fmt.Errorf("%w: 第 %d 个完整成功回执与输入不一致", ErrIncompleteBatch, i)
 		}
 	}

@@ -2,6 +2,9 @@ package dexos
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -25,6 +28,32 @@ func TestBatchPartialSuccessIsNotWholeSuccess(t *testing.T) {
 	}
 	if len(ev) != 1 {
 		t.Fatal("部分成功证据被丢弃")
+	}
+}
+
+func TestBatchOutcomeKernelBoundaries(t *testing.T) {
+	for _, tc := range []struct {
+		name             string
+		seq, lots        uint64
+		reduceOnly, fail bool
+	}{
+		{"first_order", 0, 10, false, false},
+		{"reduce_only_clamped", 9, 3, true, false},
+		{"reduce_only_cannot_increase", 9, 11, true, true},
+		{"non_reduce_cannot_shrink", 9, 3, false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			data := fmt.Sprintf(`{"account":42,"market":7,"orderSeq":%d,"price":100,"lots":%d,"filledLots":0,"resting":true}`, tc.seq, tc.lots)
+			err := checkBatchOutcome([]EventEnvelope{{Kind: "OrderAccepted", Data: json.RawMessage(data)}}, 42, []BatchOrder{{Market: 7, Price: 100, Lots: 10, ReduceOnly: tc.reduceOnly}}, nil)
+			if (err != nil) != tc.fail {
+				t.Fatalf("正常内核边界与不完整判据不符: %v", err)
+			}
+		})
+	}
+	id := NewOrderID(7, 9)
+	err := checkBatchOutcome([]EventEnvelope{{Kind: "OrderCanceled", Data: json.RawMessage(`{"account":42,"market":7,"orderSeq":9}`)}}, 42, nil, []OrderID{id, id})
+	if !errors.Is(err, ErrIncompleteBatch) {
+		t.Fatalf("重复撤单输入被当完整成功: %v", err)
 	}
 }
 

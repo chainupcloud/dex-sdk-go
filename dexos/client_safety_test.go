@@ -17,7 +17,7 @@ func TestReadCollectionsReturnDecodedValues(t *testing.T) {
 		}
 		switch r.URL.Path {
 		case "/markets":
-			io.WriteString(w, `{"markets":[{"market":7,"symbol":"BTC-USD"}]}`)
+			io.WriteString(w, `{"markets":[{"market":7,"symbol":"BTC-USD","priceDecimals":0,"sizeDecimals":3,"quotePerTickLot":1000}]}`)
 		case "/agents/42":
 			io.WriteString(w, `{"agents":[{"address":"test"}]}`)
 		case "/orders/42":
@@ -50,6 +50,29 @@ func TestReadCollectionsReturnDecodedValues(t *testing.T) {
 	accounts, err := c.SubaccountsOf(ctx, "test")
 	if err != nil || len(accounts) != 1 {
 		t.Errorf("accounts=%v err=%v", accounts, err)
+	}
+}
+
+func TestReadIdentityAndPrecisionCannotDefaultMissingFields(t *testing.T) {
+	for _, tc := range []struct{ path, body string }{
+		{"/markets", `{"markets":[{"market":7,"symbol":"BTC-USD","sizeDecimals":3,"quotePerTickLot":1000}]}`},
+		{"/markets", `{"markets":[{"market":7,"symbol":"BTC-USD","priceDecimals":0,"quotePerTickLot":1000}]}`},
+		{"/account/by-address/0x1111111111111111111111111111111111111111", `{"nc":"0"}`},
+	} {
+		t.Run(tc.body, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, tc.body) }))
+			defer srv.Close()
+			c := NewClient(srv.URL, 1)
+			var err error
+			if tc.path == "/markets" {
+				_, err = c.Markets(context.Background())
+			} else {
+				_, err = c.AccountByAddress(context.Background(), "0x1111111111111111111111111111111111111111")
+			}
+			if err == nil {
+				t.Fatal("缺身份/精度字段被默认成 0")
+			}
+		})
 	}
 }
 
