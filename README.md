@@ -107,9 +107,10 @@ exchange = Exchange(Account.from_key(API_KEY), URL, account_address=MAIN_ADDR)
 | 由 API 钱包地址反查它**被哪些账户授权** | 账户号抄错 → 订单落到别人账户,或一片拒绝 |
 | 读取并维护 **agent 自己的** nonce | 与 master 的 nonce 混用 → `NonceMismatch`,而错误信息看不出是哪个计数器 |
 
-`Session` 只在一处需要你留心:**同一把 API 钱包不要多进程并发**。nonce 是单调
-计数器,两个进程会互相打架。要并发就给每个进程一把自己的 API 钱包 ——
-同一个账户可以授权多把。
+`Session` 只在会话内串行；跨进程必须按 API 代理地址协调 nonce 与独占租约。
+写入失败后锁定后续写入及 Resync，不能重启或换 nonce 盲重发。WS 坏帧/断线会终止，
+没有历史完整性证据前不能恢复交易。接入前请读 [做市完整性边界](docs/LIQUIDITY-INTEGRATION.md)，
+包含 `NewClientFromConfig` 返回值变化与尚未完成的服务端契约。
 
 需要更低层的控制(自己管 nonce、代多个账户操作)时,`Session.Client` 就是原来的
 `*Client`,所有方法照旧可用。

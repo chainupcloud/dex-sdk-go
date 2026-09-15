@@ -4,9 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -20,10 +20,7 @@ import (
 //	// 这里:只要私钥
 //	s, _ := dexos.New(ctx, URL, API_KEY)
 //
-// 少一个参数不是为了短。主钱包地址是**能推出来的** —— agent 地址在状态机里
-// 唯一绑定一个 master(绑第二个会被 AgentAlreadyBound 拒),所以让人再传一遍
-// 只是给抄错留位置:抄错的表现是订单落到别人账户上(若那个号恰好存在)
-// 或一片看不出原因的拒绝。
+// 一把代理可被多个账户授权；有歧义时必须 ForAccount 指定，不能猜主账户。
 //
 // nonce 由会话自己维护。它是 **agent 地址自己的**计数器,与 master 的 nonce
 // 无关 —— 这是接入时最常见的坑,所以干脆不暴露。
@@ -35,8 +32,14 @@ type Session struct {
 	// ValidUntilMs 授权到期时刻(0 = 永不过期)。到期后所有写操作会被拒。
 	ValidUntilMs uint64
 
-	nonce uint64
+	mu      sync.Mutex
+	nonce   uint64
+	blocked error
 }
+
+// ErrSessionBlocked 表示上次写入尚未核对，禁止继续消耗 nonce。
+// 创建新 Session 或重读 nonce 都不是恢复原结果的证据；调用方须持久化未决请求。
+var ErrSessionBlocked = errors.New("dexos: 上次写入结果尚未核对，会话禁止继续写入")
 
 // ErrAgentNotAuthorized 这把 API 钱包没有被任何账户授权(或授权已被撤销)。
 //
@@ -60,13 +63,6 @@ type Grant struct {
 	Master       uint32 `json:"master"`
 	ValidUntilMs string `json:"validUntilMs"`
 	Expired      bool   `json:"expired"`
-}
-
-type agentOwnerResp struct {
-	// 该 agent 名下的全部授权。**一把 key 可以被多个账户各自授权** ——
-	// 主账户与各个子账户是分别同意的,所以撤销其中一个不影响其余。
-	Grants    []Grant `json:"grants"`
-	NextNonce uint64  `json:"nextNonce"`
 }
 
 // Option 调整 New 的行为。
@@ -117,20 +113,21 @@ func New(ctx context.Context, baseURL, apiKeyHex string, opts ...Option) (*Sessi
 	if err != nil {
 		return nil, err
 	}
-	var resp agentOwnerResp
-	if err := c.do(ctx, http.MethodGet, "/agent/"+agent.Address().Hex(), nil, &resp); err != nil {
-		var ae *APIError
-		if errors.As(err, &ae) && ae.Status == http.StatusNotFound {
-			return nil, ErrAgentNotAuthorized
-		}
+	resp, err := c.AgentGrants(ctx, agent.Address())
+	if err != nil {
 		return nil, err
 	}
 	g, err := pick(resp.Grants, o)
 	if err != nil {
 		return nil, err
 	}
-	var until uint64
-	fmt.Sscan(g.ValidUntilMs, &until)
+	until, err := strconv.ParseUint(g.ValidUntilMs, 10, 64)
+	if err != nil {
+		return nil, fmt.Errorf("dexos: 授权到期值不合法: %w", err)
+	}
+	if until != 0 && uint64(time.Now().UnixMilli()) >= until {
+		return nil, ErrAgentExpired
+	}
 	return &Session{
 		Client:       c,
 		Config:       cfg,
@@ -196,10 +193,15 @@ func masters(g []Grant) string {
 
 // Resync 重新从服务端取 nonce。
 //
-// 丢帧、重启、或同一把 API 钱包被多个进程共用之后调用它。
+// 仅在没有未决写入时使用；上次写入失败后本方法也被阻止。
 // **同一把钥匙多进程并发是不支持的** —— nonce 是单调计数器,两个进程会互相
 // 打架;要并发就给每个进程一把自己的 API 钱包(同一个账户可以授权多把)。
 func (s *Session) Resync(ctx context.Context) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.blocked != nil {
+		return s.blocked
+	}
 	n, err := s.Client.AgentNonce(ctx, s.Account, s.Agent.Address())
 	if err != nil {
 		return err
@@ -208,20 +210,26 @@ func (s *Session) Resync(ctx context.Context) error {
 	return nil
 }
 
-// 写操作统一经这里:成功则 nonce++,失败则重新取。
-//
-// 失败后盲目 ++ 是错的:有的失败消耗了 nonce(内核已受理但业务拒绝),
-// 有的没有(签名根本没到内核)。从服务端重取是唯一不会猜错的做法。
+// 写操作在本会话内串行。失败即锁定；重读 nonce 不能证明原请求执行结果。
 func (s *Session) write(
 	ctx context.Context,
 	f func(nonce uint64) ([]EventEnvelope, error),
 ) ([]EventEnvelope, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.blocked != nil {
+		return nil, s.blocked
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if s.ValidUntilMs != 0 && uint64(time.Now().UnixMilli()) >= s.ValidUntilMs {
+		return nil, ErrAgentExpired
+	}
 	ev, err := f(s.nonce)
 	if err != nil {
-		if rerr := s.Resync(ctx); rerr != nil {
-			return nil, fmt.Errorf("%w(且 nonce 重取失败:%v)", err, rerr)
-		}
-		return nil, err
+		s.blocked = fmt.Errorf("%w (nonce=%d): %w", ErrSessionBlocked, s.nonce, err)
+		return ev, s.blocked
 	}
 	s.nonce++
 	return ev, nil

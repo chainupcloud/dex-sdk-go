@@ -58,7 +58,11 @@ func NewSigner(privHex string) (*Signer, error) {
 	if len(b) != 32 {
 		return nil, fmt.Errorf("私钥应为 32 字节,得到 %d", len(b))
 	}
-	priv := secp256k1.PrivKeyFromBytes(b)
+	var scalar secp256k1.ModNScalar
+	if scalar.SetByteSlice(b) || scalar.IsZero() {
+		return nil, errors.New("私钥标量必须在 secp256k1 有效范围内")
+	}
+	priv := secp256k1.NewPrivateKey(&scalar)
 	return &Signer{priv: priv, addr: addressFromPub(priv.PubKey())}, nil
 }
 

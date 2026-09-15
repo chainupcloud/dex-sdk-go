@@ -81,12 +81,14 @@ func main() {
 					seen[d.OrderSeq] = time.Now()
 				}
 				mu.Unlock()
-			case n := <-st.Lost:
-				if n == 0 {
-					log.Printf("⚠ seq 倒退 —— 事件顺序不可信")
-				} else {
-					log.Printf("⚠ 服务端报告丢帧 %d 条 —— 本地镜像已不可信,应重拉快照", n)
+			case n, ok := <-st.Lost:
+				if ok {
+					log.Printf("服务端报告丢帧 %d 条；快照不能补回逐笔成交", n)
 				}
+				return
+			case err := <-st.Err:
+				log.Printf("事件流已终止: %v", err)
+				return
 			case <-ctx.Done():
 				return
 			}

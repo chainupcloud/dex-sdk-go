@@ -51,6 +51,9 @@ func (c *Client) BatchPlace(
 		"nonce":     nonce,
 		"signature": sig,
 	}, &out)
+	if err == nil {
+		err = checkBatchOutcome(out.Events, account, orders, nil)
+	}
 	return out.Events, err
 }
 
@@ -84,6 +87,9 @@ func (c *Client) BatchCancel(
 		"nonce":     nonce,
 		"signature": sig,
 	}, &out)
+	if err == nil {
+		err = checkBatchOutcome(out.Events, account, nil, ids)
+	}
 	return out.Events, err
 }
 
@@ -126,6 +132,9 @@ func (c *Client) BatchReplace(
 		"nonce":     nonce,
 		"signature": sig,
 	}, &out)
+	if err == nil {
+		err = checkBatchOutcome(out.Events, account, orders, ids)
+	}
 	return out.Events, err
 }
 

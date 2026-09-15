@@ -63,7 +63,7 @@ func (c *Client) ObserveSeq(v uint64) {
 func NewClient(baseURL string, chainID uint64) *Client {
 	return &Client{
 		BaseURL: baseURL,
-		Domain:  Domain{ChainID: chainID},
+		Domain:  Domain{Name: domainName, Version: domainVersion, ChainID: chainID},
 		HTTP:    &http.Client{Timeout: 15 * time.Second},
 	}
 }
@@ -109,7 +109,10 @@ func (c *Client) do(ctx context.Context, method, path string, in, out any) error
 			c.ObserveSeq(v)
 		}
 	}
-	raw, _ := io.ReadAll(resp.Body)
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("响应读取失败: %w", err)
+	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return &APIError{Status: resp.StatusCode, Body: string(raw)}
 	}
@@ -117,7 +120,13 @@ func (c *Client) do(ctx context.Context, method, path string, in, out any) error
 		return nil
 	}
 	if err := json.Unmarshal(raw, out); err != nil {
-		return fmt.Errorf("响应解析失败(%s):%w", string(raw), err)
+		return fmt.Errorf("响应解析失败: %w", err)
+	}
+	if receipt, ok := out.(*writeResp); ok {
+		if receipt.Status != "ok" || receipt.Seq == 0 || receipt.Events == nil {
+			return errors.New("dexos: 写回执缺 status/seq/events，执行结果未知")
+		}
+		c.ObserveSeq(receipt.Seq)
 	}
 	return nil
 }
@@ -154,15 +163,39 @@ type Market struct {
 	InitialMarginPpm       uint32 `json:"initialMarginPpm"`
 	MaintenanceFractionPpm uint32 `json:"maintenanceFractionPpm"`
 	QuotePerTickLot        uint64 `json:"quotePerTickLot"`
-	PriceDecimals          int    `json:"priceDecimals"`
-	SizeDecimals           int    `json:"sizeDecimals"`
+	// 元数据可缺失；nil 明确表示无法进行人类单位转换，不能当作0位精度。
+	PriceDecimals *int `json:"priceDecimals"`
+	SizeDecimals  *int `json:"sizeDecimals"`
 }
 
 func (c *Client) Markets(ctx context.Context) ([]Market, error) {
 	var r struct {
-		Markets []Market `json:"markets"`
+		Markets []json.RawMessage `json:"markets"`
 	}
-	return r.Markets, c.do(ctx, http.MethodGet, "/markets", nil, &r)
+	if err := c.do(ctx, http.MethodGet, "/markets", nil, &r); err != nil {
+		return nil, err
+	}
+	if r.Markets == nil {
+		return nil, errors.New("dexos: 市场目录缺失")
+	}
+	out := make([]Market, 0, len(r.Markets))
+	for _, raw := range r.Markets {
+		var wire struct {
+			Market
+			ID              *uint16 `json:"market"`
+			QuotePerTickLot *uint64 `json:"quotePerTickLot"`
+		}
+		if json.Unmarshal(raw, &wire) != nil || wire.ID == nil {
+			return nil, errors.New("dexos: 市场身份字段缺失或响应无法解析")
+		}
+		if wire.QuotePerTickLot == nil {
+			return nil, fmt.Errorf("dexos: 市场 %d 缺 quotePerTickLot", *wire.ID)
+		}
+		market := wire.Market
+		market.Market, market.QuotePerTickLot = *wire.ID, *wire.QuotePerTickLot
+		out = append(out, market)
+	}
+	return out, nil
 }
 
 // Level 盘口一档:[价格, 数量]。
@@ -284,6 +317,7 @@ type EventEnvelope struct {
 
 type writeResp struct {
 	Status string          `json:"status"`
+	Seq    uint64          `json:"seq"`
 	Events []EventEnvelope `json:"events"`
 }
 
@@ -308,17 +342,29 @@ var ErrNotRegistered = errors.New("dexos: 地址尚未注册内核账户(先入�
 // 接入的第一步:你有钱包地址,但下单要填的是**内核账户号**,两者不是一回事。
 // 账户号按入金先后分配,不能指定,也不能从地址推导 —— 只能查。
 func (c *Client) AccountByAddress(ctx context.Context, addr string) (*AccountRef, error) {
-	var r AccountRef
-	err := c.do(ctx, http.MethodGet, "/account/by-address/"+addr, nil, &r)
+	address, err := ParseAddress(addr)
+	if err != nil || address.IsZero() {
+		return nil, errors.New("dexos: 账户地址不合法")
+	}
+	var response struct {
+		AccountRef
+		ID *uint32 `json:"accountId"`
+	}
+	err = c.do(ctx, http.MethodGet, "/account/by-address/"+address.Hex(), nil, &response)
 	if err != nil {
 		var ae *APIError
-		// 网关对未注册地址回 404/400 —— 转成具名错误,免得调用方去比对报文字符串
-		if errors.As(err, &ae) && (ae.Status == http.StatusNotFound || ae.Status == http.StatusBadRequest) {
+		// 未登记是 404；400 是请求错误，不能伪装成账户准备状态。
+		if errors.As(err, &ae) && ae.Status == http.StatusNotFound {
 			return nil, ErrNotRegistered
 		}
 		return nil, err
 	}
-	return &r, nil
+	if response.ID == nil {
+		return nil, errors.New("dexos: 地址映射缺 accountId")
+	}
+	ref := response.AccountRef
+	ref.AccountID = *response.ID
+	return &ref, nil
 }
 
 // SubaccountsOf 某 owner 名下的全部账户(主账户 + 子账户)。

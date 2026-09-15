@@ -42,7 +42,8 @@ fmt.Printf("%x\n", dexos.Keccak256(cmd))      // 这就是 commandHash
 
 ## 409:NonceMismatch
 
-**唯一「重读后重试即可」的类别。**
+重读 nonce 不能恢复原请求回执。先保留原请求身份并停止发单，核对是否已有执行结果；
+禁止换 nonce 盲重发。Session 已锁定时 Resync 也会拒绝；不能通过新建 Session 绕过。
 
 先确认你用的是哪个计数器:
 
@@ -91,14 +92,12 @@ fmt.Printf("%x\n", dexos.Keccak256(cmd))      // 这就是 commandHash
 
 ### 收到 `Lost`
 
-**本地镜像已不可信,重拉快照。** 不要试图从后续事件推断丢了什么。
+本地镜像与历史完整性已不可信。流会终止，快照不能补回逐笔成交。
 
 ```go
-case n := <-st.Lost:
-    if n == 0 {
-        // seq 倒退 —— 服务端 bug,事件顺序不可信,比丢帧更严重
-    }
-    resync()
+case n, ok := <-st.Lost:
+    if ok { log.Printf("丢帧 %d 条", n) }
+    return <-st.Err
 ```
 
 丢帧的根因通常是**你消费太慢**:`Events` 通道满了 → SDK 的读循环阻塞 →
@@ -110,7 +109,7 @@ case n := <-st.Lost:
 
 1. 有没有漏处理 `Lost`(最常见)
 2. 有没有在**拉快照之后**才订阅(两步之间的事件丢了,且无声无息)
-3. 重连之后有没有 resync(重连本身就意味着丢帧)
+3. 断线后有没有停止；重新连接前是否已用可靠历史补齐逐笔事件并核对（SDK 不自动重连）
 
 ---
 
@@ -152,7 +151,8 @@ key —— 去前端逐个撤销多余的,或直接指明。
 
 ```go
 m := markets[0]
-humanPrice := float64(order.Price) / math.Pow10(m.PriceDecimals)
+if m.PriceDecimals == nil { return fmt.Errorf("市场 %d 缺价格精度", m.Market) }
+// 人类价格 = order.Price × 10^(-*m.PriceDecimals)，使用 decimal 等精确十进制实现。
 ```
 
 `Lots` 同理,除以 `10^SizeDecimals`。

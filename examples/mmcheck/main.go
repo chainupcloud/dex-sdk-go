@@ -158,14 +158,7 @@ func main() {
 		d := time.Since(t0)
 		if err != nil {
 			rejects++
-			// 文档的错误恢复:nonce 可能已被消耗,重读而不是盲目 ++
-			if n2, e2 := c.AgentNonce(ctx, acct, api.Address()); e2 == nil {
-				nonce = n2
-			}
-			if s2, e2 := c.OrderSeqs(ctx, acct, mk); e2 == nil {
-				seqs = s2
-			}
-			continue
+			log.Fatalf("换单结果需要核对，停止示例；不得换 nonce 重发 (nonce=%d): %v", nonce, err)
 		}
 		nonce++
 		lat = append(lat, d)
@@ -282,13 +275,7 @@ func main() {
 			newOrders := ladder(mk, nb, na, *lots, *levels)
 			ev, err := c.BatchReplace(ctx, api, acct, mk, seqs, newOrders, nonce)
 			if err != nil {
-				if n2, e2 := c.AgentNonce(ctx, acct, api.Address()); e2 == nil {
-					nonce = n2
-				}
-				if s2, e2 := c.OrderSeqs(ctx, acct, mk); e2 == nil {
-					seqs = s2
-				}
-				continue
+				log.Fatalf("换单结果需要核对，停止示例；不得换 nonce 重发 (nonce=%d): %v", nonce, err)
 			}
 			nonce++
 			if countKind(ev, "OrderAccepted") == *levels*2 {
