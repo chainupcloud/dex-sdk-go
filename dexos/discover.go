@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -53,16 +54,15 @@ type TokenInfo struct {
 // Discover 从网关取连接参数。接入方**只需要知道一个 URL**。
 //
 //	cfg, err := dexos.Discover(ctx, "http://node.example:17807")
-//	c := dexos.NewClientFromConfig("http://node.example:17807", cfg)
+//	c, err := dexos.NewClientFromConfig("http://node.example:17807", cfg)
 func Discover(ctx context.Context, baseURL string) (*Config, error) {
 	c := &Client{BaseURL: baseURL, HTTP: &http.Client{Timeout: 15 * time.Second}}
 	var cfg Config
 	if err := c.do(ctx, http.MethodGet, "/config", nil, &cfg); err != nil {
 		return nil, err
 	}
-	if cfg.ChainID == 0 {
-		// 给了 0 比给错更危险:签出来的东西一律被拒,而错误信息只会说 401。
-		return nil, fmt.Errorf("dexos: /config 未给出 chainId —— 节点版本过旧?")
+	if err := cfg.Validate(); err != nil {
+		return nil, err
 	}
 	return &cfg, nil
 }
@@ -72,13 +72,33 @@ func Discover(ctx context.Context, baseURL string) (*Config, error) {
 // verifyingContract 目前恒为零地址(域里保留该字段是为了与 EVM 侧的 EIP-712
 // 习惯一致),真值仍以 /config 为准而不是这里写死 —— 将来它变成真合约地址时,
 // 老客户端不会因为"自己记得是零地址"而全线签名失败。
-func NewClientFromConfig(baseURL string, cfg *Config) *Client {
-	vc, _ := ParseAddress(cfg.Domain.VerifyingContract)
+func NewClientFromConfig(baseURL string, cfg *Config) (*Client, error) {
+	if err := cfg.Validate(); err != nil {
+		return nil, err
+	}
+	vc, err := ParseAddress(cfg.Domain.VerifyingContract)
+	if err != nil {
+		return nil, err
+	}
 	return &Client{
 		BaseURL: baseURL,
-		Domain:  Domain{ChainID: cfg.ChainID, VerifyingContract: vc},
+		Domain:  Domain{Name: cfg.Domain.Name, Version: cfg.Domain.Version, ChainID: cfg.ChainID, VerifyingContract: vc},
 		HTTP:    &http.Client{Timeout: 15 * time.Second},
+	}, nil
+}
+
+// Validate 验证发现响应的必需字段；缺失不能被解释为默认签名域。
+func (cfg *Config) Validate() error {
+	if cfg == nil || cfg.ChainID == 0 || cfg.CodecVer == 0 || cfg.SnapshotVer == 0 || strings.TrimSpace(cfg.FinalityMode) == "" {
+		return fmt.Errorf("dexos: /config 缺链、版本或终局性参数")
 	}
+	if strings.TrimSpace(cfg.Domain.Name) == "" || strings.TrimSpace(cfg.Domain.Version) == "" {
+		return fmt.Errorf("dexos: /config 缺签名域 name/version")
+	}
+	if _, err := ParseAddress(cfg.Domain.VerifyingContract); err != nil {
+		return fmt.Errorf("dexos: /config verifyingContract 非法: %w", err)
+	}
+	return nil
 }
 
 // Connect = Discover + NewClientFromConfig,并核对 codec 指纹。
@@ -101,7 +121,8 @@ func Connect(ctx context.Context, baseURL string) (*Client, *Config, error) {
 				"继续下去每笔签名都会被拒;请升级 SDK 或确认连对了节点",
 			cfg.CodecVer, CodecVersion)
 	}
-	return NewClientFromConfig(baseURL, cfg), cfg, nil
+	c, err := NewClientFromConfig(baseURL, cfg)
+	return c, cfg, err
 }
 
 // ConnectUnchecked 跳过 codec 核对。
@@ -113,5 +134,6 @@ func ConnectUnchecked(ctx context.Context, baseURL string) (*Client, *Config, er
 	if err != nil {
 		return nil, nil, err
 	}
-	return NewClientFromConfig(baseURL, cfg), cfg, nil
+	c, err := NewClientFromConfig(baseURL, cfg)
+	return c, cfg, err
 }

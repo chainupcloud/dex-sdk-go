@@ -18,8 +18,7 @@ ws://<host>/ws?markets=0&accounts=3     并集:两者命中任一即投递
 没有 subscribe/unsubscribe,没有频道,没有运行时改条件。这不是简化,是取舍:
 
 - **代价**是改过滤条件要重连。对做市不是问题 —— 关注面在进程生命周期内不变。
-- **收益**是没有「订阅状态」这个东西。**重连即完整**,不需要在重连后重放订阅,
-  也不会出现「以为订上了其实没有」的静默失败。
+- 过滤只作用于当前连接；重连只收未来事件，不回放断线期间历史。
 
 ### 语义
 
@@ -75,7 +74,7 @@ accounts=9999      14 条   只有 BlockBegun(无作用域)
 服务端的广播通道容量 8192。客户端消费不过来时通道积压,`dropped` 条事件
 **永远拿不到了** —— 不会补发。
 
-收到它意味着本地的持仓/盘口镜像已不可信,必须重拉快照(`/risk/:id`、`/book/:m`)。
+收到它意味着本地镜像与历史完整性已不可信；快照不能补回逐笔成交，必须停止并补拉历史。
 对做市这是**正确性问题不是性能问题**:丢一条自己的 Fill,之后就一直拿着错的仓位
 报价,而业务层完全看不出来。
 
@@ -83,24 +82,21 @@ accounts=9999      14 条   只有 BlockBegun(无作用域)
 st, _ := c.Subscribe(ctx)
 for {
     select {
-    case ev := <-st.Events:
+    case ev, ok := <-st.Events:
+        if !ok { return <-st.Err }
         handle(ev)
-    case n := <-st.Lost:
-        if n == 0 {
-            log.Print("seq 倒退 —— 事件顺序不可信")   // 服务端 bug
-        } else {
-            log.Printf("丢帧 %d 条", n)
-        }
-        resync()                                    // 两种都要重拉快照
+    case n, ok := <-st.Lost:
+        if ok { log.Printf("丢帧 %d 条", n) }
+        return <-st.Err
     case err := <-st.Err:
         return err
     }
 }
 ```
 
-`Subscribe` 自带指数退避重连(250ms → 8s 封顶),直到 ctx 取消。
-**重连本身就意味着丢帧** —— 断开期间的事件不补发,所以重连后同样要重拉快照。
-单条消息解析失败会跳过而不断流 —— 一条坏消息不该让整条流挂掉。
+`Subscribe` 同步建连，断线、坏帧、Lagged 或 seq 倒退均终止流并报告 `ErrStreamGap`。
+不自动重连；可靠历史补齐并对账后由调用方重建连接。取消 context 会关闭静默连接，
+三个通道均关闭。详见 [做市完整性边界](LIQUIDITY-INTEGRATION.md)。
 
 ## 时延实测
 

@@ -60,6 +60,8 @@ func wordAddr(a Address) []byte {
 // 服务端的域里本来就有这一项,哪天它变成真地址,写死会让每一笔签名静默被拒,
 // 而错误信息只有 401。零值就是零地址,老用法不受影响。
 type Domain struct {
+	Name              string
+	Version           string
 	ChainID           uint64
 	VerifyingContract Address
 }
@@ -67,8 +69,8 @@ type Domain struct {
 func (d Domain) separator() []byte {
 	return Keccak256(
 		Keccak256([]byte(domainType)),
-		Keccak256([]byte(domainName)),
-		Keccak256([]byte(domainVersion)),
+		Keccak256([]byte(d.Name)),
+		Keccak256([]byte(d.Version)),
 		wordU64(d.ChainID),
 		wordAddr(d.VerifyingContract),
 	)
