@@ -18,6 +18,52 @@
 
 这是进程内约束；**调用方仍须持久化未决请求并按 API 代理地址持有跨进程独占租约**。本 SDK 没有提供持久 nonce 协调或可靠重启恢复；服务端原回执契约完成前，交易接入保持 gated。
 
+### 单请求换单的证据接口
+
+对照 dex-os `9d942f24aeb48212aae138d31febe66f0e240d32` 的公开 `/replace` 响应，新增
+`Client.BatchReplaceWithReceipt` / `Session.ReplaceWithReceipt`，仍只发送一次相同的 `/replace` 请求。
+旧 `BatchReplace` / `Replace` 签名不变，委托同一实现并返回事件；不是先撤再下两个请求。
+仅下单时空撤单列表序列化为 `[]`，而不是 Rust Vec 不接受的 `null`。
+
+`BatchSubmission` 同时返回：
+
+- `Request`：本地实际用于签名的代理、账户、nonce、nowMs、codec 版本、域、命令哈希和签名摘要。
+  SDK 不把私钥或请求签名复制进这份身份。它不是服务端已接受证明，也不是跨部署唯一键。
+- `Receipt`：实际完整解析的响应，包括 seq/sub、folded、聚合统计、拒因和原始事件。
+  非 nil 不等于业务成功，必须同时检查 error；坏 JSON/类型错/无响应时为 nil，不暴露半解码内容。
+- `Events()`：兼容旧消费者的事件视图；错误发生时仍可能有已成功的部分事件，不能丢弃。
+
+可选字段保持 nil 与合法0/false的区别。seq/sub 是请求所在日志条目及子项，不是唯一成交 ID。
+`folded=false` 返回 `ErrExecutionPending` 并经 Session 锁定；不会自动加 wait=fold、等待或重发。
+聚合统计只能否定成功，不能代替逐项事件证据；已提供的统计与输入/事件矛盾也返回错误。
+该固定源码的 batchStatus 值集为 `ok` / `none` / `partial`，完整成功为 `ok`，不是 `all`。
+缺 sub/folded/统计的旧版回执仍可按原有事件检查工作，不给缺失字段补零。
+
+即使返回 error，也要保留本次已经取得的 Request/Receipt。会话已阻断、context 预先取消或授权
+已到期时，本次调用不会建立新 Request；这不证明上一请求未执行，不应被当作恢复结果。
+
+**这不是发送前日志。** 身份随调用结果返回；进程在返回前崩溃仍可能失去它，尚需后续 SDK
+准备/落账接线和获批持久化方案。没有原回执查询、跨进程 nonce 协调或自动重启恢复能力，
+更不能据此解除 dex-os #1–#5、账户独占和 live 窗口前置。EIP-712、codec、签名算法均未改变。
+
+验证回执（2026-09-16）：实现及修复目标 `a1ad25ce72fcf0d3e2c8c0def99f012225e68d17`，
+base `444ca6a`。`GOWORK=off go test -race -count=1 -timeout=90s ./...` 与 `go vet ./...` 全绿。
+独立 checker s1940、实际 kimi-k3：初审发现 batchStatus 被误写为 all；以固定服务端 ok
+夹具复现红后修复，定向复核结论 0 blocking。不是实盘验收。
+
+新增风险检查的真实红证据与复跑位置：
+
+| 缺陷/变异 | 定向测试 | 实际红因 |
+|---|---|---|
+| 只保留事件，丢请求与回执元数据 | TestReplaceReceiptPreservesRequestAndMetadata | SDK 丢失原请求身份或回执元数据 |
+| 忽略显式 folded=false | TestExplicitPendingNeverSucceedsEvenWithEvents | 明确 pending 被当成执行成功 |
+| 错误放行值 all，不接受服务端 ok | TestReplaceReceiptPreservesRequestAndMetadata | ErrIncompleteBatch: batchStatus=ok |
+| 跳过 checkReplaceMetadata | TestReceiptAggregateClaimsCannotOverrideEvents | 聚合声明覆盖逐项证据或矛盾回执被接受 |
+| 不经 decoded 检查直接暴露 WriteReceipt | TestReceiptFailurePreservesAvailableEvidenceAndBlocks | 失败时丢失/伪造请求或回执证据 |
+
+各项为可编译代码缺陷的实际 rc=1，不把坏输入测试或编译失败当变异成功；末两项注入后逐字还原，
+`git diff --exit-code -- dexos/trade.go` 为0并整包复绿。签名/codec 金样沿用原独立 Rust 来源。
+
 ## WebSocket
 
 `Subscribe` 同步建立连接。坏帧、缺 envelope 字段、Lagged、seq 倒退或断线会终止流并报告 `ErrStreamGap`；取消 context 关闭静默连接。三个通道均关闭，消费方必须检查通道 ok 或在 Err 后结束。

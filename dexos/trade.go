@@ -2,7 +2,9 @@ package dexos
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
+	"fmt"
 	"net/http"
 	"time"
 )
@@ -111,31 +113,79 @@ func (c *Client) BatchReplace(
 	orders []BatchOrder,
 	nonce uint64,
 ) ([]EventEnvelope, error) {
+	result, err := c.BatchReplaceWithReceipt(ctx, agent, account, market, cancelSeqs, orders, nonce)
+	return result.Events(), err
+}
+
+// BatchReplaceWithReceipt 与 BatchReplace 使用同一请求，额外保留签名身份和回执。
+// 它不查询/重试旧请求，也不提供发送前持久化；即使返回 error 也应保留结果供核查。
+func (c *Client) BatchReplaceWithReceipt(ctx context.Context, agent *Signer, account uint32, market uint16, cancelSeqs []uint64, orders []BatchOrder, nonce uint64) (BatchSubmission, error) {
+	var result BatchSubmission
+	if agent == nil {
+		return result, errors.New("dexos: 缺代理签名者")
+	}
 	nowMs := uint64(time.Now().UnixMilli())
 	ids := make([]OrderID, len(cancelSeqs))
+	// Rust Vec 接收空数组，不接收 null；仅下单时也须保留同一 /replace 入口。
+	seqs := make([]uint64, len(cancelSeqs))
+	copy(seqs, cancelSeqs)
 	for i, s := range cancelSeqs {
 		ids[i] = NewOrderID(market, s)
 	}
 	cmd := EncodeBatchReplace(account, nowMs, ids, orders)
-	sig, err := agent.SignHashHex(c.Domain.AgentExecHash(cmd, nonce))
+	domain := c.Domain
+	digest := domain.AgentExecHash(cmd, nonce)
+	result.Request = &AgentRequestIdentity{
+		Agent: agent.Address(), Account: account, Nonce: nonce, NowMs: nowMs,
+		CodecVersion: CodecVersion, Domain: domain,
+		CommandHash: "0x" + hex.EncodeToString(Keccak256(cmd)), SigningHash: "0x" + hex.EncodeToString(digest),
+	}
+	sig, err := agent.SignHashHex(digest)
 	if err != nil {
-		return nil, err
+		return result, err
 	}
 	var out writeResp
 	err = c.do(ctx, http.MethodPost, "/replace", map[string]any{
 		"agent":     agent.Address().Hex(),
 		"account":   account,
-		"cancels":   cancelSeqs,
+		"cancels":   seqs,
 		"market":    market,
 		"orders":    ordersJSON(orders),
 		"nowMs":     nowMs,
 		"nonce":     nonce,
 		"signature": sig,
 	}, &out)
+	result.Receipt = out.evidence()
 	if err == nil {
 		err = checkBatchOutcome(out.Events, account, orders, ids)
 	}
-	return out.Events, err
+	if err == nil {
+		err = checkReplaceMetadata(out.WriteReceipt, len(orders), len(ids))
+	}
+	return result, err
+}
+
+// 聚合字段只能进一步否定完整成功，不能取代每个输入的事件证据。
+func checkReplaceMetadata(receipt WriteReceipt, places, cancels int) error {
+	if receipt.BatchStatus != nil && *receipt.BatchStatus != "ok" {
+		return fmt.Errorf("%w: batchStatus=%s", ErrIncompleteBatch, *receipt.BatchStatus)
+	}
+	for _, field := range []struct {
+		name string
+		got  *uint64
+		want uint64
+	}{
+		{"submitted", receipt.Submitted, uint64(places)},
+		{"submittedCancels", receipt.SubmittedCancels, uint64(cancels)},
+		{"accepted", receipt.Accepted, uint64(places)},
+		{"canceled", receipt.Canceled, uint64(cancels)},
+		{"rejected", receipt.Rejected, 0},
+	} {
+		if field.got != nil && *field.got != field.want {
+			return fmt.Errorf("%w: %s 与输入或事件矛盾", ErrIncompleteBatch, field.name)
+		}
+	}
+	return nil
 }
 
 // ordersJSON 网关的 JSON 字段名与内核的规范编码是两套东西:

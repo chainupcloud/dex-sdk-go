@@ -254,9 +254,20 @@ func (s *Session) Cancel(ctx context.Context, market uint16, seqs ...uint64) ([]
 func (s *Session) Replace(
 	ctx context.Context, market uint16, cancelSeqs []uint64, orders []BatchOrder,
 ) ([]EventEnvelope, error) {
-	return s.write(ctx, func(n uint64) ([]EventEnvelope, error) {
-		return s.Client.BatchReplace(ctx, s.Agent, s.Account, market, cancelSeqs, orders, n)
+	result, err := s.ReplaceWithReceipt(ctx, market, cancelSeqs, orders)
+	return result.Events(), err
+}
+
+// ReplaceWithReceipt 额外返回原请求身份与已解析回执；仍复用同一 nonce 锁与失败锁定。
+// 因已有未决写而被阻断时不创建新身份，不会把新调用包装成旧请求恢复。
+func (s *Session) ReplaceWithReceipt(ctx context.Context, market uint16, cancelSeqs []uint64, orders []BatchOrder) (BatchSubmission, error) {
+	var result BatchSubmission
+	_, err := s.write(ctx, func(n uint64) ([]EventEnvelope, error) {
+		var sendErr error
+		result, sendErr = s.Client.BatchReplaceWithReceipt(ctx, s.Agent, s.Account, market, cancelSeqs, orders, n)
+		return result.Events(), sendErr
 	})
+	return result, err
 }
 
 // SetLeverage 设置杠杆。
