@@ -46,6 +46,24 @@
 准备/落账接线和获批持久化方案。没有原回执查询、跨进程 nonce 协调或自动重启恢复能力，
 更不能据此解除 dex-os #1–#5、账户独占和 live 窗口前置。EIP-712、codec、签名算法均未改变。
 
+验证回执（2026-09-16）：实现及修复目标 `a1ad25ce72fcf0d3e2c8c0def99f012225e68d17`，
+base `444ca6a`。`GOWORK=off go test -race -count=1 -timeout=90s ./...` 与 `go vet ./...` 全绿。
+独立 checker s1940、实际 kimi-k3：初审发现 batchStatus 被误写为 all；以固定服务端 ok
+夹具复现红后修复，定向复核结论 0 blocking。不是实盘验收。
+
+新增风险检查的真实红证据与复跑位置：
+
+| 缺陷/变异 | 定向测试 | 实际红因 |
+|---|---|---|
+| 只保留事件，丢请求与回执元数据 | TestReplaceReceiptPreservesRequestAndMetadata | SDK 丢失原请求身份或回执元数据 |
+| 忽略显式 folded=false | TestExplicitPendingNeverSucceedsEvenWithEvents | 明确 pending 被当成执行成功 |
+| 错误放行值 all，不接受服务端 ok | TestReplaceReceiptPreservesRequestAndMetadata | ErrIncompleteBatch: batchStatus=ok |
+| 跳过 checkReplaceMetadata | TestReceiptAggregateClaimsCannotOverrideEvents | 聚合声明覆盖逐项证据或矛盾回执被接受 |
+| 不经 decoded 检查直接暴露 WriteReceipt | TestReceiptFailurePreservesAvailableEvidenceAndBlocks | 失败时丢失/伪造请求或回执证据 |
+
+各项为可编译代码缺陷的实际 rc=1，不把坏输入测试或编译失败当变异成功；末两项注入后逐字还原，
+`git diff --exit-code -- dexos/trade.go` 为0并整包复绿。签名/codec 金样沿用原独立 Rust 来源。
+
 ## WebSocket
 
 `Subscribe` 同步建立连接。坏帧、缺 envelope 字段、Lagged、seq 倒退或断线会终止流并报告 `ErrStreamGap`；取消 context 关闭静默连接。三个通道均关闭，消费方必须检查通道 ok 或在 Err 后结束。
