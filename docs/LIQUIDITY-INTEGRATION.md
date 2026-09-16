@@ -21,7 +21,8 @@
 ### 单请求换单的证据接口
 
 对照 dex-os `9d942f24aeb48212aae138d31febe66f0e240d32` 的公开 `/replace` 响应，新增
-`Client.BatchReplaceWithReceipt` / `Session.ReplaceWithReceipt`，仍只发送一次相同的 `/replace` 请求。
+`Client.BatchReplaceWithReceipt` / `Session.ReplaceWithReceipt`。本轮对齐 dex-os `3f02f2eb2cb5affa3df73a7bcd12cd30e7e8e7f5`
+的双环执行契约，换单仍只发送一次 `/replace?wait=fold` 请求。
 旧 `BatchReplace` / `Replace` 签名不变，委托同一实现并返回事件；不是先撤再下两个请求。
 仅下单时空撤单列表序列化为 `[]`，而不是 Rust Vec 不接受的 `null`。
 
@@ -34,7 +35,8 @@
 - `Events()`：兼容旧消费者的事件视图；错误发生时仍可能有已成功的部分事件，不能丢弃。
 
 可选字段保持 nil 与合法0/false的区别。seq/sub 是请求所在日志条目及子项，不是唯一成交 ID。
-`folded=false` 返回 `ErrExecutionPending` 并经 Session 锁定；不会自动加 wait=fold、等待或重发。
+`folded=false` 返回 `ErrExecutionPending` 并经 Session 锁定；同次请求虽已带 `wait=fold`，
+预算内仍可能等不到结果。不会再发第二次请求、自动轮询或重发。
 聚合统计只能否定成功，不能代替逐项事件证据；已提供的统计与输入/事件矛盾也返回错误。
 该固定源码的 batchStatus 值集为 `ok` / `none` / `partial`，完整成功为 `ok`，不是 `all`。
 缺 sub/folded/统计的旧版回执仍可按原有事件检查工作，不给缺失字段补零。
@@ -42,9 +44,24 @@
 即使返回 error，也要保留本次已经取得的 Request/Receipt。会话已阻断、context 预先取消或授权
 已到期时，本次调用不会建立新 Request；这不证明上一请求未执行，不应被当作恢复结果。
 
-**这不是发送前日志。** 身份随调用结果返回；进程在返回前崩溃仍可能失去它，尚需后续 SDK
-准备/落账接线和获批持久化方案。没有原回执查询、跨进程 nonce 协调或自动重启恢复能力，
+**仅调用 WithReceipt 仍不是发送前日志。** 身份随调用结果返回；进程在返回前崩溃仍可能失去它。
+需要发送前持久化的调用方应使用下述 `ReplaceWithJournal` 并提供真实存储。SDK 没有原回执查询、跨进程 nonce 协调或自动重启恢复能力，
 更不能据此解除 dex-os #1–#5、账户独占和 live 窗口前置。EIP-712、codec、签名算法均未改变。
+
+### 发送前原请求日志
+
+`Session.ReplaceWithJournal(ctx, market, cancels, orders, journal)` 与其他写操作共用同一 Session nonce 锁：
+
+1. 固定无签名 `ReplaceRequest`（Identity、Market、Cancels、Orders），向 `BeforeSend` 交独立副本；没有网络写入。
+2. 调用方先在持久事务中记录原请求、每个输入位置对应的本地订单身份，并核验代理独占/账号围栏/风险准入。
+3. 回调成功后重新核验授权期限与会话身份，SDK 使用同一原命令/nowMs/nonce 签名，仅发送一次 `/replace?wait=fold`。
+4. `AfterReceive` 收到独立的结果副本与错误，包括 pending、部分成功、坏响应或断线已取得的证据。
+5. 只有场所完整成功且结果记录成功后推进本 Session nonce；任一日志错误（含提交结果未知）均锁定会话。BeforeSend 失败不发送，AfterReceive 失败不重发。
+
+回调不得重入该 Session。传入 slice、日志回调中的 slice、返回证据副本均不能改写已固定的实际命令。
+记录中不含私钥或可重放签名；不要把业务 ClientID 当成服务端已有的幂等键。
+这些接入点不是 SDK 内置数据库，不能据此声称已经解决跨进程租约、部署纪元隔离或服务端持久回执查询。
+重启遇到 prepared 也不能视为“未发送”：进程可能在发出后、记录响应前退出，只能按原身份取得权威结论。
 
 验证回执（2026-09-16）：实现及修复目标 `a1ad25ce72fcf0d3e2c8c0def99f012225e68d17`，
 base `444ca6a`。`GOWORK=off go test -race -count=1 -timeout=90s ./...` 与 `go vet ./...` 全绿。

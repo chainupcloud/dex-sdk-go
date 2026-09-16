@@ -120,32 +120,59 @@ func (c *Client) BatchReplace(
 // BatchReplaceWithReceipt 与 BatchReplace 使用同一请求，额外保留签名身份和回执。
 // 它不查询/重试旧请求，也不提供发送前持久化；即使返回 error 也应保留结果供核查。
 func (c *Client) BatchReplaceWithReceipt(ctx context.Context, agent *Signer, account uint32, market uint16, cancelSeqs []uint64, orders []BatchOrder, nonce uint64) (BatchSubmission, error) {
+	return c.batchReplaceWithJournal(ctx, agent, account, market, cancelSeqs, orders, nonce, nil)
+}
+
+func (c *Client) batchReplaceWithJournal(ctx context.Context, agent *Signer, account uint32, market uint16, cancelSeqs []uint64, orders []BatchOrder, nonce uint64, journal ReplaceJournal) (BatchSubmission, error) {
 	var result BatchSubmission
-	if agent == nil {
-		return result, errors.New("dexos: 缺代理签名者")
+	if c == nil || c.HTTP == nil || agent == nil {
+		return result, errors.New("dexos: 缺客户端或代理签名者")
 	}
+	if err := ctx.Err(); err != nil {
+		return result, err
+	}
+	// 固定命令后不再读取调用方的 slice；日志回调也只拿到另一份副本。
+	orders = append([]BatchOrder(nil), orders...)
 	nowMs := uint64(time.Now().UnixMilli())
 	ids := make([]OrderID, len(cancelSeqs))
 	// Rust Vec 接收空数组，不接收 null；仅下单时也须保留同一 /replace 入口。
 	seqs := make([]uint64, len(cancelSeqs))
 	copy(seqs, cancelSeqs)
 	for i, s := range cancelSeqs {
+		if s >= 1<<48 {
+			return result, errors.New("dexos: 撤单序号超过48位，不能截断")
+		}
 		ids[i] = NewOrderID(market, s)
 	}
 	cmd := EncodeBatchReplace(account, nowMs, ids, orders)
 	domain := c.Domain
+	endpoint := c.BaseURL
 	digest := domain.AgentExecHash(cmd, nonce)
 	result.Request = &AgentRequestIdentity{
 		Agent: agent.Address(), Account: account, Nonce: nonce, NowMs: nowMs,
 		CodecVersion: CodecVersion, Domain: domain,
 		CommandHash: "0x" + hex.EncodeToString(Keccak256(cmd)), SigningHash: "0x" + hex.EncodeToString(digest),
 	}
+	if journal != nil {
+		request := ReplaceRequest{Identity: *result.Request, Market: market,
+			Cancels: append([]uint64{}, seqs...), Orders: append([]BatchOrder{}, orders...)}
+		if err := journal.BeforeSend(ctx, request); err != nil {
+			return result, fmt.Errorf("dexos: 原请求记账失败，未发送: %w", err)
+		}
+		if c.Domain != domain || c.BaseURL != endpoint {
+			return result, errors.New("dexos: 请求准备后场所或签名域变化，未发送")
+		}
+		if err := ctx.Err(); err != nil {
+			return result, err
+		}
+	}
 	sig, err := agent.SignHashHex(digest)
 	if err != nil {
 		return result, err
 	}
 	var out writeResp
-	err = c.do(ctx, http.MethodPost, "/replace", map[string]any{
+	// dex-os 3f02f2e 的双环同步 ack 没有业务事件；等待仍属于同一次写，不另发或重试。
+	err = c.do(ctx, http.MethodPost, "/replace?wait=fold", map[string]any{
 		"agent":     agent.Address().Hex(),
 		"account":   account,
 		"cancels":   seqs,
@@ -161,6 +188,15 @@ func (c *Client) BatchReplaceWithReceipt(ctx context.Context, agent *Signer, acc
 	}
 	if err == nil {
 		err = checkReplaceMetadata(out.WriteReceipt, len(orders), len(ids))
+	}
+	if journal != nil {
+		copied, copyErr := copySubmission(result)
+		if copyErr != nil {
+			return result, errors.Join(err, fmt.Errorf("dexos: 回执证据复制失败: %w", copyErr))
+		}
+		if journalErr := journal.AfterReceive(ctx, copied, err); journalErr != nil {
+			err = errors.Join(err, fmt.Errorf("dexos: 执行结果记账失败: %w", journalErr))
+		}
 	}
 	return result, err
 }
