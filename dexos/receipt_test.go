@@ -45,7 +45,7 @@ func newReceiptFixture(t *testing.T, status int, body string) *receiptFixture {
 		f.mu.Lock()
 		defer f.mu.Unlock()
 		f.calls++
-		if r.Method != http.MethodPost || r.URL.Path != "/replace" || r.URL.RawQuery != "" {
+		if r.Method != http.MethodPost || r.URL.Path != "/replace" || r.URL.RawQuery != "wait=fold" {
 			t.Errorf("回执路径被改成其他请求/重读 nonce: %s %s", r.Method, r.URL.Path)
 			http.Error(w, "unexpected request", http.StatusNotFound)
 			return
