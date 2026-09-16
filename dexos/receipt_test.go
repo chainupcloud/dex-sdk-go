@@ -15,7 +15,9 @@ import (
 )
 
 const receiptEvents = `[{"kind":"OrderCanceled","data":{"account":42,"market":7,"orderSeq":3,"remainingLots":2}},{"kind":"OrderAccepted","data":{"account":42,"market":7,"orderSeq":4,"price":100,"lots":2,"filledLots":0,"resting":true}}]`
-const completeReceipt = `{"status":"ok","seq":120,"sub":0,"folded":true,"submitted":1,"submittedCancels":1,"accepted":1,"canceled":1,"rejected":0,"batchStatus":"all","events":` + receiptEvents + `}`
+
+// batchStatus 值集来自 dex-os api.rs@9d942f2:578–586：ok / none / partial。
+const completeReceipt = `{"status":"ok","seq":120,"sub":0,"folded":true,"submitted":1,"submittedCancels":1,"accepted":1,"canceled":1,"rejected":0,"batchStatus":"ok","events":` + receiptEvents + `}`
 
 type receiptRequest struct {
 	Agent     string `json:"agent"`
@@ -288,5 +290,20 @@ func TestReplaceNilCancelsAreAnEmptyJSONArray(t *testing.T) {
 	defer cancel()
 	if _, err := c.BatchReplace(ctx, agent, 42, 7, nil, nil, 0); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestReceiptNonSuccessBatchStatusCannotPass(t *testing.T) {
+	for _, status := range []string{"none", "partial", "all", "unknown"} {
+		t.Run(status, func(t *testing.T) {
+			body := strings.Replace(completeReceipt, `"batchStatus":"ok"`, `"batchStatus":"`+status+`"`, 1)
+			f := newReceiptFixture(t, http.StatusOK, body)
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			result, err := f.session.ReplaceWithReceipt(ctx, 7, []uint64{3}, receiptOrders())
+			if !errors.Is(err, ErrIncompleteBatch) || !errors.Is(err, ErrSessionBlocked) || result.Receipt == nil || result.Receipt.BatchStatus == nil || *result.Receipt.BatchStatus != status {
+				t.Fatalf("非成功/未知 batchStatus 被放行或丢失: %s err=%v", status, err)
+			}
+		})
 	}
 }

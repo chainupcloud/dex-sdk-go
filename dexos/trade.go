@@ -167,7 +167,7 @@ func (c *Client) BatchReplaceWithReceipt(ctx context.Context, agent *Signer, acc
 
 // 聚合字段只能进一步否定完整成功，不能取代每个输入的事件证据。
 func checkReplaceMetadata(receipt WriteReceipt, places, cancels int) error {
-	if receipt.BatchStatus != nil && *receipt.BatchStatus != "all" {
+	if receipt.BatchStatus != nil && *receipt.BatchStatus != "ok" {
 		return fmt.Errorf("%w: batchStatus=%s", ErrIncompleteBatch, *receipt.BatchStatus)
 	}
 	for _, field := range []struct {

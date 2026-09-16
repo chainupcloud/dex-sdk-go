@@ -36,6 +36,7 @@
 可选字段保持 nil 与合法0/false的区别。seq/sub 是请求所在日志条目及子项，不是唯一成交 ID。
 `folded=false` 返回 `ErrExecutionPending` 并经 Session 锁定；不会自动加 wait=fold、等待或重发。
 聚合统计只能否定成功，不能代替逐项事件证据；已提供的统计与输入/事件矛盾也返回错误。
+该固定源码的 batchStatus 值集为 `ok` / `none` / `partial`，完整成功为 `ok`，不是 `all`。
 缺 sub/folded/统计的旧版回执仍可按原有事件检查工作，不给缺失字段补零。
 
 即使返回 error，也要保留本次已经取得的 Request/Receipt。会话已阻断、context 预先取消或授权
