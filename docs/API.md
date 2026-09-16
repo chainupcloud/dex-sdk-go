@@ -221,6 +221,11 @@ nonce 用 **agent 自己的**(`/agents/:master` 里的 `nextNonce`)。
 事件序列必然是先 `OrderCanceled` 后 `OrderAccepted` —— 顺序即语义。反过来会让新旧报价
 短暂同时在簿上,名义敞口瞬时翻倍,可能撞上保证金检查让新单被拒。
 
+SDK 的 `Session.ReplaceWithReceipt` / `Client.BatchReplaceWithReceipt` 仍调用此接口，
+额外保留本地签名请求身份及已解析响应（seq、可选 sub/folded、聚合计数/状态、拒因和事件）。
+`folded=false` 不视为执行成功；聚合计数不能替代逐项事件。旧版缺失的可选字段保留 nil。
+一个请求不等于全成功或全回滚；详情与恢复限制见 [做市接入完整性边界](LIQUIDITY-INTEGRATION.md)。
+
 ---
 
 ## 读一致性:read-your-writes

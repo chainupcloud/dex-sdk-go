@@ -123,10 +123,13 @@ func (c *Client) do(ctx context.Context, method, path string, in, out any) error
 		return fmt.Errorf("响应解析失败: %w", err)
 	}
 	if receipt, ok := out.(*writeResp); ok {
-		if receipt.Status != "ok" || receipt.Seq == 0 || receipt.Events == nil {
+		if receipt.Status != "ok" || receipt.Seq == nil || *receipt.Seq == 0 || receipt.Events == nil {
 			return errors.New("dexos: 写回执缺 status/seq/events，执行结果未知")
 		}
-		c.ObserveSeq(receipt.Seq)
+		c.ObserveSeq(*receipt.Seq)
+		if receipt.Folded != nil && !*receipt.Folded {
+			return ErrExecutionPending
+		}
 	}
 	return nil
 }
@@ -313,12 +316,6 @@ func (c *Client) OrderSeqs(ctx context.Context, account uint32, market uint16) (
 type EventEnvelope struct {
 	Kind string          `json:"kind"`
 	Data json.RawMessage `json:"data"`
-}
-
-type writeResp struct {
-	Status string          `json:"status"`
-	Seq    uint64          `json:"seq"`
-	Events []EventEnvelope `json:"events"`
 }
 
 // AccountRef 地址 → 内核账户的映射结果。
