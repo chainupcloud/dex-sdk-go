@@ -153,6 +153,9 @@ func (c *Client) Version(ctx context.Context) (*Version, error) {
 // Market 市场概览。价格均为 tick,数量均为 lot —— 换算成人类单位要用
 // PriceDecimals / SizeDecimals,SDK 不替你做,避免在整数域外引入浮点。
 type Market struct {
+	// Kind 来自市场目录（perp/spot）。旧响应缺失/null 保持空串，未知值原样保留；
+	// 空串不是 perp，调用方须按策略允许的类型显式检查。
+	Kind                   string `json:"kind"`
 	Market                 uint16 `json:"market"`
 	Symbol                 string `json:"symbol"`
 	Status                 string `json:"status"`

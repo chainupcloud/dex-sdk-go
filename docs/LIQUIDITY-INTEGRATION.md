@@ -10,6 +10,14 @@
 
 `Market.PriceDecimals` / `SizeDecimals` 现为 `*int`：无元数据市场保留在目录中，精度为 nil；使用某个市场前须核对这两项，缺失时明确报告市场 ID 并停止该市场转换。不能把未知精度当 0，也不因无关市场缺元数据丢掉整个目录。
 
+`Market.Kind` 保留服务端明确的 `perp` / `spot`；源码出处为 dex-os
+`80eb5de719172f3c9fc454babd4d11c0d1a04a0e` 的 `api.rs::markets`。
+新版目录可同时包含永续与现货，禁止靠 symbol 或已有精度猜它是哪一种。
+缺失/null 保持空串，未知字符串不改成已知类型；整份目录仍可读，由策略逐行拒绝不支持的市场。
+这只是只读目录字段透传，不改变签名/codec，不宣称新增现货执行与账务能力。
+验证：`TestMarketsPreserveExplicitKindWithoutGuessing` 在加字段前 rc=1（“SDK 丢失或猜测市场类型”），
+`TestMarketsRejectWrongKindType` 同样先红；加字段后定向 race 绿，缺失并不被填为 perp。
+
 ## 批量订单与未知结果
 
 `BatchPlace` / `BatchCancel` / `BatchReplace` 返回原始成功事件；缺任意输入项成功证据时同时返回 `ErrIncompleteBatch`。部分成功不能按压缩后的数组索引或价量配对，也不能把失败当未执行。
