@@ -15,6 +15,7 @@ go get github.com/chainupcloud/dex-sdk-go
 | [`examples/session`](examples/session/main.go) | **最小接入**:URL + 一把 API 钱包私钥,下单撤单 |
 | [`examples/onboard`](examples/onboard/main.go) | 从零接入:生成地址 → 找账户 → 连接 → 交易 |
 | [`examples/discover`](examples/discover/main.go) | 只给一个 URL 完成 发现 → 授权 → 下单 |
+| [`examples/smoke`](examples/smoke/main.go) | **全新账号全链路 31 步**(测试栈:入金 → 授权 → 会话 → 挂/改/换/撤 → 杠杆 → 条件单 / TWAP / TP-SL → 吃单 → `/fills` 补拉 → 现货 → 拒绝不锁会话 → 撤销);`GW=… ADMIN_TOKEN=… go run ./examples/smoke` |
 | [做市接入](docs/MARKET-MAKING.md) | 高频报价:报价循环、原子换单、丢帧处置、错误恢复 |
 | [REST 参考](docs/API.md) | 接口字段、**写回执与 `RejectedError`**、`/fills` 成交账本、拒因表 |
 | [WebSocket 参考](docs/WEBSOCKET.md) | 事件流协议、事件目录、**断线补拉**、时延实测 |
@@ -72,6 +73,23 @@ if err != nil { log.Fatal(err) }
 s.Place(ctx, dexos.BatchOrder{Market: 0, Side: dexos.Buy, Price: 70000, Lots: 1, TIF: dexos.GTC})
 s.Replace(ctx, 0, oldSeqs, newQuotes)      // 原子换单
 ```
+
+`Session` 包了 agent 白名单里**全部 13 条**命令,nonce 由它管:
+
+| 方法 | 做什么 |
+|---|---|
+| `Place` / `Cancel` / `Replace` | 批量下单 / 批量撤单 / 原子换单(做市三件) |
+| `PlaceGTT` / `Modify` | 带过期时刻的单张下单 / 改单(撤旧建新,丢时间优先) |
+| `PlaceConditional` / `CancelConditional` | 止损 / 止盈触发单 |
+| `PlaceTwap` / `CancelTwap` | TWAP 母单 |
+| `PlaceTpslPair` | 止盈止损配对(OCO;`PositionTpsl` 跟持仓走) |
+| `SetLeverage(market, customImfPpm)` | 杠杆——参数是 ppm,用 `ImfPpmForLeverage(5)` 从倍数换算 |
+| `ScheduleCancel` | 断线保护(dead man's switch) |
+| `Fills` / `Risk` / `Orders` / `Markets` / `Book` / `Subscribe` | 只读,不消耗 nonce |
+
+写方法返回 `([]EventEnvelope, error)`;`err` 的三类见 [API.md 拒因](docs/API.md#拒因):
+`*RejectedError`(业务拒绝,终局,不锁会话)、`ErrExecutionPending`(已定序结论未知,锁会话、别重发)、
+`*APIError`(传输层)。
 
 API 钱包私钥从前端拿:`/app` →「API 钱包」→ 生成 → 主钱包签一次授权,
 私钥只显示一次。

@@ -171,8 +171,17 @@ for {
 }
 ```
 
-先订阅再拉快照仍需明确水位衔接，不能仅凭调用顺序宣称历史完整。当前服务端前置见
-[做市完整性边界](LIQUIDITY-INTEGRATION.md)。
+流终止后的补齐(断线 / Lagged / 坏帧都走这条):
+
+```go
+var lastID string                 // 循环里每收到一条 ev 就更新:lastID = ev.ID()
+fills, err := s.Fills(ctx, dexos.FillQuery{After: lastID})   // 自动翻到 hasMore=false
+for _, f := range fills { apply(f) }                          // 与流上已处理的按 f.ID 去重
+st, err = s.Subscribe(ctx, markets...)                        // 再重连
+```
+
+`ev.ID()` 与 `/fills` 里同一笔的 `id` 逐字符相同,所以它既是去重键也是续拉游标。持仓 / 盘口
+快照(`Risk` / `Book`)只能校准**状态**,补不回逐笔成交。详见 [做市完整性边界](LIQUIDITY-INTEGRATION.md)。
 
 ---
 
