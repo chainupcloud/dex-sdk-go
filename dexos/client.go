@@ -123,6 +123,22 @@ func (c *Client) do(ctx context.Context, method, path string, in, out any) error
 		return fmt.Errorf("响应解析失败: %w", err)
 	}
 	if receipt, ok := out.(*writeResp); ok {
+		// 业务拒绝也是 200:先于「缺字段」判,否则拒因被泛化成「结果未知」——
+		// 那是把一个终局结论报成需要人工查证的未决事项。
+		if receipt.decoded && receipt.Status == "rejected" {
+			re := &RejectedError{Reason: "Rejected"}
+			if receipt.Reason != nil && *receipt.Reason != "" {
+				re.Reason = *receipt.Reason
+			}
+			if receipt.Seq != nil {
+				re.Seq = *receipt.Seq
+				c.ObserveSeq(*receipt.Seq)
+			}
+			if receipt.Sub != nil {
+				re.Sub = *receipt.Sub
+			}
+			return re
+		}
 		if receipt.Status != "ok" || receipt.Seq == nil || *receipt.Seq == 0 || receipt.Events == nil {
 			return errors.New("dexos: 写回执缺 status/seq/events，执行结果未知")
 		}
@@ -155,20 +171,28 @@ func (c *Client) Version(ctx context.Context) (*Version, error) {
 type Market struct {
 	// Kind 来自市场目录（perp/spot）。旧响应缺失/null 保持空串，未知值原样保留；
 	// 空串不是 perp，调用方须按策略允许的类型显式检查。
-	Kind                   string `json:"kind"`
-	Market                 uint16 `json:"market"`
-	Symbol                 string `json:"symbol"`
-	Status                 string `json:"status"`
-	Oracle                 uint32 `json:"oracle"`
-	Mark                   uint32 `json:"mark"`
-	BestBid                uint32 `json:"bestBid"`
-	BestAsk                uint32 `json:"bestAsk"`
-	OpenInterestLots       int64  `json:"openInterestLots"`
-	FundingRatePpm         int64  `json:"fundingRatePpm"`
-	FundingIndex           string `json:"fundingIndex"`
-	InitialMarginPpm       uint32 `json:"initialMarginPpm"`
-	MaintenanceFractionPpm uint32 `json:"maintenanceFractionPpm"`
-	QuotePerTickLot        uint64 `json:"quotePerTickLot"`
+	Kind   string `json:"kind"`
+	Market uint16 `json:"market"`
+	Symbol string `json:"symbol"`
+	Status string `json:"status"`
+	// Base / Quote / BasePerLot 只有现货有(永续为 nil):base、quote 是内核 token id,
+	// BasePerLot 是 1 lot 等于多少最小单位的 base。现货成交是两腿过账,没有仓位 /
+	// 资金费 / 清算;合约专属命令(只减仓 / 条件单 / TP-SL / TWAP / 杠杆)在现货上一律
+	// SpotUnsupported。下单 / 撤单两类市场同一套命令。
+	Base                   *uint32 `json:"base"`
+	Quote                  *uint32 `json:"quote"`
+	BasePerLot             *uint64 `json:"basePerLot"`
+	LastPrice              uint32  `json:"lastPrice"`
+	Oracle                 uint32  `json:"oracle"`
+	Mark                   uint32  `json:"mark"`
+	BestBid                uint32  `json:"bestBid"`
+	BestAsk                uint32  `json:"bestAsk"`
+	OpenInterestLots       int64   `json:"openInterestLots"`
+	FundingRatePpm         int64   `json:"fundingRatePpm"`
+	FundingIndex           string  `json:"fundingIndex"`
+	InitialMarginPpm       uint32  `json:"initialMarginPpm"`
+	MaintenanceFractionPpm uint32  `json:"maintenanceFractionPpm"`
+	QuotePerTickLot        uint64  `json:"quotePerTickLot"`
 	// 元数据可缺失；nil 明确表示无法进行人类单位转换，不能当作0位精度。
 	PriceDecimals *int `json:"priceDecimals"`
 	SizeDecimals  *int `json:"sizeDecimals"`
@@ -230,11 +254,25 @@ type Position struct {
 	FundingIndex string `json:"fundingIndex"`
 }
 
-// Risk 账户实时风险视图。NC < MMR 即可被清算。
+// Balance 账户在某个 token 上的余额(统一账户:资金按 token 记,token 0 = USDC)。
+//
+// 只有 USDC 作合约抵押;其余 token 可以充提 / 划转 / 在现货市场买卖,不进 NC / IMR。
+// Hold 是现货挂单冻结额(买单冻 quote、卖单冻 base),Available = Amount − Hold。
+// 全部是定点整数字符串(i128,JSON number 装不下)。
+type Balance struct {
+	Token     uint32 `json:"token"`
+	Amount    string `json:"amount"`
+	Available string `json:"available"`
+	Hold      string `json:"hold"`
+}
+
+// Risk 账户实时风险视图。NC − hold(USDC) < MMR 即可被清算。
 type Risk struct {
-	Exists       bool       `json:"exists"`
-	AccountID    uint32     `json:"accountId"`
-	Collateral   string     `json:"collateral"`
+	Exists     bool   `json:"exists"`
+	AccountID  uint32 `json:"accountId"`
+	Collateral string `json:"collateral"`
+	// Balances 各 token 余额;Collateral 是其中 USDC 那条的 Amount。
+	Balances     []Balance  `json:"balances"`
 	NC           string     `json:"nc"`
 	IMR          string     `json:"imr"`
 	MMR          string     `json:"mmr"`

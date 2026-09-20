@@ -22,7 +22,7 @@
 
 `BatchPlace` / `BatchCancel` / `BatchReplace` 返回原始成功事件；缺任意输入项成功证据时同时返回 `ErrIncompleteBatch`。部分成功不能按压缩后的数组索引或价量配对，也不能把失败当未执行。
 
-`Session` 在会话内串行写入，任意写错误锁定后续写入及 `Resync`（`ErrSessionBlocked`），保留原 nonce 与事件供核查。锁定并不声称明确拒绝也是未知执行，只表示调用方尚未核对上次结果。不得通过创建新 Session、重读 nonce 或换新 nonce 盲重发绕过。
+`Session` 在会话内串行写入,**结论未知**的写错误(传输失败、`ErrExecutionPending`、`NonceMismatch`、`ErrIncompleteBatch`)锁定后续写入及 `Resync`(`ErrSessionBlocked`),保留原 nonce 与事件供核查;状态机的终局业务拒绝(`*RejectedError`)不锁——内核在 nonce 写入之后才判业务且 apply 不回滚,本地计数器 ++;发生在 nonce 之前的拒绝(scope 越权、未授权)计数器不动。锁定并不声称明确拒绝也是未知执行，只表示调用方尚未核对上次结果。不得通过创建新 Session、重读 nonce 或换新 nonce 盲重发绕过。
 
 这是进程内约束；**调用方仍须持久化未决请求并按 API 代理地址持有跨进程独占租约**。本 SDK 没有提供持久 nonce 协调或可靠重启恢复；服务端原回执契约完成前，交易接入保持 gated。
 
@@ -91,14 +91,14 @@ base `444ca6a`。`GOWORK=off go test -race -count=1 -timeout=90s ./...` 与 `go 
 
 ## WebSocket
 
-`Subscribe` 同步建立连接。坏帧、缺 envelope 字段、Lagged、seq 倒退或断线会终止流并报告 `ErrStreamGap`；取消 context 关闭静默连接。三个通道均关闭，消费方必须检查通道 ok 或在 Err 后结束。
+`Subscribe` 同步建立连接。坏帧、缺 envelope 字段、Lagged 或断线会终止流并报告 `ErrStreamGap`(seq 回退不终止:网关不承诺 seq 单调,系统命令事件与订单事件派生路径不同)；取消 context 关闭静默连接。三个通道均关闭，消费方必须检查通道 ok 或在 Err 后结束。
 
 不再自动重连。只有从可靠历史补齐逐笔事件、对账完成后才能建立新连接；当前 `/risk` 或 `/book` 快照不能证明成交历史完整。seq 可以重复或跳号，禁止作为唯一成交 ID。
 
 ## 服务端前置
 
-- [成交身份、订单关联、实际费用与完整分页 #1](https://github.com/chainupcloud/dex-os/issues/1)
-- [历史补拉及投影完整性 #2](https://github.com/chainupcloud/dex-os/issues/2)
+- [成交身份、订单关联、实际费用与完整分页 #1](https://github.com/chainupcloud/dex-os/issues/1) —— **服务端已交付**(dex-os 2026-09-19,`GET /fills`:`"<seq>-<sub>-<idx>"` 身份、`order/counterOrder`、逐笔实际 `fee`、`after` 游标);SDK 侧 `Session.Fills` + `Event.ID()`
+- [历史补拉及投影完整性 #2](https://github.com/chainupcloud/dex-os/issues/2) —— 同上,补拉走 `/fills` 而非快照
 - [原请求回执恢复 #3](https://github.com/chainupcloud/dex-os/issues/3)
 - [批次逐项结果 #4](https://github.com/chainupcloud/dex-os/issues/4)
 - [资金流水与权益对账 #5](https://github.com/chainupcloud/dex-os/issues/5)

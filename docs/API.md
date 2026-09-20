@@ -78,9 +78,11 @@
 }]}
 ```
 
+- `kind` 是 `"perp"` 或 `"spot"`;现货对另带 `base` / `quote`(内核 token id)与 `basePerLot`。
+  现货成交是两腿过账,没有仓位 / 资金费 / 清算;合约专属命令在现货市场上一律 `SpotUnsupported`。
 - `mark` 是标记价:`clamp(median3(oracle, median3(bid,ask,last), oracle+basis), oracle±2%)`。
   **盘口对称且无成交时 `mark == oracle`** —— 两个数一样不是 bug。
-- 清算判定用的是 `oracle`,不是 `mark`。
+- 计价与清算判定用 `mark`(Hyperliquid 式,只在喂价节拍刷新、抗单笔操纵);`oracle` 只作资金费与最终结算的锚。
 
 ### `GET /book/:market?n=<档数>`
 
@@ -98,7 +100,9 @@
  "positions":[{"market":0,"lots":200,"costBasis":"23625880000","fundingIndex":"0"}]}
 ```
 
-- `nc < mmr` 即可被清算。**这是权威判定**,前端展示的强平价只是估算。
+- `balances` 是统一账户的各 token 余额(token 0 = USDC,`collateral` 就是它的 `amount`);
+  `hold` 是现货挂单冻结额,`available = amount − hold`。只有 USDC 作合约抵押,其余 token 不进 `nc` / `imr`。
+- `nc − hold(USDC) < mmr` 即可被清算。**这是权威判定**,前端展示的强平价只是估算。
 - `nextNonce` 是 **master 账户**的计数器(授权/撤销/提款用),不是 agent 的。
 - `collateral` 是现金:买入已付全额名义,所以持仓账户常为负;`nc = collateral + Σ仓位市值 + Σ未结算资金费`。
 
@@ -124,6 +128,38 @@
   而不是新建),看得见才管得着。
 - `nextNonce` 是**这个 agent 自己的**计数器,代执行签名要用它。
 
+### `GET /fills`
+
+账户维度的**成交账本**,断线补拉走这条(`/trades` 是行情:市场级最新 200 笔、降序、无游标)。
+
+| 参数 | 含义 | 缺省 |
+|---|---|---|
+| `account` | 账户号(必填) | — |
+| `market` | 只看某个市场 | 全部 |
+| `after` | 游标:只返回**严格大于**这个 id 的成交 | 从头 |
+| `limit` | 本页条数,1..=1000 | 200 |
+
+```json
+{"account":7,
+ "fills":[{"id":"4821-0-3","seq":4821,"sub":0,"idx":3,
+           "market":0,"price":77500,"lots":60,"side":"buy","role":"taker",
+           "order":1042,"counterOrder":991,"fee":"1200","ts":1758153600000}],
+ "next":"4821-0-3","hasMore":true}
+```
+
+- 按成交身份**升序**;`next` 直接当下一页的 `after`。**`hasMore` 为 `false` 才代表拉齐了**,
+  本页条数不足 `limit` 不能当结束。
+- `id` = `"<seq>-<sub>-<idx>"`(日志下标 / 条目内请求下标 / 批内事件下标),三段都来自确定性重放,
+  每个副本同值;与事件流里同一笔的 `Event.ID()` 逐字符相同。`seq` 一段不够用:一条命令扫十个
+  maker 就是十笔成交共用一个 `seq`。
+- `side` / `role` / `order` / `fee` 按**本账户视角**给;`counterOrder` 是对手方那张单。
+- `fee` 是 `*string`:`null` = 服务端不知道(2026-09-19 之前落库的旧成交),`"0"` = 确实没收费。
+  口径:taker 费按**整单**收一次再按名义额摊回每一笔,同一张单各笔之和 = 实收(dex-os
+  `INV-FEE-ATTRIB`),可以直接用它算盈亏;maker 为负 = 返佣。
+
+Go SDK:`s.Fills(ctx, dexos.FillQuery{After: lastSeenID})` **自动翻页到底**,游标不前进即报错;
+`FillQuery.Limit` 只在「看一眼」时用,补拉用它等于给自己留一个看起来成功的漏拉。
+
 ### 其他
 
 `GET /account/:id` · `/account/by-address/:addr` · `/account/by-owner/:addr` ·
@@ -131,6 +167,14 @@
 `/liquidity-tiers` · `/vaults`
 
 ---
+
+### 范围说明
+
+本 SDK 只包 **API 钱包能做的事**(交易)与做这件事需要的只读面。网关另有一批**主钥匙**写端点
+(`POST /order` `/cancel-order` `/conditional` `/twap` `/tpsl` `/withdraw` `/transfer` `/subaccount`
+`/vault*`)与行情 / 账本读面(`GET /trades` `/candles` `/withdrawals/mine` `/state-root` `/proof/:id`
+`/liquidity-tiers` `/account/:id`),不在 SDK 里 —— 提款、转账、金库是主账号在前端 / 自己的签名代码里
+做的事,放进跑策略的机器等于把主钥匙放上去。完整端点清单看节点自带的交互式文档 `GET /docs`。
 
 ## 主账号签名(管理 API 钱包)
 
@@ -277,7 +321,7 @@ Go SDK **自动维护这条链** —— `Client` 记住见过的最大位号,每
 | 400 | 请求体格式问题(地址不合法、签名不是 65 字节、tif 越界) |
 | 401 | 签名验证失败 —— **通常是规范编码或域分隔符不对**,不是密钥问题 |
 | 409 | nonce 不匹配(陈旧或跳号) |
-| 422 | 业务拒绝,见 `error` 字段 |
+| 200 + `status:"rejected"` | **业务拒绝**,`reason` 是内核 `KernelError` 变体名;SDK 抛 `*RejectedError`(终局结论,不重试,不锁会话) |
 
 常见业务拒因:
 
@@ -289,7 +333,13 @@ Go SDK **自动维护这条链** —— `Client` 记住见过的最大位号,每
 | `InsufficientMargin` | 前置保证金检查未过 |
 | `PostOnlyWouldCross` | PostOnly 会立即穿越 |
 | `FokInsufficientLiquidity` | FOK 流动性不足 |
-| `ReduceOnlyInvalid` | 无持仓或同向加仓 |
+| `ReduceOnlyNoPosition` / `ReduceOnlyWrongSide` | 只减仓:无持仓 / 同向加仓 |
+| `OrderNotAligned` | 价格未对齐 tick 或数量未对齐 lot |
+| `EquityTierLimitExceeded` | 账户净值档位允许的挂单数用满 |
+| `InsufficientBalance` / `NegativeEquity` | 非 USDC 出账超余额 / 账户 USDC 权益为负时任何出账 |
+| `SpotUnsupported` | 现货市场上用了合约专属命令 |
+| `InvalidConditional` / `InvalidScheduleCancel` | 条件单触发方向或粒度非法 / 断线保护时刻非法 |
+| `NonceMismatch` | nonce 陈旧或跳号。发生在 nonce 写入**之前**,计数器没动;`Session` 视为计数器不可信而锁定 |
 | `MarketNotTrading` | 市场状态门控(Paused/CancelOnly/FinalSettlement) |
 
 ---

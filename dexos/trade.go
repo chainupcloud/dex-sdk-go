@@ -27,6 +27,10 @@ var (
 // 一切非确定输入都由命令携带。它同时是订单的时间基准,填 0 会让带时效的
 // 语义(GTT 等)失去参照,所以这里默认取本机时间。
 
+// 每个写端点都带 `?wait=fold`:不带它,网关的同步回执只说「已定序」,events 恒为空、
+// 业务拒绝也看不见 —— checkBatchOutcome 会把每一笔正常下单都判成 ErrIncompleteBatch。
+// 此前只有 /replace 带了它。
+
 // BatchPlace 批量下单(逐张独立判定,一张失败不拖累其余)。
 //
 // 单张下单就是 len(orders)==1 —— 没有单独的下单接口,因为批量的开销就是一次
@@ -45,7 +49,7 @@ func (c *Client) BatchPlace(
 		return nil, err
 	}
 	var out writeResp
-	err = c.do(ctx, http.MethodPost, "/batch", map[string]any{
+	err = c.do(ctx, http.MethodPost, "/batch?wait=fold", map[string]any{
 		"agent":     agent.Address().Hex(),
 		"account":   account,
 		"orders":    ordersJSON(orders),
@@ -81,7 +85,7 @@ func (c *Client) BatchCancel(
 		return nil, err
 	}
 	var out writeResp
-	err = c.do(ctx, http.MethodPost, "/cancel", map[string]any{
+	err = c.do(ctx, http.MethodPost, "/cancel?wait=fold", map[string]any{
 		"agent":     agent.Address().Hex(),
 		"account":   account,
 		"orders":    seqs,

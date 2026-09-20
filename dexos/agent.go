@@ -48,7 +48,7 @@ func (c *Client) ApproveAgent(
 		return nil, err
 	}
 	var out writeResp
-	err = c.do(ctx, http.MethodPost, "/agent/approve", map[string]any{
+	err = c.do(ctx, http.MethodPost, "/agent/approve?wait=fold", map[string]any{
 		"owner":        owner.Address().Hex(),
 		"master":       master,
 		"agent":        agent.Hex(),
@@ -76,7 +76,7 @@ func (c *Client) RevokeAgent(
 		return nil, err
 	}
 	var out writeResp
-	err = c.do(ctx, http.MethodPost, "/agent/revoke", map[string]any{
+	err = c.do(ctx, http.MethodPost, "/agent/revoke?wait=fold", map[string]any{
 		"owner":     owner.Address().Hex(),
 		"master":    master,
 		"agent":     agent.Hex(),

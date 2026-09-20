@@ -63,7 +63,12 @@ fmt.Printf("%x\n", dexos.Keccak256(cmd))      // 这就是 commandHash
 
 ---
 
-## 422:业务拒绝
+## 业务拒绝(HTTP 200 + `status:"rejected"`)
+
+业务拒绝**不是 4xx**:网关回 200,体里 `status:"rejected"`、`reason` 是内核 `KernelError` 变体名。
+SDK 把它变成 `*RejectedError{Reason, Seq, Sub}`。它是状态机的终局结论 —— 换台机器、换个时刻
+答案一样,**不要重试**;`Session` 也不会因为它锁定(锁定只针对结论未知:`NonceMismatch`、
+`ErrExecutionPending`、传输失败、批次部分成功)。
 
 | 拒因 | 含义 | 处置 |
 |---|---|---|
@@ -72,12 +77,14 @@ fmt.Printf("%x\n", dexos.Keccak256(cmd))      // 这就是 commandHash
 | `AgentScopeViolation` | 该命令不在 agent 白名单(如提款) | 用主账号做,不是 API 钱包能做的事 |
 | `UnknownAgent` | 这个账户没有授权过这把 API 钱包(或已撤销) | 去前端为**那个账户**授权 |
 | `InsufficientMargin` | 前置保证金检查未过 | 减小规模,或看 `Risk().NC/IMR` |
-| `InsufficientCollateral` | 可提额不够 | 可提 = NC − IMR |
+| `InsufficientWithdrawable` | USDC 可提额不够 | 可提 = NC − IMR − hold |
+| `InsufficientBalance` | 非 USDC 余额不够(含现货买单要冻结的 quote) | 看 `Risk().Balances[token].Available` |
 | `PostOnlyWouldCross` | PostOnly 会立即穿越 | 价格挂到对手价之外 |
 | `FokInsufficientLiquidity` | FOK 流动性不足 | 换 IOC,或减量 |
-| `ReduceOnlyInvalid` | 无持仓或同向加仓 | 检查持仓方向 |
+| `ReduceOnlyNoPosition` / `ReduceOnlyWrongSide` | 无持仓 / 同向加仓 | 检查持仓方向;现货市场上只减仓一律 `SpotUnsupported` |
 | `MarketNotTrading` | 市场状态门控 | 看 `Markets()[i].Status`,退避 |
-| `NotAligned` | 价格/数量未对齐撮合粒度 | 按 `subticksPerTick` / `stepBaseQuantums` 取整 |
+| `OrderNotAligned` | 价格/数量未对齐撮合粒度 | 价格是 tick 整数、数量是 lot 整数;换算按 `Markets()[i].PriceDecimals / SizeDecimals` |
+| `SpotUnsupported` | 在现货市场上用了合约专属命令 | 现货只有下单 / 撤单;杠杆 / 只减仓 / 条件单 / TP-SL / TWAP 是永续的 |
 
 ---
 
@@ -92,7 +99,9 @@ fmt.Printf("%x\n", dexos.Keccak256(cmd))      // 这就是 commandHash
 
 ### 收到 `Lost`
 
-本地镜像与历史完整性已不可信。流会终止，快照不能补回逐笔成交。
+本地镜像与历史完整性已不可信。流会终止;快照(`/risk` `/book`)只能校准状态,补不回逐笔成交 ——
+成交要从账本 `/fills` 补:记住流上最后一个 `Event.ID()`,`s.Fills(ctx, dexos.FillQuery{After: 那个 id})`
+拉到 `hasMore=false`,按 id 去重(与流上重叠是正常的),然后重新 `Subscribe`。
 
 ```go
 case n, ok := <-st.Lost:

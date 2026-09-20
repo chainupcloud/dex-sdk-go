@@ -210,7 +210,20 @@ func (s *Session) Resync(ctx context.Context) error {
 	return nil
 }
 
-// 写操作在本会话内串行。失败即锁定；重读 nonce 不能证明原请求执行结果。
+// 写操作在本会话内串行。**结论未知才锁定**;终局的业务拒绝不锁。
+//
+// 三类结果按「服务端计数器有没有前进 / 结论是否确定」分开处理:
+//
+//   - 成功:nonce 已消耗 → 本地 ++。
+//   - *RejectedError(nonce 之后的业务拒绝,如 InsufficientMargin / MarketNotTrading):
+//     内核按 验签 → 归属 → 注册 → scope → 有效期 → nonce → 业务 检查
+//     (crates/kernel/src/engine/authn.rs),拒在业务这一步时计数器已写入且 apply 不回滚
+//     → 本地 ++,**不锁**:结论是终局的,没有未决风险,锁住只会让一笔保证金不足停掉整个做市进程。
+//   - *RejectedError(nonce 之前的拒绝,如 AgentScopeViolation / UnknownAgent):
+//     计数器没动 → 本地不变,**不锁**:同样是终局结论。
+//   - NonceMismatch / ErrExecutionPending / 传输失败 / ErrIncompleteBatch:本地计数器
+//     不可信,或原请求结论未知 → **锁定**(含 Resync)。重读 nonce 不能证明原请求执行结果;
+//     调用方须持久化未决请求,按 API 代理地址持有独占租约。
 func (s *Session) write(
 	ctx context.Context,
 	f func(nonce uint64) ([]EventEnvelope, error),
@@ -227,12 +240,19 @@ func (s *Session) write(
 		return nil, ErrAgentExpired
 	}
 	ev, err := f(s.nonce)
-	if err != nil {
-		s.blocked = fmt.Errorf("%w (nonce=%d): %w", ErrSessionBlocked, s.nonce, err)
-		return ev, s.blocked
+	if err == nil {
+		s.nonce++
+		return ev, nil
 	}
-	s.nonce++
-	return ev, nil
+	var re *RejectedError
+	if errors.As(err, &re) && re.Reason != ReasonNonceMismatch {
+		if !rejectedBeforeNonce[re.Reason] {
+			s.nonce++ // 业务拒绝:认证层已过,nonce 已消耗且不会退回
+		}
+		return ev, err // 终局结论,不锁
+	}
+	s.blocked = fmt.Errorf("%w (nonce=%d): %w", ErrSessionBlocked, s.nonce, err)
+	return ev, s.blocked
 }
 
 // Place 下单(一张或多张,逐项独立判定)。
@@ -270,10 +290,71 @@ func (s *Session) ReplaceWithReceipt(ctx context.Context, market uint16, cancelS
 	return result, err
 }
 
-// SetLeverage 设置杠杆。
-func (s *Session) SetLeverage(ctx context.Context, market uint16, leverage uint32) ([]EventEnvelope, error) {
+// SetLeverage 设置该市场的初始保证金率(ppm):200000 = 20% = 5×。
+//
+// 参数是 **ppm 不是倍数** —— 传 5 得到的是 InvalidLeverage(5 ppm 低于任何市场的
+// 基础保证金率),而拒因里看不出是单位错了。用 ImfPpmForLeverage(5) 换算。
+// 只能调高保证金要求(降杠杆),低于市场基础 IMF 会被拒。
+func (s *Session) SetLeverage(ctx context.Context, market uint16, customImfPpm uint32) ([]EventEnvelope, error) {
 	return s.write(ctx, func(n uint64) ([]EventEnvelope, error) {
-		return s.Client.SetLeverage(ctx, s.Agent, s.Account, market, leverage, n)
+		return s.Client.SetLeverage(ctx, s.Agent, s.Account, market, customImfPpm, n)
+	})
+}
+
+// ── 其余 agent 白名单命令,同样由会话管 nonce ──
+//
+// 这些在 Client 上都有,但 Client 版要调用方自己传 agent nonce —— 正是 Session
+// 存在要挡掉的坑。少包一条,用到那条的人就得回去手工管计数器。
+
+// PlaceGTT 带过期时刻的单张下单(BatchPlace 的单项没有 good_til)。
+func (s *Session) PlaceGTT(ctx context.Context, o BatchOrder, goodTil time.Time) ([]EventEnvelope, error) {
+	return s.write(ctx, func(n uint64) ([]EventEnvelope, error) {
+		return s.Client.PlaceOrderGTT(ctx, s.Agent, s.Account, o.Market, o.Side, o.Price, o.Lots,
+			o.TIF, o.ReduceOnly, goodTil, n)
+	})
+}
+
+// Modify 改单 = 撤旧建新,**丢失时间优先**;要保队列位置用 Replace。
+func (s *Session) Modify(ctx context.Context, market uint16, seq uint64, price uint32, lots uint64,
+	tif TimeInForce, reduceOnly bool, goodTil time.Time) ([]EventEnvelope, error) {
+	return s.write(ctx, func(n uint64) ([]EventEnvelope, error) {
+		return s.Client.ModifyOrder(ctx, s.Agent, s.Account, NewOrderID(market, seq),
+			price, lots, tif, reduceOnly, goodTil, n)
+	})
+}
+
+// PlaceConditional 下条件单(止损 / 止盈触发)。
+func (s *Session) PlaceConditional(ctx context.Context, c Conditional) ([]EventEnvelope, error) {
+	return s.write(ctx, func(n uint64) ([]EventEnvelope, error) {
+		return s.Client.PlaceConditional(ctx, s.Agent, s.Account, c, n)
+	})
+}
+
+// CancelConditional 撤销一张未触发的条件单。
+func (s *Session) CancelConditional(ctx context.Context, market uint16, seq uint64) ([]EventEnvelope, error) {
+	return s.write(ctx, func(n uint64) ([]EventEnvelope, error) {
+		return s.Client.CancelConditional(ctx, s.Agent, s.Account, NewOrderID(market, seq), n)
+	})
+}
+
+// PlaceTwap 下 TWAP 母单。
+func (s *Session) PlaceTwap(ctx context.Context, t Twap) ([]EventEnvelope, error) {
+	return s.write(ctx, func(n uint64) ([]EventEnvelope, error) {
+		return s.Client.PlaceTwap(ctx, s.Agent, s.Account, t, n)
+	})
+}
+
+// CancelTwap 撤销 TWAP 母单:已成交的留下,未执行的切片停掉。
+func (s *Session) CancelTwap(ctx context.Context, market uint16, seq uint64) ([]EventEnvelope, error) {
+	return s.write(ctx, func(n uint64) ([]EventEnvelope, error) {
+		return s.Client.CancelTwap(ctx, s.Agent, s.Account, NewOrderID(market, seq), n)
+	})
+}
+
+// PlaceTpslPair 下止盈 / 止损配对(OCO)。
+func (s *Session) PlaceTpslPair(ctx context.Context, p TpslPair) ([]EventEnvelope, error) {
+	return s.write(ctx, func(n uint64) ([]EventEnvelope, error) {
+		return s.Client.PlaceTpslPair(ctx, s.Agent, s.Account, p, n)
 	})
 }
 

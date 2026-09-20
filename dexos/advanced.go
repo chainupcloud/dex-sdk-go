@@ -29,7 +29,7 @@ func (c *Client) AgentExec(ctx context.Context, agent *Signer, command []byte, n
 		return nil, err
 	}
 	var out writeResp
-	err = c.do(ctx, http.MethodPost, "/agent/exec", map[string]any{
+	err = c.do(ctx, http.MethodPost, "/agent/exec?wait=fold", map[string]any{
 		"agent":     agent.Address().Hex(),
 		"command":   "0x" + hex.EncodeToString(command),
 		"nonce":     nonce,
@@ -61,7 +61,20 @@ func (c *Client) ScheduleCancel(ctx context.Context, agent *Signer, account uint
 	return c.AgentExec(ctx, agent, cmd, nonce)
 }
 
-// SetLeverage 自定义杠杆。customImfPpm 是初始保证金率(ppm),200000 = 20% = 5×。
+// ImfPpmForLeverage 把「几倍杠杆」换成内核要的初始保证金率(ppm):5× → 200000。
+//
+// 内核只认 ppm。这个换算放在 SDK 而不是让调用方自己除,是因为把 5 直接当 ppm
+// 传进去得到的是 InvalidLeverage,而错误信息里看不出是单位错了。leverage 为 0 时
+// 返回 0,内核会拒。
+func ImfPpmForLeverage(leverage uint32) uint32 {
+	if leverage == 0 {
+		return 0
+	}
+	return 1_000_000 / leverage
+}
+
+// SetLeverage 自定义杠杆。customImfPpm 是初始保证金率(ppm),200000 = 20% = 5×;
+// 用 ImfPpmForLeverage 从倍数换算。
 //
 // **只能调高保证金要求(降杠杆)**,低于市场基础 IMF 会被拒(InvalidLeverage)。
 // 它只抬高 IMR、不动 MMR —— 所以调杠杆不会把一个健康账户直接推进可清算区间。
@@ -113,4 +126,26 @@ func (c *Client) CancelConditional(ctx context.Context, agent *Signer, account u
 func (c *Client) CancelTwap(ctx context.Context, agent *Signer, account uint32,
 	order OrderID, nonce uint64) ([]EventEnvelope, error) {
 	return c.AgentExec(ctx, agent, EncodeCancelTwap(account, order), nonce)
+}
+
+// PlaceConditional 下条件单(止损 / 止盈触发)。触发在块边界按预言机价重判。
+func (c *Client) PlaceConditional(ctx context.Context, agent *Signer, account uint32,
+	cond Conditional, nonce uint64) ([]EventEnvelope, error) {
+	cmd := EncodePlaceConditional(account, cond, uint64(time.Now().UnixMilli()))
+	return c.AgentExec(ctx, agent, cmd, nonce)
+}
+
+// PlaceTwap 下 TWAP 母单。撤销用 CancelTwap,母单号在回执事件 TwapPlaced 里。
+func (c *Client) PlaceTwap(ctx context.Context, agent *Signer, account uint32,
+	twap Twap, nonce uint64) ([]EventEnvelope, error) {
+	cmd := EncodePlaceTwap(account, twap, uint64(time.Now().UnixMilli()))
+	return c.AgentExec(ctx, agent, cmd, nonce)
+}
+
+// PlaceTpslPair 下止盈 / 止损配对(OCO)。两腿各是一张条件单,撤销任一腿用
+// CancelConditional;PositionTpsl 的两腿在持仓归零后由内核自动扫除。
+func (c *Client) PlaceTpslPair(ctx context.Context, agent *Signer, account uint32,
+	pair TpslPair, nonce uint64) ([]EventEnvelope, error) {
+	cmd := EncodePlaceTpslPair(account, pair, uint64(time.Now().UnixMilli()))
+	return c.AgentExec(ctx, agent, cmd, nonce)
 }
