@@ -1,6 +1,6 @@
 # dex-sdk-go
 
-DEX-OS 永续合约交易所的 Go SDK。围绕 **API 钱包(代理钱包)** 设计 —— 主账号授权一个
+DEX-OS(永续合约 + 现货)交易所的 Go SDK。围绕 **API 钱包(代理钱包)** 设计 —— 主账号授权一个
 派生密钥代为交易,该密钥**动不了钱**。
 
 ```bash
@@ -16,8 +16,8 @@ go get github.com/chainupcloud/dex-sdk-go
 | [`examples/onboard`](examples/onboard/main.go) | 从零接入:生成地址 → 找账户 → 连接 → 交易 |
 | [`examples/discover`](examples/discover/main.go) | 只给一个 URL 完成 发现 → 授权 → 下单 |
 | [做市接入](docs/MARKET-MAKING.md) | 高频报价:报价循环、原子换单、丢帧处置、错误恢复 |
-| [REST 参考](docs/API.md) | 接口字段与拒因表 |
-| [WebSocket 参考](docs/WEBSOCKET.md) | 事件流协议、事件目录、时延实测 |
+| [REST 参考](docs/API.md) | 接口字段、**写回执与 `RejectedError`**、`/fills` 成交账本、拒因表 |
+| [WebSocket 参考](docs/WEBSOCKET.md) | 事件流协议、事件目录、**断线补拉**、时延实测 |
 | [技术文档](docs/ARCHITECTURE.md) | 要改 SDK、移植到别的语言、或遇到「签名被拒但看不出为什么」 |
 | [故障排查](docs/TROUBLESHOOTING.md) | 按**症状**查,不是按错误码查 |
 

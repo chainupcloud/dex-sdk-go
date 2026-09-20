@@ -71,6 +71,24 @@ func TestGoldenCanonicalEncoding(t *testing.T) {
 			1700000500000, 1700000000001),
 		"cancel_conditional": EncodeCancelConditional(3, NewOrderID(1, 77)),
 		"cancel_twap":        EncodeCancelTwap(3, NewOrderID(1, 78)),
+
+		// 白名单里剩下的三条下单类命令
+		"place_conditional": EncodePlaceConditional(3, Conditional{
+			Market: 1, Side: Sell, Price: 48000, Lots: 12, TIF: IOC, ReduceOnly: true,
+			GoodTilMs: 1700000900000, TriggerPrice: 48500, TriggerAbove: false,
+		}, 1700000000002),
+		"place_twap": EncodePlaceTwap(3, Twap{
+			Market: 0, Side: Buy, TotalLots: 1000, Slices: 20, IntervalMs: 30000,
+			PriceTolerancePpm: 5000, ReduceOnly: false,
+		}, 1700000000003),
+		"place_tpsl_pair": EncodePlaceTpslPair(3, TpslPair{
+			Market: 0, CloseSide: Sell, Lots: 10, TpTrigger: 52000, TpPrice: 51900,
+			SlTrigger: 48000, SlPrice: 0, PositionTpsl: true, // Parent 零值 → NoParent
+		}, 1700000000004),
+		"place_tpsl_pair_with_parent": EncodePlaceTpslPair(3, TpslPair{
+			Market: 2, CloseSide: Buy, Lots: 1, TpTrigger: 100, TpPrice: 101,
+			SlTrigger: 200, SlPrice: 199, PositionTpsl: false, Parent: NewOrderID(2, 77),
+		}, 5),
 	}
 
 	seen := 0

@@ -3,6 +3,7 @@ package dexos
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 )
 
 // ErrExecutionPending 表示场所明确声明本请求尚未完成折叠，不能当作执行成功。
@@ -76,4 +77,32 @@ func (r *writeResp) evidence() *WriteReceipt {
 		return nil
 	}
 	return &r.WriteReceipt
+}
+
+// RejectedError 状态机的**终局**业务拒绝(网关 200 + status:"rejected")。
+//
+// Reason 是内核 KernelError 的变体名,原样透出(InsufficientMargin、MarketNotTrading、
+// NonceMismatch…),不映射成 SDK 自己的枚举:内核新增拒因时映射表漏一条就成「未知错误」,
+// 原样透出至少还能读。换台机器、换个时刻,同样的命令得到同样的答案 —— 不要重试。
+type RejectedError struct {
+	Reason string
+	Seq    uint64
+	Sub    uint16
+}
+
+func (e *RejectedError) Error() string {
+	return fmt.Sprintf("dexos: 被状态机拒绝:%s(位号 %d/%d)", e.Reason, e.Seq, e.Sub)
+}
+
+// ReasonNonceMismatch 认证层的 nonce 不符。
+const ReasonNonceMismatch = "NonceMismatch"
+
+// rejectedBeforeNonce 这些拒因发生在内核写入 agent nonce **之前**
+// (crates/kernel/src/engine/authn.rs:验签 → 归属 → 注册 → scope → 有效期 → nonce),
+// 所以计数器没有前进;其余拒因都在 nonce 写入之后、apply 不回滚,计数器已前进。
+// Session 靠这条边界决定本地 nonce 要不要 ++。
+var rejectedBeforeNonce = map[string]bool{
+	"BadSignature": true, "SignatureExpired": true, "UnboundSigner": true,
+	"UnknownAgent": true, "AgentExpired": true, "AgentScopeViolation": true,
+	"AgentMasterMismatch": true, "AuthUnavailable": true, ReasonNonceMismatch: true,
 }

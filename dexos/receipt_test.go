@@ -149,7 +149,6 @@ func TestReceiptFailurePreservesAvailableEvidenceAndBlocks(t *testing.T) {
 	}{
 		{"partial", http.StatusOK, `{"status":"ok","seq":120,"sub":2,"folded":true,"batchStatus":"partial","events":[{"kind":"OrderCanceled","data":{"account":42,"market":7,"orderSeq":3}}]}`, true, 1},
 		{"pending", http.StatusOK, `{"status":"ok","seq":120,"sub":2,"folded":false,"events":[]}`, true, 0},
-		{"rejected", http.StatusOK, `{"status":"rejected","seq":120,"sub":2,"folded":true,"reason":"InsufficientMargin","events":[]}`, true, 0},
 		{"missing_seq", http.StatusOK, `{"status":"ok","events":[]}`, true, 0},
 		{"bad_seq_type", http.StatusOK, `{"status":"ok","seq":"bad","events":[]}`, false, 0},
 		{"bad_sub_type", http.StatusOK, `{"status":"ok","seq":120,"sub":65536,"events":[]}`, false, 0},
@@ -165,9 +164,6 @@ func TestReceiptFailurePreservesAvailableEvidenceAndBlocks(t *testing.T) {
 			result, err := f.session.ReplaceWithReceipt(ctx, 7, []uint64{3}, receiptOrders())
 			if !errors.Is(err, ErrSessionBlocked) || result.Request == nil || (result.Receipt != nil) != tc.wantParsed || len(result.Events()) != tc.wantEvents || f.session.nonce != 0 {
 				t.Fatalf("失败时丢失/伪造请求或回执证据: request=%t receipt=%t events=%d nonce=%d err=%v", result.Request != nil, result.Receipt != nil, len(result.Events()), f.session.nonce, err)
-			}
-			if tc.name == "rejected" && (result.Receipt.Reason == nil || *result.Receipt.Reason != "InsufficientMargin") {
-				t.Fatal("明确拒因被丢失")
 			}
 			if tc.name == "missing_seq" && result.Receipt.Seq != nil {
 				t.Fatal("缺失 seq 被补成0")
@@ -305,5 +301,31 @@ func TestReceiptNonSuccessBatchStatusCannotPass(t *testing.T) {
 				t.Fatalf("非成功/未知 batchStatus 被放行或丢失: %s err=%v", status, err)
 			}
 		})
+	}
+}
+
+// 业务拒绝是状态机的**终局**结论:带拒因的 *RejectedError,证据保留,nonce 已消耗
+// (内核在 nonce 写入之后才判业务,apply 不回滚),会话**不锁** —— 没有未决风险可核对,
+// 锁住只会让一笔保证金不足停掉整个做市进程。
+func TestRejectedReceiptIsFinalKeepsEvidenceAndDoesNotBlock(t *testing.T) {
+	f := newReceiptFixture(t, http.StatusOK, `{"status":"rejected","seq":120,"sub":2,"folded":true,"reason":"InsufficientMargin","events":[]}`)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	result, err := f.session.ReplaceWithReceipt(ctx, 7, []uint64{3}, receiptOrders())
+	var re *RejectedError
+	if !errors.As(err, &re) || re.Reason != "InsufficientMargin" || re.Seq != 120 || re.Sub != 2 {
+		t.Fatalf("业务拒绝应当是带拒因与身份的 *RejectedError,实得 %v", err)
+	}
+	if errors.Is(err, ErrSessionBlocked) {
+		t.Fatal("终局拒绝不该锁会话")
+	}
+	if result.Request == nil || result.Receipt == nil || result.Receipt.Reason == nil || *result.Receipt.Reason != "InsufficientMargin" {
+		t.Fatal("拒绝时请求身份或回执证据丢失")
+	}
+	if f.session.nonce != 1 {
+		t.Fatalf("业务拒绝已消耗 nonce,本地应 ++ 到 1,实得 %d", f.session.nonce)
+	}
+	if f.session.blocked != nil {
+		t.Fatalf("终局拒绝不该留下会话锁,实得 %v", f.session.blocked)
 	}
 }

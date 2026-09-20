@@ -37,8 +37,11 @@ const (
 	tagCancelOrder       byte = 0x06
 	tagSetLeverage       byte = 0x0A
 	tagBatchCancel       byte = 0x0F
+	tagPlaceConditional  byte = 0x11
 	tagCancelConditional byte = 0x12
+	tagPlaceTwap         byte = 0x13
 	tagCancelTwap        byte = 0x14
+	tagPlaceTpslPair     byte = 0x17
 	tagModifyOrder       byte = 0x15
 	tagScheduleCancel    byte = 0x16
 	tagBatchPlace        byte = 0x31
@@ -311,3 +314,130 @@ func EncodeCancelTwap(account uint32, order OrderID) []byte {
 	e.u64(uint64(order))
 	return e.buf
 }
+
+// ── agent 白名单里剩下的三条下单类命令 ──
+//
+// 白名单 13 条里此前只编了 10 条:条件单 / TWAP 母单 / TP-SL 配对只能撤不能下,
+// 而 README 却说 API 钱包能做「条件单 / TWAP」。三条布局逐字段抄自 codec.rs,
+// 金样 place_conditional / place_twap / place_tpsl_pair* 钉住。
+
+// Conditional 条件单(止损 / 止盈触发):预言机价越过 TriggerPrice 时,派生一张
+// 普通订单(Price / Lots / TIF / ReduceOnly 就是那张子单的参数)进簿。
+//
+// TriggerAbove=true 表示「价格涨到 ≥ TriggerPrice 触发」,false 表示「跌到 ≤」。
+// 触发判定在**块边界按当时的预言机价重判**,块内瞬间越线又回落不会触发。
+type Conditional struct {
+	Market       uint16
+	Side         Side
+	Price        uint32
+	Lots         uint64
+	TIF          TimeInForce
+	ReduceOnly   bool
+	GoodTilMs    uint64 // 子单的过期时刻;0 = 不过期
+	TriggerPrice uint32
+	TriggerAbove bool
+}
+
+// EncodePlaceConditional 规范编码 Command::PlaceConditional。
+//
+// 布局:tag | account u32 | market u16 | side u8 | price u32 | lots u64 | tif u8
+// | reduceOnly u8 | goodTilMs u64 | triggerPrice u32 | triggerAbove u8 | nowMs u64
+func EncodePlaceConditional(account uint32, c Conditional, nowMs uint64) []byte {
+	e := &encoder{}
+	e.u8(codecVersion)
+	e.u8(tagPlaceConditional)
+	e.u32(account)
+	e.u16(c.Market)
+	e.u8(byte(c.Side))
+	e.u32(c.Price)
+	e.u64(c.Lots)
+	e.u8(byte(c.TIF))
+	e.boolean(c.ReduceOnly)
+	e.u64(c.GoodTilMs)
+	e.u32(c.TriggerPrice)
+	e.boolean(c.TriggerAbove)
+	e.u64(nowMs)
+	return e.buf
+}
+
+// Twap TWAP 母单:把 TotalLots 分成 Slices 片,每 IntervalMs 下一片 IOC 子单,
+// 子单限价 = 当时预言机价 ± PriceTolerancePpm。抵押耗尽即停止;撤母单停掉后续切片。
+type Twap struct {
+	Market            uint16
+	Side              Side
+	TotalLots         uint64
+	Slices            uint32
+	IntervalMs        uint64
+	PriceTolerancePpm uint32
+	ReduceOnly        bool
+}
+
+// EncodePlaceTwap 规范编码 Command::PlaceTwap。
+//
+// 布局:tag | account u32 | market u16 | side u8 | totalLots u64 | slices u32
+// | intervalMs u64 | priceTolerancePpm u32 | reduceOnly u8 | nowMs u64
+func EncodePlaceTwap(account uint32, t Twap, nowMs uint64) []byte {
+	e := &encoder{}
+	e.u8(codecVersion)
+	e.u8(tagPlaceTwap)
+	e.u32(account)
+	e.u16(t.Market)
+	e.u8(byte(t.Side))
+	e.u64(t.TotalLots)
+	e.u32(t.Slices)
+	e.u64(t.IntervalMs)
+	e.u32(t.PriceTolerancePpm)
+	e.boolean(t.ReduceOnly)
+	e.u64(nowMs)
+	return e.buf
+}
+
+// TpslPair 止盈 / 止损配对(OCO):一腿触发另一腿自动撤。
+//
+// CloseSide 是平仓方向(多头止盈止损都是 Sell)。触发价为 0 的那一腿不建
+// (只要止损就把 TpTrigger 留 0);**建的那一腿限价不能为 0**(内核 InvalidConditional),
+// 要「市价平」就给一个远离触发价的限价(卖单给低价、买单给高价)。
+// PositionTpsl=true 时两腿跟着持仓走:持仓归零自动扫除,Parent 留零值(编码成内核的
+// 「无父单」哨兵 NoParent = u64::MAX —— 0 是「市场 0 的 0 号单」,不是「没有」);
+// 否则挂在 Parent 那张单下,父单撤销则两腿级联撤。
+type TpslPair struct {
+	Market       uint16
+	CloseSide    Side
+	Lots         uint64
+	TpTrigger    uint32
+	TpPrice      uint32
+	SlTrigger    uint32
+	SlPrice      uint32
+	PositionTpsl bool
+	Parent       OrderID
+}
+
+// EncodePlaceTpslPair 规范编码 Command::PlaceTpslPair。
+//
+// 布局:tag | account u32 | market u16 | closeSide u8 | lots u64 | tpTrigger u32
+// | tpPrice u32 | slTrigger u32 | slPrice u32 | positionTpsl u8 | parent u64 | nowMs u64
+func EncodePlaceTpslPair(account uint32, p TpslPair, nowMs uint64) []byte {
+	e := &encoder{}
+	e.u8(codecVersion)
+	e.u8(tagPlaceTpslPair)
+	e.u32(account)
+	e.u16(p.Market)
+	e.u8(byte(p.CloseSide))
+	e.u64(p.Lots)
+	e.u32(p.TpTrigger)
+	e.u32(p.TpPrice)
+	e.u32(p.SlTrigger)
+	e.u32(p.SlPrice)
+	e.boolean(p.PositionTpsl)
+	parent := uint64(p.Parent)
+	if p.Parent == 0 {
+		parent = uint64(NoParent)
+	}
+	e.u64(parent)
+	e.u64(nowMs)
+	return e.buf
+}
+
+// NoParent 「没有父单」的哨兵(内核 conditional.rs:`parent.0 == u64::MAX` 才算无父)。
+// TpslPair.Parent 的零值在编码时映射成它,调用方不必自己写 MaxUint64。
+const NoParent OrderID = OrderID(^uint64(0))

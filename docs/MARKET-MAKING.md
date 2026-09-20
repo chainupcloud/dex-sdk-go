@@ -23,13 +23,13 @@ consumeReceipt(events)
 
 nonce 按 API 代理地址共享。多进程或多个账户共用同一代理时，发单必须由一个持有独占租约的协调方串行处理。`Session` 的互斥仅覆盖该 Session；它不提供持久化与跨进程排他。
 
-网络错误、无效响应和批次部分成功后，`Session` 锁定后续写入及 Resync。重读 nonce 不能恢复原请求回执；不能通过重启/新建 Session 清除未决风险。服务端恢复契约见 [dex-os #3](https://github.com/chainupcloud/dex-os/issues/3)。
+网络错误、无效响应、`folded:false`、`NonceMismatch` 和批次部分成功后,`Session` 锁定后续写入及 Resync;**终局的业务拒绝(`*RejectedError`,如 `InsufficientMargin`)不锁**——它没有未决风险,nonce 已按内核检查顺序处理。重读 nonce 不能恢复原请求回执；不能通过重启/新建 Session 清除未决风险。服务端恢复契约见 [dex-os #3](https://github.com/chainupcloud/dex-os/issues/3)。
 
 ## 事件流与账务
 
 过滤参数为 `markets` / `accounts`，两者取并集。seq 是日志位号，同命令多事件共享，不能作为成交唯一身份。
 
-SDK 遇坏帧、Lagged、倒退或断线即终止并报 `ErrStreamGap`。重连只收未来事件，快照不能补齐逐笔成交。可靠历史补拉尚待 [dex-os #1](https://github.com/chainupcloud/dex-os/issues/1) 与 [#2](https://github.com/chainupcloud/dex-os/issues/2)。
+SDK 遇坏帧、Lagged 或断线即终止并报 `ErrStreamGap`(seq 回退不算:系统命令事件与订单事件派生路径不同,seq 不单调,身份是 `Event.ID()` 三段)。重连只收未来事件,快照不能补齐逐笔成交 —— 用 `Fills(After: 最后一个 Event.ID())` 从 `/fills` 补齐再重连(dex-os 2026-09-19 起提供稳定成交身份、订单关联、逐笔实际费用与游标分页,即 [#1](https://github.com/chainupcloud/dex-os/issues/1) / [#2](https://github.com/chainupcloud/dex-os/issues/2) 的服务端部分)。
 
 交易落账须取得稳定成交 ID、订单关联、逐笔实际费用与最终状态；持仓差只能用于对账，不能变造成交。权益用 NC 的明确口径；collateral 不是总权益，缺净入金/资金费不得填零。
 

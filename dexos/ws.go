@@ -37,11 +37,24 @@ import (
 // 已不可信，必须停止并补齐历史。快照不能补回逐笔成交。丢一条自己的 Fill,
 // 之后就一直拿着错的仓位报价,而业务层完全看不出来。
 
-// Event 一条事件。
+// Event 一条事件,带**完整身份** (Seq, Sub, Idx)。
+//
+// 三段缺一不可,而 Seq 单独没有用:Seq 是 Raft 日志下标(一条日志承载多个事件,
+// 无事件的日志还会让它跳号);Sub 是本请求在该条目内的下标(条目级聚批);Idx 是
+// 本事件在该 (Seq, Sub) 里的下标。拿 Seq 当事件身份,同价同量的两笔成交就分不开。
+// 用 [Event.ID] 取拼好的那一个 —— 对 Fill 来说它就是成交 ID,与 REST `/fills`
+// 里同一笔的 id 逐字符相同,断线后直接拿它当 [FillQuery.After] 补拉。
 type Event struct {
 	Seq  uint64          `json:"seq"`
+	Sub  uint16          `json:"sub"`
+	Idx  uint32          `json:"idx"`
 	Kind string          `json:"kind"`
 	Data json.RawMessage `json:"data"`
+}
+
+// ID 事件身份 "<seq>-<sub>-<idx>"。
+func (e Event) ID() string {
+	return fmt.Sprintf("%d-%d-%d", e.Seq, e.Sub, e.Idx)
 }
 
 // Stream 事件流订阅。
@@ -84,8 +97,11 @@ func WithAccounts(a ...uint32) SubscribeOption {
 //
 //	st, _ := c.Subscribe(ctx, dexos.WithMarkets(0), dexos.WithAccounts(master))
 //
-// 断线、坏帧、Lagged 或序号倒退均终止流并报错。当前服务端没有历史回放，
-// 自动重连会掩盖成交缺口；调用方完成历史核对后才能重新 Subscribe。
+// 断线、坏帧或 Lagged 均终止流并报 ErrStreamGap(seq 回退**不算**:它不单调,见循环内注释);
+// 不自动重连 —— 重连会掩盖
+// 成交缺口。缺口有正路可补:记住流上最后一个 [Event.ID],用 [Session.Fills]
+// (FillQuery{After: 那个 id})把断开期间的成交从服务端账本 `/fills` 拉齐、按 id 去重,
+// 再重新 Subscribe。持仓 / 盘口快照(`/risk` `/book`)只能校准状态,补不回逐笔成交。
 func (c *Client) Subscribe(ctx context.Context, opts ...SubscribeOption) (*Stream, error) {
 	u, err := url.Parse(c.BaseURL)
 	if err != nil {
@@ -140,8 +156,6 @@ func (c *Client) Subscribe(ctx context.Context, opts ...SubscribeOption) (*Strea
 		defer conn.Close()
 		stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
 		defer stop()
-		var lastSeq uint64
-		var haveLast bool
 		for {
 			_, raw, err := conn.ReadMessage()
 			if err != nil {
@@ -154,6 +168,8 @@ func (c *Client) Subscribe(ctx context.Context, opts ...SubscribeOption) (*Strea
 			}
 			var wire struct {
 				Seq     *uint64         `json:"seq"`
+				Sub     uint16          `json:"sub"`
+				Idx     uint32          `json:"idx"`
 				Kind    string          `json:"kind"`
 				Data    json.RawMessage `json:"data"`
 				Dropped *uint64         `json:"dropped"`
@@ -176,12 +192,11 @@ func (c *Client) Subscribe(ctx context.Context, opts ...SubscribeOption) (*Strea
 				errc <- fmt.Errorf("%w: WS 帧缺 seq/data", ErrStreamGap)
 				return
 			}
-			if haveLast && *wire.Seq < lastSeq {
-				errc <- fmt.Errorf("%w: seq 倒退", ErrStreamGap)
-				return
-			}
-			lastSeq, haveLast = *wire.Seq, true
-			ev := Event{Seq: *wire.Seq, Kind: wire.Kind, Data: wire.Data}
+			// seq 不单调:keeper 的系统命令事件(OracleUpdated / FundingSampled / BlockBegun)
+			// 与订单事件走不同的派生路径,真节点上每几分钟就有一次小幅回退(实测 3581 帧 4 次)。
+			// 网关从未承诺 seq 顺序,身份是 (seq, sub, idx) 三段;把回退当成流损坏终止,
+			// 等于让每个 WS 消费者几分钟断一次。
+			ev := Event{Seq: *wire.Seq, Sub: wire.Sub, Idx: wire.Idx, Kind: wire.Kind, Data: wire.Data}
 			select {
 			case events <- ev:
 			case <-ctx.Done():
@@ -193,5 +208,6 @@ func (c *Client) Subscribe(ctx context.Context, opts ...SubscribeOption) (*Strea
 	return &Stream{Events: events, Lost: lost, Err: errc}, nil
 }
 
-// ErrStreamGap 表示流完整性已失去；快照不能补回缺失的逐笔成交。
-var ErrStreamGap = errors.New("dexos: 事件流完整性未知，需要可靠历史补拉")
+// ErrStreamGap 表示流完整性已失去。快照补不回逐笔成交;成交账本 `/fills`
+// ([Session.Fills],按成交身份游标续拉)可以 —— 补齐并去重后再重新 Subscribe。
+var ErrStreamGap = errors.New("dexos: 事件流完整性未知,请用 Fills(After: 最后一个事件 id) 补拉后重建连接")

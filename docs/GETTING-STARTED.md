@@ -164,7 +164,7 @@ for {
         }
     case n, ok := <-st.Lost:
         if ok { log.Printf("丢帧 %d 条", n) }
-        return <-st.Err        // 终止；快照不能补回逐笔成交
+        return <-st.Err        // 终止;用 s.Fills(FillQuery{After: 最后一个 ev.ID()}) 补齐再重连
     case err := <-st.Err:
         return err
     }
@@ -187,7 +187,7 @@ for {
 - [ ] `Stream.Lost` 有处理分支,不是丢弃
 - [ ] 断线/坏帧后停止；可靠历史补齐并核对后才能重建连接（SDK 不自动重连）
 - [ ] 金额字段按**字符串**解析,没有转 float
-- [ ] 拒因做了分类:401 是签名问题、409 是 nonce、422 才是业务
+- [ ] 拒因按**错误类型**分类:`*RejectedError`(业务拒绝,200 里,终局)/ `ErrExecutionPending`(已定序结论未知,别重发)/ `*APIError`(401 签名、421 打错节点、5xx)
 
 ---
 
