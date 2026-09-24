@@ -111,6 +111,19 @@ base `444ca6a`。`GOWORK=off go test -race -count=1 -timeout=90s ./...` 与 `go 
 
 真节点验证:`examples/contracts` 对本机全新纪元 dex-node 走一遍(两个新账户挂单吃单、逐项全成功与部分成功、原请求回执、not_found、成交翻页与续拉、纪元不符、Σ流水 == 权益快照余额、事件补拉),全部 PASS。同一节点上旧版 `Fills`(每页 1 笔)第二页即 `HTTP 400: resume requires epoch and upper from the first page`。
 
+新增风险断言的真实缺陷红(2026-09-24,注入后逐字节还原并整包复绿):
+
+| 缺陷形态 | 定向测试 | 实际红因 |
+|---|---|---|
+| 续页不带回 epoch/upper(原始缺陷) | TestFillsCarryEpochAndUpperAcrossPages | HTTP 400: resume requires epoch and upper from the first page |
+| 逐项齐全的部分成功仍锁会话 | TestPartialBatchWithCompleteItemsIsFinalAndAdvancesNonce | 结局已确定,不该锁会话 |
+| 缺 items 退回按事件判成功 | TestUntrustworthyItemsBlockSession/missing_items | 证据不可信应当 ErrIncompleteBatch 且锁会话,实得 nil |
+| 不核事件里多出的接受 | TestUntrustworthyItemsBlockSession/unexplained_accept_event | 同上,实得 *BatchOutcomeError |
+| 撤单目标不核 | TestUntrustworthyItemsBlockSession/cancel_target_mismatch | 同上,实得 nil |
+| ReceiptOf 不核签名者 | TestReceiptOfChecksIdentity | 签名者不符的回执不能当成自己的 |
+| 缺口当成 not_found | TestReceiptStatusesAreAnswersNotErrors/history_unavailable | 状态不对(not_found) |
+| 请求身份只哈希摘要 | TestRequestIDMatchesServerDerivation | 本地请求身份与服务端不一致 |
+
 ## 服务端前置
 
 dex-os #1–#5 已由 dex-os PR #6 合入 main(2026-09-24):
