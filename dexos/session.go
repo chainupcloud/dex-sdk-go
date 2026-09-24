@@ -251,6 +251,11 @@ func (s *Session) write(
 		}
 		return ev, err // 终局结论,不锁
 	}
+	var partial *BatchOutcomeError
+	if errors.As(err, &partial) {
+		s.nonce++ // 批次已执行、逐项结局齐全:nonce 已消耗,终局结论,不锁
+		return ev, err
+	}
 	s.blocked = fmt.Errorf("%w (nonce=%d): %w", ErrSessionBlocked, s.nonce, err)
 	return ev, s.blocked
 }

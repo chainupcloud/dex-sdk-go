@@ -178,7 +178,7 @@ Subscribe() ──┬─→ Events chan(缓冲 1024)
 
 - **Events 阻塞投递** —— 消费不过来就应该慢下来,丢事件比慢更糟
 - **Lost** 最多报告一次服务端丢帧条数，随后 Err 报错并终止流
-- 坏帧、缺字段、断线都显式终止(seq 回退不算,见下);缺口用 `Session.Fills` 从 `/fills` 补齐后再重连
+- 坏帧、缺字段、断线都显式终止(seq 回退不算,见下);缺口用 `Session.Fills` / `Client.Events` 从执行历史补齐后再重连
 
 ### seq 的语义
 

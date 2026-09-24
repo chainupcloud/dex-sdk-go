@@ -1,0 +1,6 @@
+{
+  "source": "dex-os origin/main 5ee4759 本机新纪元 dex-node:/receipts 响应里服务端按命令字节推导的 requestId;signingHash 是同一请求被服务端验签通过的摘要",
+  "agent": "0x4163e07d9ce9d93aedb70424a27e767c9d437107",
+  "signingHash": "0x14d47adf69c31af5eabfd97da5fa32a135890157e5bb808e785788bfece63a01",
+  "requestId": "0x963ffe4034d5d08436000c076600830c09cabc7056c246eb4ed51fb4972f3973"
+}

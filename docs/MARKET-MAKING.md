@@ -4,9 +4,9 @@
 
 ## 换单与逐项结果
 
-`BatchReplace` 把撤旧与挂新放在一次状态机转移，仍可能逐项部分成功。当前内核跳过失败项；成功 HTTP 响应不是整批成功保证。
+`BatchReplace` 把撤旧与挂新放在一次状态机转移，仍可能逐项部分成功；成功 HTTP 响应不是整批成功保证。
 
-SDK 返回原始事件，并在没有全部输入项成功证据时返回 `ErrIncompleteBatch`。部分成功后必须冻结核查，不按价量、事件数量或压缩数组索引猜归属。
+SDK 以回执的逐项结果(`WriteReceipt.Items`,身份 `(Kind, InputIndex)`)判结局：逐项齐全且与输入/事件一致时，部分成功是终局的 `*BatchOutcomeError`(nonce 已消耗、会话不锁，被拒项带拒因);证据缺失或矛盾是 `ErrIncompleteBatch`(锁会话，按原请求身份 `ReceiptOf` 核查)。不按价量、事件数量或压缩数组索引猜归属。
 
 ```go
 events, err := c.BatchReplace(ctx, api, account, market, oldSeqs, quotes, nonce)
@@ -29,7 +29,7 @@ nonce 按 API 代理地址共享。多进程或多个账户共用同一代理时
 
 过滤参数为 `markets` / `accounts`，两者取并集。seq 是日志位号，同命令多事件共享，不能作为成交唯一身份。
 
-SDK 遇坏帧、Lagged 或断线即终止并报 `ErrStreamGap`(seq 回退不算:系统命令事件与订单事件派生路径不同,seq 不单调,身份是 `Event.ID()` 三段)。重连只收未来事件,快照不能补齐逐笔成交 —— 用 `Fills(After: 最后一个 Event.ID())` 从 `/fills` 补齐再重连(dex-os 2026-09-19 起提供稳定成交身份、订单关联、逐笔实际费用与游标分页,即 [#1](https://github.com/chainupcloud/dex-os/issues/1) / [#2](https://github.com/chainupcloud/dex-os/issues/2) 的服务端部分)。
+SDK 遇坏帧、Lagged 或断线即终止并报 `ErrStreamGap`(seq 回退不算:系统命令事件与订单事件派生路径不同,seq 不单调,身份是 `Event.ID()` 三段)。重连只收未来事件,快照不能补齐逐笔成交 —— 用 `Fills(After: 最后一个 Event.ID(), Epoch: 它所属的纪元)` 从 `/fills` 补齐(其他事件用 `Client.Events`)再重连(dex-os 2026-09-19 起提供稳定成交身份、订单关联、逐笔实际费用与游标分页,即 [#1](https://github.com/chainupcloud/dex-os/issues/1) / [#2](https://github.com/chainupcloud/dex-os/issues/2) 的服务端部分)。
 
 交易落账须取得稳定成交 ID、订单关联、逐笔实际费用与最终状态；持仓差只能用于对账，不能变造成交。权益用 NC 的明确口径；collateral 不是总权益，缺净入金/资金费不得填零。
 

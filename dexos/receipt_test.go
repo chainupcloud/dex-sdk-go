@@ -16,8 +16,11 @@ import (
 
 const receiptEvents = `[{"kind":"OrderCanceled","data":{"account":42,"market":7,"orderSeq":3,"remainingLots":2}},{"kind":"OrderAccepted","data":{"account":42,"market":7,"orderSeq":4,"price":100,"lots":2,"filledLots":0,"resting":true}}]`
 
-// batchStatus 值集来自 dex-os api.rs@9d942f2:578–586：ok / none / partial。
-const completeReceipt = `{"status":"ok","seq":120,"sub":0,"folded":true,"submitted":1,"submittedCancels":1,"accepted":1,"canceled":1,"rejected":0,"batchStatus":"ok","events":` + receiptEvents + `}`
+// 逐项结果形状来自 dex-os crates/raft-node/src/ring/publisher.rs batch_item(撤单与下单各自从 0 编号)。
+const receiptItems = `[{"inputIndex":0,"kind":"cancel","accountId":42,"market":7,"recordSub":0,"orderId":"3","state":"canceled","canceledLots":2},{"inputIndex":0,"kind":"place","accountId":42,"market":7,"recordSub":1,"orderId":"4","state":"accepted","filledLots":0,"resting":true}]`
+
+// batchStatus 值集来自 dex-os api.rs annotate_batch_outcome：ok / none / partial。
+const completeReceipt = `{"status":"ok","seq":120,"sub":0,"folded":true,"submitted":1,"submittedCancels":1,"accepted":1,"canceled":1,"rejected":0,"batchStatus":"ok","items":` + receiptItems + `,"events":` + receiptEvents + `}`
 
 type receiptRequest struct {
 	Agent     string `json:"agent"`
@@ -117,7 +120,7 @@ func TestReplaceReceiptPreservesRequestAndMetadata(t *testing.T) {
 }
 
 func TestReplaceReceiptDistinguishesAbsentOptionalFields(t *testing.T) {
-	f := newReceiptFixture(t, http.StatusOK, `{"status":"ok","seq":120,"events":`+receiptEvents+`}`)
+	f := newReceiptFixture(t, http.StatusOK, `{"status":"ok","seq":120,"items":`+receiptItems+`,"events":`+receiptEvents+`}`)
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	result, err := f.session.ReplaceWithReceipt(ctx, 7, []uint64{3}, receiptOrders())
@@ -217,7 +220,7 @@ func TestReceiptAggregateClaimsCannotOverrideEvents(t *testing.T) {
 }
 
 func TestReceiptNullMetadataRemainsUnknown(t *testing.T) {
-	body := `{"status":"ok","seq":120,"sub":null,"folded":null,"accepted":null,"rejected":null,"events":` + receiptEvents + `}`
+	body := `{"status":"ok","seq":120,"sub":null,"folded":null,"accepted":null,"rejected":null,"items":` + receiptItems + `,"events":` + receiptEvents + `}`
 	f := newReceiptFixture(t, http.StatusOK, body)
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
@@ -280,7 +283,7 @@ func TestReplaceNilCancelsAreAnEmptyJSONArray(t *testing.T) {
 		if string(body["cancels"]) != "[]" || string(body["orders"]) != "[]" {
 			t.Fatal("空列表编码为 null，不符合 Rust Vec 请求契约")
 		}
-		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"status":"ok","seq":1,"events":[]}`)), Header: make(http.Header)}, nil
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"status":"ok","seq":1,"items":[],"events":[]}`)), Header: make(http.Header)}, nil
 	})
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()

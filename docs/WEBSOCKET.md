@@ -96,8 +96,8 @@ for {
 
 `Subscribe` 同步建连,断线、坏帧或 Lagged 终止流并报告 `ErrStreamGap`;**seq 回退不终止** —— 它不单调(keeper 的 OracleUpdated / FundingSampled 走另一条派生路径,真节点上每几分钟回退一次),事件身份是 `Event.ID()` 的三段。
 不自动重连 —— 重连会掩盖成交缺口。**缺口有正路可补**:每条事件带完整身份 `Event.ID()`
-(`"<seq>-<sub>-<idx>"`,与 `/fills` 里同一笔逐字符相同),记住最后一个,`s.Fills(ctx,
-dexos.FillQuery{After: lastID})` 从服务端成交账本把断开期间的成交拉齐、按 id 去重,然后再
+(`"<seq>-<sub>-<idx>"`,与 `/fills` 里同一笔逐字符相同),记住最后一个(连同纪元),`s.Fills(ctx,
+dexos.FillQuery{After: lastID, Epoch: epoch})` 从服务端成交账本把断开期间的成交拉齐、按 id 去重,然后再
 `Subscribe`。快照(`/risk` `/book`)只能校准状态,补不回逐笔成交。取消 context 会关闭静默连接，
 三个通道均关闭。详见 [做市完整性边界](LIQUIDITY-INTEGRATION.md)。
 

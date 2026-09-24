@@ -45,7 +45,7 @@ func TestAgentGrantsPreservesIdentityAndRejectsMissingFields(t *testing.T) {
 func TestCompleteBatchPreservesEventsAndReadWatermark(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/batch" {
-			io.WriteString(w, `{"status":"ok","seq":12,"events":[{"kind":"OrderAccepted","data":{"account":42,"market":7,"orderSeq":9,"price":100,"lots":1,"filledLots":0,"resting":true}}]}`)
+			io.WriteString(w, `{"status":"ok","seq":12,"items":[{"inputIndex":0,"kind":"place","accountId":42,"market":7,"recordSub":0,"orderId":"9","state":"accepted","filledLots":0,"resting":true}],"events":[{"kind":"OrderAccepted","data":{"account":42,"market":7,"orderSeq":9,"price":100,"lots":1,"filledLots":0,"resting":true}}]}`)
 			return
 		}
 		if r.Header.Get("x-dexos-min-seq") != "12" {

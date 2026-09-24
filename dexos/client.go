@@ -77,18 +77,19 @@ type APIError struct {
 
 func (e *APIError) Error() string { return fmt.Sprintf("HTTP %d: %s", e.Status, e.Body) }
 
-func (c *Client) do(ctx context.Context, method, path string, in, out any) error {
+// roundTrip 发一次请求,返回状态码与原始报文;读一致性头的收发在这里。
+func (c *Client) roundTrip(ctx context.Context, method, path string, in any) (int, []byte, error) {
 	var body io.Reader
 	if in != nil {
 		b, err := json.Marshal(in)
 		if err != nil {
-			return fmt.Errorf("请求体序列化失败:%w", err)
+			return 0, nil, fmt.Errorf("请求体序列化失败:%w", err)
 		}
 		body = bytes.NewReader(b)
 	}
 	req, err := http.NewRequestWithContext(ctx, method, c.BaseURL+path, body)
 	if err != nil {
-		return err
+		return 0, nil, err
 	}
 	if in != nil {
 		req.Header.Set("content-type", "application/json")
@@ -98,7 +99,7 @@ func (c *Client) do(ctx context.Context, method, path string, in, out any) error
 	}
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
-		return err
+		return 0, nil, err
 	}
 	defer resp.Body.Close()
 	// 无论成败都推进位号:412 的响应里带的是**本地已应用**位号,
@@ -111,10 +112,18 @@ func (c *Client) do(ctx context.Context, method, path string, in, out any) error
 	}
 	raw, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return fmt.Errorf("响应读取失败: %w", err)
+		return 0, nil, fmt.Errorf("响应读取失败: %w", err)
 	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return &APIError{Status: resp.StatusCode, Body: string(raw)}
+	return resp.StatusCode, raw, nil
+}
+
+func (c *Client) do(ctx context.Context, method, path string, in, out any) error {
+	status, raw, err := c.roundTrip(ctx, method, path, in)
+	if err != nil {
+		return err
+	}
+	if status < 200 || status >= 300 {
+		return classifyAPIError(&APIError{Status: status, Body: string(raw)})
 	}
 	if out == nil {
 		return nil

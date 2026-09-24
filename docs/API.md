@@ -157,7 +157,7 @@
   口径:taker 费按**整单**收一次再按名义额摊回每一笔,同一张单各笔之和 = 实收(dex-os
   `INV-FEE-ATTRIB`),可以直接用它算盈亏;maker 为负 = 返佣。
 
-Go SDK:`s.Fills(ctx, dexos.FillQuery{After: lastSeenID})` **自动翻页到底**,游标不前进即报错;
+Go SDK:`s.Fills(ctx, dexos.FillQuery{After: lastSeenID, Epoch: lastEpoch})` **自动翻页到上界**(续页带回第一页的 `epoch` + `upper`),游标不前进、页间上界漂移即报错;纪元不符 → `ErrHistoryEpochMismatch`,与缺口相交 → `*HistoryUnavailableError`;
 `FillQuery.Limit` 只在「看一眼」时用,补拉用它等于给自己留一个看起来成功的漏拉。
 
 ### 其他
@@ -267,7 +267,7 @@ nonce 用 **agent 自己的**(`/agents/:master` 里的 `nextNonce`)。
 
 SDK 的 `Session.ReplaceWithReceipt` / `Client.BatchReplaceWithReceipt` 仍调用此接口，
 额外保留本地签名请求身份及已解析响应（seq、可选 sub/folded、聚合计数/状态、拒因和事件）。
-`folded=false` 不视为执行成功；聚合计数不能替代逐项事件。旧版缺失的可选字段保留 nil。
+`folded=false` 不视为执行成功；逐项结果 `items` 是结局依据，聚合计数与事件只作交叉核对。缺失的可选字段保留 nil。
 一个请求不等于全成功或全回滚；详情与恢复限制见 [做市接入完整性边界](LIQUIDITY-INTEGRATION.md)。
 
 ---

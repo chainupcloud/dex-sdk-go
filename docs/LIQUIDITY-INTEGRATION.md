@@ -20,11 +20,15 @@
 
 ## 批量订单与未知结果
 
-`BatchPlace` / `BatchCancel` / `BatchReplace` 返回原始成功事件；缺任意输入项成功证据时同时返回 `ErrIncompleteBatch`。部分成功不能按压缩后的数组索引或价量配对，也不能把失败当未执行。
+`BatchPlace` / `BatchCancel` / `BatchReplace` 以折叠回执的逐项结果 `WriteReceipt.Items`(dex-os #4)判结局：身份是 `(Kind, InputIndex)`,撤单与下单各自从 0 编号，对应调用方两个输入切片的下标；事件与聚合计数只作交叉核对。
 
-`Session` 在会话内串行写入,**结论未知**的写错误(传输失败、`ErrExecutionPending`、`NonceMismatch`、`ErrIncompleteBatch`)锁定后续写入及 `Resync`(`ErrSessionBlocked`),保留原 nonce 与事件供核查;状态机的终局业务拒绝(`*RejectedError`)不锁——内核在 nonce 写入之后才判业务且 apply 不回滚,本地计数器 ++;发生在 nonce 之前的拒绝(scope 越权、未授权)计数器不动。锁定并不声称明确拒绝也是未知执行，只表示调用方尚未核对上次结果。不得通过创建新 Session、重读 nonce 或换新 nonce 盲重发绕过。
+- 每个输入恰好一项、账户/市场/撤单目标与输入一致、被接受的下单有同号且价量一致的 `OrderAccepted`、被撤的单有 `OrderCanceled`、事件里没有多出的接受、聚合与逐项一致 —— 全部成立才采信；
+- 采信且全部成功 → nil；采信但有项被拒 → `*BatchOutcomeError`(终局：命令已执行、nonce 已消耗，`Rejected` 带出被拒项与拒因，其余项已生效，不要重发)；
+- 缺 `items` 或任何一条不成立 → `ErrIncompleteBatch`(证据不可信)。不退回旧的按事件推断。
 
-这是进程内约束；**调用方仍须持久化未决请求并按 API 代理地址持有跨进程独占租约**。本 SDK 没有提供持久 nonce 协调或可靠重启恢复；服务端原回执契约完成前，交易接入保持 gated。
+`Session` 在会话内串行写入,**结论未知**的写错误(传输失败、`ErrExecutionPending`、`NonceMismatch`、`ErrIncompleteBatch`)锁定后续写入及 `Resync`(`ErrSessionBlocked`),保留原 nonce 与事件供核查;终局结论不锁：状态机的业务拒绝(`*RejectedError`)——内核在 nonce 写入之后才判业务且 apply 不回滚,本地计数器 ++;发生在 nonce 之前的拒绝(scope 越权、未授权)计数器不动;逐项结局齐全的部分成功(`*BatchOutcomeError`)计数器 ++。锁定并不声称明确拒绝也是未知执行，只表示调用方尚未核对上次结果。不得通过创建新 Session、重读 nonce 或换新 nonce 盲重发绕过；按原请求身份查 `Client.ReceiptOf`。
+
+这是进程内约束；**调用方仍须持久化未决请求并按 API 代理地址持有跨进程独占租约**。SDK 提供原回执查询(`ReceiptOf`),但不提供持久 nonce 协调或自动重启恢复。
 
 ### 单请求换单的证据接口
 
@@ -45,16 +49,16 @@
 可选字段保持 nil 与合法0/false的区别。seq/sub 是请求所在日志条目及子项，不是唯一成交 ID。
 `folded=false` 返回 `ErrExecutionPending` 并经 Session 锁定；同次请求虽已带 `wait=fold`，
 预算内仍可能等不到结果。不会再发第二次请求、自动轮询或重发。
-聚合统计只能否定成功，不能代替逐项事件证据；已提供的统计与输入/事件矛盾也返回错误。
-该固定源码的 batchStatus 值集为 `ok` / `none` / `partial`，完整成功为 `ok`，不是 `all`。
-缺 sub/folded/统计的旧版回执仍可按原有事件检查工作，不给缺失字段补零。
+聚合统计只能与逐项结果一致，不能代替它；已提供的统计与逐项/事件矛盾返回 `ErrIncompleteBatch`。
+batchStatus 值集为 `ok` / `none` / `partial`(dex-os api.rs `annotate_batch_outcome`)。
+缺 sub/folded/统计的回执不给缺失字段补零；缺 `items` 的批量回执不再被接受。
 
 即使返回 error，也要保留本次已经取得的 Request/Receipt。会话已阻断、context 预先取消或授权
 已到期时，本次调用不会建立新 Request；这不证明上一请求未执行，不应被当作恢复结果。
 
 **仅调用 WithReceipt 仍不是发送前日志。** 身份随调用结果返回；进程在返回前崩溃仍可能失去它。
-需要发送前持久化的调用方应使用下述 `ReplaceWithJournal` 并提供真实存储。SDK 没有原回执查询、跨进程 nonce 协调或自动重启恢复能力，
-更不能据此解除 dex-os #1–#5、账户独占和 live 窗口前置。EIP-712、codec、签名算法均未改变。
+需要发送前持久化的调用方应使用下述 `ReplaceWithJournal` 并提供真实存储。SDK 没有跨进程 nonce 协调或自动重启恢复能力，
+不能据此解除账户独占和 live 窗口前置。EIP-712、codec、签名算法均未改变。
 
 ### 发送前原请求日志
 
@@ -83,7 +87,7 @@ base `444ca6a`。`GOWORK=off go test -race -count=1 -timeout=90s ./...` 与 `go 
 | 只保留事件，丢请求与回执元数据 | TestReplaceReceiptPreservesRequestAndMetadata | SDK 丢失原请求身份或回执元数据 |
 | 忽略显式 folded=false | TestExplicitPendingNeverSucceedsEvenWithEvents | 明确 pending 被当成执行成功 |
 | 错误放行值 all，不接受服务端 ok | TestReplaceReceiptPreservesRequestAndMetadata | ErrIncompleteBatch: batchStatus=ok |
-| 跳过 checkReplaceMetadata | TestReceiptAggregateClaimsCannotOverrideEvents | 聚合声明覆盖逐项证据或矛盾回执被接受 |
+| 跳过聚合核对(2026-09-24 并入 checkBatchAggregates) | TestReceiptAggregateClaimsCannotOverrideEvents | 聚合声明覆盖逐项证据或矛盾回执被接受 |
 | 不经 decoded 检查直接暴露 WriteReceipt | TestReceiptFailurePreservesAvailableEvidenceAndBlocks | 失败时丢失/伪造请求或回执证据 |
 
 各项为可编译代码缺陷的实际 rc=1，不把坏输入测试或编译失败当变异成功；末两项注入后逐字还原，
@@ -95,12 +99,28 @@ base `444ca6a`。`GOWORK=off go test -race -count=1 -timeout=90s ./...` 与 `go 
 
 不再自动重连。只有从可靠历史补齐逐笔事件、对账完成后才能建立新连接；当前 `/risk` 或 `/book` 快照不能证明成交历史完整。seq 可以重复或跳号，禁止作为唯一成交 ID。
 
+## 执行历史读接口与原请求回执(dex-os #1/#2/#3/#5)
+
+对照 dex-os `5ee4759`(`crates/gateway/src/api.rs` 的 fills / account_ledger / events_backfill / equity_snapshot / request_receipt)。
+
+- `Fills` / `Ledger` / `Events` 自动翻页到上界：第一页给出 `epoch` + `upper`,续页原样带回(服务端缺一即 400)。结果带回 `Epoch` / `Upper`:「没有更多」只表示到 `Upper` 为止。从已存游标续拉必须同时给出游标所属纪元(`After` + `Epoch`),SDK 先以该纪元探一页取当前上界；缺纪元在本地拒绝、不发请求。页间纪元或上界漂移即报错，不把两段历史拼成一份。
+- 纪元不符(409)→ `ErrHistoryEpochMismatch`:账本换纪元，旧游标作废。与缺口相交(503)→ `*HistoryUnavailableError`(带缺口区间，仍可 `errors.As` 取 `*APIError`)—— 证明不了有没有，不是空结果。
+- `Fill.TS` 为 `*int64`:null = 服务端不知道成交时刻(之前没有过区块),不是 1970 年。
+- `Equity(account, epoch)` 同水位快照，金额保持最小单位字符串；404 → `ErrNotRegistered`,500(`ledger_mismatch` / `valuation_mismatch`)与 503 一律是错误，不给快照。
+- `AgentRequestIdentity.RequestID()` = keccak256(代理地址 ‖ SigningHash),与 dex-os `SignedRequest::request_id` 同一定义(`testdata/request_id_golden.json` 是真节点上服务端推导的金样)。`ReceiptOf(identity)` 按 agent scope + 原 nonce 查询，并核对回执声称的签名者与 nonce。六种结论(executed / rejected / pending / not_found / conflict / history_unavailable)按状态返回；**只有无缺口的副本才会给 not_found**,history_unavailable 不能当成「没执行」。
+
+真节点验证:`examples/contracts` 对本机全新纪元 dex-node 走一遍(两个新账户挂单吃单、逐项全成功与部分成功、原请求回执、not_found、成交翻页与续拉、纪元不符、Σ流水 == 权益快照余额、事件补拉),全部 PASS。同一节点上旧版 `Fills`(每页 1 笔)第二页即 `HTTP 400: resume requires epoch and upper from the first page`。
+
 ## 服务端前置
 
-- [成交身份、订单关联、实际费用与完整分页 #1](https://github.com/chainupcloud/dex-os/issues/1) —— **服务端已交付**(dex-os 2026-09-19,`GET /fills`:`"<seq>-<sub>-<idx>"` 身份、`order/counterOrder`、逐笔实际 `fee`、`after` 游标);SDK 侧 `Session.Fills` + `Event.ID()`
-- [历史补拉及投影完整性 #2](https://github.com/chainupcloud/dex-os/issues/2) —— 同上,补拉走 `/fills` 而非快照
-- [原请求回执恢复 #3](https://github.com/chainupcloud/dex-os/issues/3)
-- [批次逐项结果 #4](https://github.com/chainupcloud/dex-os/issues/4)
-- [资金流水与权益对账 #5](https://github.com/chainupcloud/dex-os/issues/5)
+dex-os #1–#5 已由 dex-os PR #6 合入 main(2026-09-24):
+
+- [成交身份、订单关联、实际费用与完整分页 #1](https://github.com/chainupcloud/dex-os/issues/1) —— `Session.Fills` + `Event.ID()`
+- [历史补拉及投影完整性 #2](https://github.com/chainupcloud/dex-os/issues/2) —— `Client.Events` / `Session.Fills`
+- [原请求回执恢复 #3](https://github.com/chainupcloud/dex-os/issues/3) —— `Client.ReceiptOf`
+- [批次逐项结果 #4](https://github.com/chainupcloud/dex-os/issues/4) —— `WriteReceipt.Items` / `*BatchOutcomeError`
+- [资金流水与权益对账 #5](https://github.com/chainupcloud/dex-os/issues/5) —— `Client.Ledger` / `Client.Equity`
+
+升级前就存在的账本带一段永久缺口(dex-os `docs/deploy.md` §6c′):那样的实例上 `/equity` 恒 503、未落地的请求恒 history_unavailable,做市对接须用全新纪元的实例。
 
 HTTP/head 实例不提供生产安全与最终确认保证。`ScheduleCancel` 是账户级全撤，使用前必须核实专用账户及其他策略占用，取得 owner 的 live 窗口与硬顶。

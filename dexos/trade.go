@@ -58,7 +58,7 @@ func (c *Client) BatchPlace(
 		"signature": sig,
 	}, &out)
 	if err == nil {
-		err = checkBatchOutcome(out.Events, account, orders, nil)
+		err = checkBatchOutcome(out.WriteReceipt, account, orders, nil)
 	}
 	return out.Events, err
 }
@@ -94,7 +94,7 @@ func (c *Client) BatchCancel(
 		"signature": sig,
 	}, &out)
 	if err == nil {
-		err = checkBatchOutcome(out.Events, account, nil, ids)
+		err = checkBatchOutcome(out.WriteReceipt, account, nil, ids)
 	}
 	return out.Events, err
 }
@@ -188,10 +188,7 @@ func (c *Client) batchReplaceWithJournal(ctx context.Context, agent *Signer, acc
 	}, &out)
 	result.Receipt = out.evidence()
 	if err == nil {
-		err = checkBatchOutcome(out.Events, account, orders, ids)
-	}
-	if err == nil {
-		err = checkReplaceMetadata(out.WriteReceipt, len(orders), len(ids))
+		err = checkBatchOutcome(out.WriteReceipt, account, orders, ids)
 	}
 	if journal != nil {
 		copied, copyErr := copySubmission(result)
@@ -203,29 +200,6 @@ func (c *Client) batchReplaceWithJournal(ctx context.Context, agent *Signer, acc
 		}
 	}
 	return result, err
-}
-
-// 聚合字段只能进一步否定完整成功，不能取代每个输入的事件证据。
-func checkReplaceMetadata(receipt WriteReceipt, places, cancels int) error {
-	if receipt.BatchStatus != nil && *receipt.BatchStatus != "ok" {
-		return fmt.Errorf("%w: batchStatus=%s", ErrIncompleteBatch, *receipt.BatchStatus)
-	}
-	for _, field := range []struct {
-		name string
-		got  *uint64
-		want uint64
-	}{
-		{"submitted", receipt.Submitted, uint64(places)},
-		{"submittedCancels", receipt.SubmittedCancels, uint64(cancels)},
-		{"accepted", receipt.Accepted, uint64(places)},
-		{"canceled", receipt.Canceled, uint64(cancels)},
-		{"rejected", receipt.Rejected, 0},
-	} {
-		if field.got != nil && *field.got != field.want {
-			return fmt.Errorf("%w: %s 与输入或事件矛盾", ErrIncompleteBatch, field.name)
-		}
-	}
-	return nil
 }
 
 // ordersJSON 网关的 JSON 字段名与内核的规范编码是两套东西:

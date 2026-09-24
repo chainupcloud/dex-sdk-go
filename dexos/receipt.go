@@ -10,7 +10,7 @@ import (
 var ErrExecutionPending = errors.New("dexos: 请求已定序但执行尚未完成")
 
 // AgentRequestIdentity 是本次命令的本地签名身份，不含私钥或可重放的签名。
-// 域不等于部署/内核纪元；这些字段不代表服务端已有按身份查询的接口。
+// 域不等于部署/内核纪元；服务端按 RequestID() 查权威回执（Client.ReceiptOf）。
 type AgentRequestIdentity struct {
 	Agent        Address
 	Account      uint32
@@ -23,20 +23,24 @@ type AgentRequestIdentity struct {
 }
 
 // WriteReceipt 保留实际响应；可选字段为 nil 表示未提供，不填成合法的0/false。
-// 聚合统计不是逐项回执，seq/sub 不是 Fill 身份；读取本结构仍必须同时检查 error。
+// 批量入口折叠后恒给 Items（逐项结局，见 BatchItem）；聚合统计只能与它一致、不能替代它。
+// seq/sub 不是 Fill 身份；读取本结构仍必须同时检查 error。
 type WriteReceipt struct {
-	Status           string          `json:"status"`
-	Seq              *uint64         `json:"seq"`
-	Sub              *uint16         `json:"sub,omitempty"`
-	Folded           *bool           `json:"folded,omitempty"`
-	Reason           *string         `json:"reason,omitempty"`
-	Submitted        *uint64         `json:"submitted,omitempty"`
-	SubmittedCancels *uint64         `json:"submittedCancels,omitempty"`
-	Accepted         *uint64         `json:"accepted,omitempty"`
-	Canceled         *uint64         `json:"canceled,omitempty"`
-	Rejected         *uint64         `json:"rejected,omitempty"`
-	BatchStatus      *string         `json:"batchStatus,omitempty"`
-	Events           []EventEnvelope `json:"events"`
+	Status           string  `json:"status"`
+	Seq              *uint64 `json:"seq"`
+	Sub              *uint16 `json:"sub,omitempty"`
+	Folded           *bool   `json:"folded,omitempty"`
+	Reason           *string `json:"reason,omitempty"`
+	Submitted        *uint64 `json:"submitted,omitempty"`
+	SubmittedCancels *uint64 `json:"submittedCancels,omitempty"`
+	Accepted         *uint64 `json:"accepted,omitempty"`
+	Canceled         *uint64 `json:"canceled,omitempty"`
+	Rejected         *uint64 `json:"rejected,omitempty"`
+	BatchStatus      *string `json:"batchStatus,omitempty"`
+	// Duplicate 同一请求身份早已执行过:这次没有再提交,seq/sub 与结局都是原来那一次的。
+	Duplicate *bool           `json:"duplicate,omitempty"`
+	Items     []BatchItem     `json:"items,omitempty"`
+	Events    []EventEnvelope `json:"events"`
 }
 
 // BatchSubmission 是一次调用已取得的证据，不是持久日志或发送前回调。
