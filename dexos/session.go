@@ -224,6 +224,8 @@ func (s *Session) Resync(ctx context.Context) error {
 //   - NonceMismatch / ErrExecutionPending / 传输失败 / ErrIncompleteBatch:本地计数器
 //     不可信,或原请求结论未知 → **锁定**(含 Resync)。重读 nonce 不能证明原请求执行结果;
 //     调用方须持久化未决请求,按 API 代理地址持有独占租约。
+//   - 请求日志失败(ReplaceWithJournal 的 BeforeSend / AfterReceive):不论场所结论是什么,
+//     本地都没记下来 → **锁定**,优先于上面两类终局判断。
 func (s *Session) write(
 	ctx context.Context,
 	f func(nonce uint64) ([]EventEnvelope, error),
@@ -243,6 +245,11 @@ func (s *Session) write(
 	if err == nil {
 		s.nonce++
 		return ev, nil
+	}
+	var je journalError
+	if errors.As(err, &je) {
+		s.blocked = fmt.Errorf("%w (nonce=%d): %w", ErrSessionBlocked, s.nonce, err)
+		return ev, s.blocked
 	}
 	var re *RejectedError
 	if errors.As(err, &re) && re.Reason != ReasonNonceMismatch {

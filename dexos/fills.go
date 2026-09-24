@@ -92,11 +92,13 @@ type FillQuery struct {
 	Limit int
 }
 
-// FillHistory 一次补拉的结果。Upper 是本轮覆盖到的上界:「没有更多」只表示到 Upper 为止。
+// FillHistory 一次补拉的结果。Upper 是本轮的上界:「没有更多」只表示到 Upper 为止。
+// Truncated = 被 Limit 截断,只覆盖到最后一条,**没有**补齐到 Upper。
 type FillHistory struct {
-	Epoch string
-	Upper string
-	Fills []Fill
+	Epoch     string
+	Upper     string
+	Truncated bool
+	Fills     []Fill
 }
 
 // Fills 拉取账户成交,**自动翻页直到上界**。
@@ -114,7 +116,7 @@ func (c *Client) Fills(ctx context.Context, account uint32, q FillQuery) (*FillH
 	}
 	cur := &historyCursor{after: q.After, epoch: q.Epoch, pageSize: q.PageSize, limit: q.Limit}
 	fills, err := pageThrough[Fill](ctx, c, "/fills", params, "fills", cur)
-	return &FillHistory{Epoch: cur.epochOut, Upper: cur.upper, Fills: fills}, err
+	return &FillHistory{Epoch: cur.epochOut, Upper: cur.upper, Truncated: cur.truncated, Fills: fills}, err
 }
 
 // Fills 本会话账户的成交(见 [Client.Fills])。

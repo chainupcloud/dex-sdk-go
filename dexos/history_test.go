@@ -319,6 +319,22 @@ func TestEventsBackfillPages(t *testing.T) {
 	}
 }
 
+// Limit 截断时必须标 Truncated:Upper 仍是整轮的上界,不标就会被当成「已补齐到 Upper」。
+func TestFillsLimitTruncationIsMarked(t *testing.T) {
+	f := &historyFake{epoch: "k1-1", complete: 50, field: "fills", rows: fillRows(5)}
+	c := newHistoryClient(t, "/fills", f)
+	got, err := c.Fills(context.Background(), 7, FillQuery{PageSize: 2, Limit: 3})
+	if err != nil || len(got.Fills) != 3 || !got.Truncated {
+		t.Fatalf("截断的结果没有标 Truncated: %+v %v", got, err)
+	}
+	for _, limit := range []int{5, 9} {
+		got, err = c.Fills(context.Background(), 7, FillQuery{PageSize: 2, Limit: limit})
+		if err != nil || len(got.Fills) != 5 || got.Truncated {
+			t.Fatalf("Limit=%d 已翻到底,不算截断: %+v %v", limit, got, err)
+		}
+	}
+}
+
 // 真节点实录的一页成交(testdata/fills_page_live.json)能被完整解析,且游标/纪元/上界原样带回。
 func TestFillsParseLiveSample(t *testing.T) {
 	raw, err := os.ReadFile("testdata/fills_page_live.json")
@@ -333,7 +349,7 @@ func TestFillsParseLiveSample(t *testing.T) {
 	_ = json.Unmarshal(raw, &sample)
 	c, _ := serveOnce(t, "/fills", 200, string(raw))
 	got, err := c.Fills(context.Background(), sample.Account, FillQuery{Limit: 2})
-	if err != nil || len(got.Fills) != 2 || got.Epoch != sample.Epoch || got.Upper != sample.Upper || got.Fills[0].Fee == nil || got.Fills[0].Order == 0 || got.Fills[0].Role != "maker" {
+	if err != nil || len(got.Fills) != 2 || !got.Truncated || got.Epoch != sample.Epoch || got.Upper != sample.Upper || got.Fills[0].Fee == nil || got.Fills[0].Order == 0 || got.Fills[0].Role != "maker" {
 		t.Fatalf("实录成交页解析不对: %+v %v", got, err)
 	}
 }

@@ -42,6 +42,13 @@ func (s *Session) ReplaceWithJournal(ctx context.Context, market uint16, cancels
 	return result, err
 }
 
+// journalError 标记请求日志自身的失败。无论场所给出什么结论（成功、终局拒绝、部分成功），
+// 只要本地没记下来，结论就只在内存里 —— 会话必须锁定，nonce 不推进。
+type journalError struct{ err error }
+
+func (e journalError) Error() string { return e.err.Error() }
+func (e journalError) Unwrap() error { return e.err }
+
 type sessionReplaceJournal struct {
 	session *Session
 	target  ReplaceJournal

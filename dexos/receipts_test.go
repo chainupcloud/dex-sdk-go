@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -96,6 +97,9 @@ func TestReceiptFailuresAreErrors(t *testing.T) {
 		{"missing_epoch", 404, `{"requestId":"` + rid + `","status":"not_found","asOfSeq":3}`},
 		{"echo_mismatch", 404, `{"requestId":"0x2222222222222222222222222222222222222222222222222222222222222222","status":"not_found","epoch":"k1-1","asOfSeq":3}`},
 		{"executed_without_seq", 200, `{"status":"executed","epoch":"k1-1","nonceConsumed":true,"events":[],"items":[]}`},
+		{"not_found_without_as_of", 404, `{"requestId":"` + rid + `","status":"not_found","epoch":"k1-1"}`},
+		{"not_found_under_503", 503, `{"requestId":"` + rid + `","status":"not_found","epoch":"k1-1","asOfSeq":3}`},
+		{"executed_under_404", 404, `{"status":"executed","epoch":"k1-1","seq":12,"sub":0,"nonceConsumed":true,"events":[],"items":[]}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c, _ := serveOnce(t, "/receipts/", tc.status, tc.body)
@@ -133,7 +137,7 @@ func TestReceiptOfChecksIdentity(t *testing.T) {
 			`","signer":"` + signerHex + `","nonceScope":"agent:` + signerHex + `","nonce":` + nonce + `}`
 	}
 	c, seen := serveOnce(t, "/receipts/", 200, body(signer.Address().Hex(), "5"))
-	got, err := c.ReceiptOf(context.Background(), id)
+	got, err := c.ReceiptOf(context.Background(), id, "k1-1")
 	if err != nil || got.Status != ReceiptExecuted {
 		t.Fatalf("身份一致的回执应当通过: %+v %v", got, err)
 	}
@@ -141,12 +145,48 @@ func TestReceiptOfChecksIdentity(t *testing.T) {
 		t.Fatalf("应按本地推导的请求身份 + agent scope + nonce 查询: %v", *seen)
 	}
 	c2, _ := serveOnce(t, "/receipts/", 200, body("0x0000000000000000000000000000000000000001", "5"))
-	if _, err := c2.ReceiptOf(context.Background(), id); err == nil {
+	if _, err := c2.ReceiptOf(context.Background(), id, "k1-1"); err == nil {
 		t.Fatal("签名者不符的回执不能当成自己的")
 	}
 	c3, _ := serveOnce(t, "/receipts/", 200, body(signer.Address().Hex(), "6"))
-	if _, err := c3.ReceiptOf(context.Background(), id); err == nil {
+	if _, err := c3.ReceiptOf(context.Background(), id, "k1-1"); err == nil {
 		t.Fatal("nonce 不符的回执不能当成自己的")
+	}
+	if _, err := c.ReceiptOf(context.Background(), id, "k2-2"); !errors.Is(err, ErrHistoryEpochMismatch) {
+		t.Fatalf("别的纪元的回执不能当成原请求的: %v", err)
+	}
+	if _, err := c.ReceiptOf(context.Background(), id, ""); err == nil {
+		t.Fatal("不给原请求纪元应当在本地拒绝")
+	}
+}
+
+// CheckReplace 对权威回执用与写回执同一套逐项判据:全成功 nil、部分成功 *BatchOutcomeError、
+// 证据矛盾 ErrIncompleteBatch;不是「已执行且 nonce 已消耗」的结论不是批次结局。
+func TestReceiptCheckReplaceUsesBatchItemRules(t *testing.T) {
+	req := ReplaceRequest{Identity: AgentRequestIdentity{Account: 42}, Market: 7, Cancels: []uint64{3}, Orders: receiptOrders()}
+	receipt := func(status string, consumed bool, items, events string) *RequestReceipt {
+		var r RequestReceipt
+		body := `{"status":"` + status + `","epoch":"k1-1","seq":120,"sub":0,"nonceConsumed":` + strconv.FormatBool(consumed) + `,"items":[` + items + `],"events":[` + events + `]}`
+		if err := json.Unmarshal([]byte(body), &r); err != nil {
+			t.Fatal(err)
+		}
+		return &r
+	}
+	withSeq := func(ev string) string { return strings.Replace(ev, `{"kind"`, `{"seq":120,"sub":0,"idx":0,"kind"`, 1) }
+	if err := receipt("executed", true, itemCancelOK+","+itemPlaceOK, withSeq(eventCanceled3)+","+withSeq(eventAccepted4)).CheckReplace(req); err != nil {
+		t.Fatalf("逐项全成功的回执应当通过: %v", err)
+	}
+	var bo *BatchOutcomeError
+	if err := receipt("executed", true, itemCancelOK+","+itemPlaceRejected, withSeq(eventCanceled3)).CheckReplace(req); !errors.As(err, &bo) || len(bo.Rejected) != 1 {
+		t.Fatalf("逐项齐全的部分成功应当是 *BatchOutcomeError: %v", err)
+	}
+	if err := receipt("executed", true, itemCancelOK, withSeq(eventCanceled3)).CheckReplace(req); !errors.Is(err, ErrIncompleteBatch) {
+		t.Fatalf("缺下单项的回执不可信: %v", err)
+	}
+	for _, r := range []*RequestReceipt{receipt("executed", false, itemCancelOK+","+itemPlaceOK, withSeq(eventCanceled3)+","+withSeq(eventAccepted4)), receipt("rejected", true, "", "")} {
+		if err := r.CheckReplace(req); err == nil || errors.As(err, &bo) {
+			t.Fatalf("%s/nonceConsumed=%v 不是批次结局: %v", r.Status, *r.NonceConsumed, err)
+		}
 	}
 }
 

@@ -78,6 +78,7 @@ type historyCursor struct {
 	pageSize, limit int
 	epochOut, upper string
 	completeSeq     uint64
+	truncated       bool
 }
 
 // pageThrough 按上述契约翻完一个历史接口,返回全部条目(失败时返回已取到的部分与错误)。
@@ -159,7 +160,8 @@ func pageThrough[T any](ctx context.Context, c *Client, path string, params url.
 			return all, fmt.Errorf("dexos: %s 页间纪元/上界漂移(%s %s → %s %s)", path, cur.epochOut, cur.upper, page.Epoch, page.Upper)
 		}
 		all = append(all, items...)
-		if cur.limit > 0 && len(all) >= cur.limit {
+		if cur.limit > 0 && len(all) >= cur.limit && (len(all) > cur.limit || page.HasMore) {
+			cur.truncated = true
 			return all[:cur.limit], nil
 		}
 		if !page.HasMore {
@@ -207,11 +209,13 @@ type LedgerQuery struct {
 	Limit    int
 }
 
-// LedgerHistory 一次翻页的结果:Upper 是本轮覆盖到的上界(与 /equity 的 upper 同格式)。
+// LedgerHistory 一次翻页的结果:Upper 是本轮的上界(与 /equity 的 upper 同格式)。
+// Truncated = 被 Limit 截断,只覆盖到最后一条,**没有**补齐到 Upper。
 type LedgerHistory struct {
-	Epoch   string
-	Upper   string
-	Entries []LedgerEntry
+	Epoch     string
+	Upper     string
+	Truncated bool
+	Entries   []LedgerEntry
 }
 
 // Ledger 账户资金流水,**自动翻页直到上界**。
@@ -225,7 +229,7 @@ func (c *Client) Ledger(ctx context.Context, account uint32, q LedgerQuery) (*Le
 	}
 	cur := &historyCursor{after: q.After, epoch: q.Epoch, pageSize: q.PageSize, limit: q.Limit}
 	entries, err := pageThrough[LedgerEntry](ctx, c, "/ledger", params, "entries", cur)
-	return &LedgerHistory{Epoch: cur.epochOut, Upper: cur.upper, Entries: entries}, err
+	return &LedgerHistory{Epoch: cur.epochOut, Upper: cur.upper, Truncated: cur.truncated, Entries: entries}, err
 }
 
 // EventQuery 全局事件补拉条件(不分账户/市场)。After 非空时必须同时给 Epoch。
@@ -237,10 +241,12 @@ type EventQuery struct {
 }
 
 // EventHistory 事件补拉结果。事件身份与 WS 推送的同一条逐字符相同([Event.ID])。
+// Truncated = 被 Limit 截断,只覆盖到最后一条,**没有**补齐到 Upper / CompleteSeq。
 type EventHistory struct {
 	Epoch       string
 	Upper       string
 	CompleteSeq uint64
+	Truncated   bool
 	Events      []Event
 }
 
@@ -248,7 +254,7 @@ type EventHistory struct {
 func (c *Client) Events(ctx context.Context, q EventQuery) (*EventHistory, error) {
 	cur := &historyCursor{after: q.After, epoch: q.Epoch, pageSize: q.PageSize, limit: q.Limit}
 	events, err := pageThrough[Event](ctx, c, "/events", url.Values{}, "events", cur)
-	return &EventHistory{Epoch: cur.epochOut, Upper: cur.upper, CompleteSeq: cur.completeSeq, Events: events}, err
+	return &EventHistory{Epoch: cur.epochOut, Upper: cur.upper, CompleteSeq: cur.completeSeq, Truncated: cur.truncated, Events: events}, err
 }
 
 // Equity 同水位权益快照(dex-os #5,GET /equity)。

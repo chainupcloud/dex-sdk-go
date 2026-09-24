@@ -25,11 +25,15 @@ type ReceiptStatus string
 const (
 	// ReceiptExecuted 已执行(nonce 已消耗);Items/Events 是它的逐项结局与事件。
 	ReceiptExecuted ReceiptStatus = "executed"
-	// ReceiptRejected 已终局拒绝;NonceConsumed=false 表示只在认证层被拒,nonce 未动。
+	// ReceiptRejected 这一次投递被拒。NonceConsumed=true 是终局业务拒绝;NonceConsumed=false
+	// 表示只在认证层被拒、nonce 未动 —— 代理签名没有过期窗口,同一份签名以后仍可能被定序,
+	// 这**不是**终局。
 	ReceiptRejected ReceiptStatus = "rejected"
 	// ReceiptPending 已定序、结论尚未持久 —— 稍后再问,不能重发。
 	ReceiptPending ReceiptStatus = "pending"
 	// ReceiptNotFound 截至 AsOfSeq 这个身份从未定序(本副本历史无缺口时才会给出)。
+	// **不是终局**:代理签名没有过期窗口,nonce 被消耗之前同一请求随时可能被定序;
+	// 只有同一 nonce 已被别的请求用掉(ReceiptConflict)才证明它不会再执行。
 	ReceiptNotFound ReceiptStatus = "not_found"
 	// ReceiptConflict 查询带的 nonce 已被**另一个**请求用掉(ConflictingRequest)。
 	ReceiptConflict ReceiptStatus = "conflict"
@@ -121,7 +125,13 @@ func (c *Client) Receipt(ctx context.Context, requestID string, q ReceiptQuery) 
 }
 
 // ReceiptOf 按本地原请求身份查回执(agent scope + 原 nonce),并核对回执声称的签名者与 nonce。
-func (c *Client) ReceiptOf(ctx context.Context, id AgentRequestIdentity) (*RequestReceipt, error) {
+//
+// epoch 是原请求发出时节点所在的纪元(来自之前任一次历史调用的 Epoch),必填:节点换了纪元后,
+// 旧纪元里执行过的请求在新纪元会显示成 not_found,不核纪元就会把「已执行」读成「没执行」。
+func (c *Client) ReceiptOf(ctx context.Context, id AgentRequestIdentity, epoch string) (*RequestReceipt, error) {
+	if epoch == "" {
+		return nil, errors.New("dexos: 按原请求查回执必须给出原请求所在的纪元")
+	}
 	requestID, err := id.RequestID()
 	if err != nil {
 		return nil, err
@@ -131,6 +141,9 @@ func (c *Client) ReceiptOf(ctx context.Context, id AgentRequestIdentity) (*Reque
 	if err != nil {
 		return nil, err
 	}
+	if r.Epoch != epoch {
+		return nil, fmt.Errorf("%w: 回执纪元 %s 不是原请求所在的 %s", ErrHistoryEpochMismatch, r.Epoch, epoch)
+	}
 	if r.Signer != nil && !strings.EqualFold(*r.Signer, id.Agent.Hex()) {
 		return nil, fmt.Errorf("dexos: 回执签名者 %s 不是原请求的代理 %s", *r.Signer, id.Agent.Hex())
 	}
@@ -138,6 +151,24 @@ func (c *Client) ReceiptOf(ctx context.Context, id AgentRequestIdentity) (*Reque
 		return nil, fmt.Errorf("dexos: 回执 nonce %d 不是原请求的 %d", *r.Nonce, id.Nonce)
 	}
 	return r, nil
+}
+
+// CheckReplace 用与写回执同一套逐项判据核对一次 /replace 的权威回执(见 checkBatchOutcome):
+// nil = 全部生效;*BatchOutcomeError = 终局部分成功;其余错误(含 ErrIncompleteBatch)= 证据不可信。
+// 只有 executed 且 nonce 已消耗才是批次结局,其余结论一律报错。
+func (r *RequestReceipt) CheckReplace(req ReplaceRequest) error {
+	if r.Status != ReceiptExecuted || r.NonceConsumed == nil || !*r.NonceConsumed {
+		return fmt.Errorf("dexos: 回执结论 %q 不是已执行的批次结局", r.Status)
+	}
+	cancels := make([]OrderID, len(req.Cancels))
+	for i, seq := range req.Cancels {
+		cancels[i] = NewOrderID(req.Market, seq)
+	}
+	events := make([]EventEnvelope, len(r.Events))
+	for i, e := range r.Events {
+		events[i] = EventEnvelope{Kind: e.Kind, Data: e.Data}
+	}
+	return checkBatchOutcome(WriteReceipt{Items: r.Items, Events: events}, req.Identity.Account, req.Orders, cancels)
 }
 
 // RequestID 服务端对这次请求的身份:keccak256(代理地址 ‖ SigningHash)。

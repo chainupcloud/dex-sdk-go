@@ -47,6 +47,28 @@ func TestCompleteItemsWholeSuccess(t *testing.T) {
 	}
 }
 
+// 逐项结果缺坐标/归属/结局字段时,零值不能冒充「第 0 项 / 市场 0」:单项、市场 0 的批次最容易被冒充。
+func TestItemMissingRequiredFieldIsNotZeroValue(t *testing.T) {
+	full := `{"inputIndex":0,"kind":"place","accountId":42,"market":0,"recordSub":0,"orderId":"4","state":"accepted","filledLots":0,"resting":true}`
+	event := `{"kind":"OrderAccepted","data":{"account":42,"market":0,"orderSeq":4,"price":100,"lots":2,"filledLots":0,"resting":true}}`
+	orders := []BatchOrder{{Market: 0, Side: Buy, Price: 100, Lots: 2, TIF: PostOnly}}
+	for _, field := range []string{`"inputIndex":0,`, `"market":0,`} {
+		t.Run(field, func(t *testing.T) {
+			body := `{"status":"ok","seq":120,"sub":0,"folded":true,"items":[` + strings.Replace(full, field, ``, 1) + `],"events":[` + event + `]}`
+			f := newReceiptFixture(t, http.StatusOK, body)
+			_, err := f.session.ReplaceWithReceipt(context.Background(), 0, nil, orders)
+			var bo *BatchOutcomeError
+			if err == nil || errors.As(err, &bo) || !errors.Is(err, ErrSessionBlocked) || f.session.nonce != 0 {
+				t.Fatalf("缺 %s 的逐项结果被零值补成可信结局: err=%v nonce=%d", field, err, f.session.nonce)
+			}
+		})
+	}
+	f := newReceiptFixture(t, http.StatusOK, `{"status":"ok","seq":120,"sub":0,"folded":true,"items":[`+full+`],"events":[`+event+`]}`)
+	if _, err := f.session.ReplaceWithReceipt(context.Background(), 0, nil, orders); err != nil {
+		t.Fatalf("对照组(字段齐全)应当通过: %v", err)
+	}
+}
+
 // 部分成功在逐项证据齐全时是终局结论:不锁会话、nonce 前进,被拒项按原输入坐标带出。
 func TestPartialBatchWithCompleteItemsIsFinalAndAdvancesNonce(t *testing.T) {
 	f := newReceiptFixture(t, http.StatusOK, batchBody(itemCancelOK+","+itemPlaceRejected, eventCanceled3, 0, 1, 1, "partial"))
@@ -93,6 +115,8 @@ func TestUntrustworthyItemsBlockSession(t *testing.T) {
 		{"rejected_without_reason", batchBody(itemCancelOK+","+strings.Replace(itemPlaceRejected, `,"reason":"PostOnlyWouldCross"`, ``, 1), eventCanceled3, 0, 1, 1, "partial")},
 		{"aggregate_contradicts_items", batchBody(itemCancelOK+","+itemPlaceRejected, eventCanceled3, 1, 1, 0, "ok")},
 		{"unexplained_accept_event", batchBody(itemCancelOK+","+itemPlaceRejected, eventCanceled3+","+eventAccepted4, 0, 1, 1, "partial")},
+		{"filled_lots_contradict_event", batchBody(itemCancelOK+","+strings.Replace(itemPlaceOK, `"filledLots":0`, `"filledLots":1`, 1), eventCanceled3+","+eventAccepted4, 1, 1, 0, "ok")},
+		{"resting_contradicts_event", batchBody(itemCancelOK+","+strings.Replace(itemPlaceOK, `"resting":true`, `"resting":false`, 1), eventCanceled3+","+eventAccepted4, 1, 1, 0, "ok")},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newReceiptFixture(t, http.StatusOK, tc.body)

@@ -103,11 +103,14 @@ base `444ca6a`。`GOWORK=off go test -race -count=1 -timeout=90s ./...` 与 `go 
 
 对照 dex-os `5ee4759`(`crates/gateway/src/api.rs` 的 fills / account_ledger / events_backfill / equity_snapshot / request_receipt)。
 
-- `Fills` / `Ledger` / `Events` 自动翻页到上界：第一页给出 `epoch` + `upper`,续页原样带回(服务端缺一即 400)。结果带回 `Epoch` / `Upper`:「没有更多」只表示到 `Upper` 为止。从已存游标续拉必须同时给出游标所属纪元(`After` + `Epoch`),SDK 先以该纪元探一页取当前上界；缺纪元在本地拒绝、不发请求。页间纪元或上界漂移即报错，不把两段历史拼成一份。
+- `Fills` / `Ledger` / `Events` 自动翻页到上界：第一页给出 `epoch` + `upper`,续页原样带回(服务端缺一即 400)。结果带回 `Epoch` / `Upper`:「没有更多」只表示到 `Upper` 为止;设了 `Limit` 且被截断时 `Truncated=true`,只覆盖到最后一条，没有补齐到 `Upper`。从已存游标续拉必须同时给出游标所属纪元(`After` + `Epoch`),SDK 先以该纪元探一页取当前上界；缺纪元在本地拒绝、不发请求。页间纪元或上界漂移即报错，不把两段历史拼成一份。
 - 纪元不符(409)→ `ErrHistoryEpochMismatch`:账本换纪元，旧游标作废。与缺口相交(503)→ `*HistoryUnavailableError`(带缺口区间，仍可 `errors.As` 取 `*APIError`)—— 证明不了有没有，不是空结果。
 - `Fill.TS` 为 `*int64`:null = 服务端不知道成交时刻(之前没有过区块),不是 1970 年。
 - `Equity(account, epoch)` 同水位快照，金额保持最小单位字符串；404 → `ErrNotRegistered`,500(`ledger_mismatch` / `valuation_mismatch`)与 503 一律是错误，不给快照。
-- `AgentRequestIdentity.RequestID()` = keccak256(代理地址 ‖ SigningHash),与 dex-os `SignedRequest::request_id` 同一定义(`testdata/request_id_golden.json` 是真节点上服务端推导的金样)。`ReceiptOf(identity)` 按 agent scope + 原 nonce 查询，并核对回执声称的签名者与 nonce。六种结论(executed / rejected / pending / not_found / conflict / history_unavailable)按状态返回；**只有无缺口的副本才会给 not_found**,history_unavailable 不能当成「没执行」。
+- `AgentRequestIdentity.RequestID()` = keccak256(代理地址 ‖ SigningHash),与 dex-os `SignedRequest::request_id` 同一定义(`testdata/request_id_golden.json` 的 requestId 取自真节点回执里服务端回显的值)。`ReceiptOf(identity, epoch)` 按 agent scope + 原 nonce 查询，核对回执声称的签名者、nonce 与纪元(纪元必填：换纪元后旧请求会显示成 not_found)。六种结论(executed / rejected / pending / not_found / conflict / history_unavailable)按状态返回；**只有无缺口的副本才会给 not_found**,history_unavailable 不能当成「没执行」。
+- **not_found 不是终局**:代理签名(AgentExec)没有过期窗口，nonce 被消耗前同一份签名随时可能被定序;`rejected` 且 `nonceConsumed=false` 同理。只有同一 nonce 被别的请求用掉(conflict)才证明原请求不会再执行。
+- `RequestReceipt.CheckReplace(req)` 用与写回执同一套逐项判据核对一次 `/replace` 的权威回执：nil = 全部生效;`*BatchOutcomeError` = 终局部分成功；其余 = 证据不可信。
+- 请求日志(`ReplaceWithJournal` 的 `BeforeSend`/`AfterReceive`)失败时一律锁会话、nonce 不动，优先于终局拒绝与部分成功：结论只在内存里，没有落到持久层。
 
 真节点验证:`examples/contracts` 对本机全新纪元 dex-node 走一遍(两个新账户挂单吃单、逐项全成功与部分成功、原请求回执、not_found、成交翻页与续拉、纪元不符、Σ流水 == 权益快照余额、事件补拉),全部 PASS。同一节点上旧版 `Fills`(每页 1 笔)第二页即 `HTTP 400: resume requires epoch and upper from the first page`。
 
@@ -123,6 +126,8 @@ base `444ca6a`。`GOWORK=off go test -race -count=1 -timeout=90s ./...` 与 `go 
 | ReceiptOf 不核签名者 | TestReceiptOfChecksIdentity | 签名者不符的回执不能当成自己的 |
 | 缺口当成 not_found | TestReceiptStatusesAreAnswersNotErrors/history_unavailable | 状态不对(not_found) |
 | 请求身份只哈希摘要 | TestRequestIDMatchesServerDerivation | 本地请求身份与服务端不一致 |
+| 部分成功/终局拒绝时记账失败仍不锁 | TestReplaceJournalFailureBlocksEvenOnFinalOutcome | 结果记账失败却没锁会话或推进了 nonce |
+| ReceiptOf 不核纪元 | TestReceiptOfChecksIdentity | 别的纪元的回执不能当成原请求的 |
 
 ## 服务端前置
 

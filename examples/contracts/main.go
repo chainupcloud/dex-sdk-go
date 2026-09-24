@@ -4,6 +4,7 @@
 //
 // 需要一个**没有历史缺口**的节点(全新纪元)、一个已建好的永续市场 0,以及 token 模式的测试入金
 // (/internal/deposit)。两个全新账户:A 挂单、B 吃单。每步 PASS / FAIL,任何 FAIL 退出码 1。
+// 收尾撤掉 A 剩下的挂单(失败退出时也撤),同一节点可以重复跑:残留挂单会抢走 B 的吃单。
 // -dump 把各读接口的原始响应写进目录,供单测做金样。只打印地址,不打印任何私钥。
 package main
 
@@ -26,7 +27,18 @@ import (
 	"github.com/chainupcloud/dex-sdk-go/dexos"
 )
 
-type report struct{ fails int }
+type report struct {
+	fails int
+	// atExit 在任何退出路径上撤残留挂单(os.Exit 不跑 defer)
+	atExit func()
+}
+
+func (r *report) exit(code int) {
+	if r.atExit != nil {
+		r.atExit()
+	}
+	os.Exit(code)
+}
 
 func (r *report) check(step string, cond bool, detail string) {
 	if cond {
@@ -40,7 +52,7 @@ func (r *report) check(step string, cond bool, detail string) {
 func (r *report) must(step string, err error) {
 	if err != nil {
 		r.check(step, false, err.Error())
-		os.Exit(1)
+		r.exit(1)
 	}
 }
 
@@ -94,6 +106,11 @@ func main() {
 	}
 	a, b := onboard("A"), onboard("B")
 	const m = uint16(0)
+	r.atExit = func() { cleanup(a, m) }
+	// 按原请求查回执要带原请求所在的纪元,纪元只能来自一次历史读
+	probe, err := a.s.Fills(ctx, dexos.FillQuery{PageSize: 1})
+	r.must("epoch", err)
+	epoch := probe.Epoch
 
 	// ── #4 全成功:两张 PostOnly 同一次 Replace,逐项结果 + 按原请求身份查回执 ──
 	first, err := a.s.ReplaceWithReceipt(ctx, m, nil, []dexos.BatchOrder{
@@ -105,7 +122,7 @@ func main() {
 	r.check("replace-ok", len(items) == 2 && items[0].State == "accepted" && items[1].State == "accepted", fmt.Sprintf("items=%d", len(items)))
 	askSeq := *items[1].OrderID
 	rid, _ := first.Request.RequestID()
-	rc, err := a.s.Client.ReceiptOf(ctx, *first.Request)
+	rc, err := a.s.Client.ReceiptOf(ctx, *first.Request, epoch)
 	r.must("receipt-executed", err)
 	r.check("receipt-executed", rc.Status == dexos.ReceiptExecuted && *rc.NonceConsumed && len(rc.Items) == 2 && *rc.Items[1].OrderID == askSeq,
 		fmt.Sprintf("requestId=%s seq=%d items=%d", rid, *rc.Seq, len(rc.Items)))
@@ -120,8 +137,12 @@ func main() {
 	var bo *dexos.BatchOutcomeError
 	r.check("replace-partial", errors.As(err, &bo) && !errors.Is(err, dexos.ErrSessionBlocked) && len(bo.Rejected) == 1 && bo.Rejected[0].Kind == "place" && bo.Rejected[0].InputIndex == 1,
 		fmt.Sprintf("err=%v", err))
-	rc2, err := a.s.Client.ReceiptOf(ctx, *partial.Request)
-	r.check("receipt-partial", err == nil && rc2.Status == dexos.ReceiptExecuted && len(rc2.Items) == 3, fmt.Sprintf("err=%v", err))
+	rc2, err := a.s.Client.ReceiptOf(ctx, *partial.Request, epoch)
+	var rbo *dexos.BatchOutcomeError
+	r.check("receipt-partial", err == nil && rc2.Status == dexos.ReceiptExecuted && len(rc2.Items) == 3 && errors.As(rc2.CheckReplace(dexos.ReplaceRequest{Identity: *partial.Request, Market: m, Cancels: []uint64{seq}, Orders: []dexos.BatchOrder{
+		{Market: m, Side: dexos.Sell, Price: 100050, Lots: 5, TIF: dexos.PostOnly},
+		{Market: m, Side: dexos.Buy, Price: 100200, Lots: 1, TIF: dexos.PostOnly},
+	}}), &rbo), fmt.Sprintf("err=%v", err))
 
 	// ── #3 从未发出的请求:无缺口的账本上是 not_found(带证明到的水位)──
 	ghost := *first.Request
@@ -129,7 +150,7 @@ func main() {
 	var h [32]byte
 	_, _ = rand.Read(h[:])
 	ghost.SigningHash = "0x" + hex.EncodeToString(h[:])
-	nf, err := a.s.Client.ReceiptOf(ctx, ghost)
+	nf, err := a.s.Client.ReceiptOf(ctx, ghost, epoch)
 	r.check("receipt-not-found", err == nil && nf.Status == dexos.ReceiptNotFound && nf.AsOfSeq != nil, fmt.Sprintf("err=%v", err))
 
 	// ── 成交:B 吃 A 三次买 + 一次卖 ──
@@ -150,7 +171,10 @@ func main() {
 	for _, f := range fills.Fills {
 		okFields = okFields && f.Role == "maker" && f.Order != 0 && f.Fee != nil && f.TS != nil
 	}
-	r.check("fills-paged", okFields && fills.Epoch != "" && fills.Upper != "", fmt.Sprintf("fills=%d epoch=%s upper=%s", len(fills.Fills), fills.Epoch, fills.Upper))
+	r.check("fills-paged", okFields && fills.Epoch == epoch && fills.Upper != "", fmt.Sprintf("fills=%d epoch=%s upper=%s", len(fills.Fills), fills.Epoch, fills.Upper))
+	if len(fills.Fills) < 4 {
+		r.exit(1)
+	}
 	tail, err := a.s.Fills(ctx, dexos.FillQuery{After: fills.Fills[1].ID, Epoch: fills.Epoch, PageSize: 1})
 	r.check("fills-resume", err == nil && len(tail.Fills) == len(fills.Fills)-2 && tail.Fills[0].ID == fills.Fills[2].ID, fmt.Sprintf("err=%v", err))
 	_, err = a.s.Fills(ctx, dexos.FillQuery{After: fills.Fills[1].ID, Epoch: "k0-0"})
@@ -207,11 +231,30 @@ func main() {
 		get("fills_page", "/fills?account="+acct+"&limit=2")
 		get("ledger_page", "/ledger?account="+acct+"&limit=3")
 		get("equity", "/equity?account="+acct)
-		golden, _ := json.MarshalIndent(map[string]string{"agent": first.Request.Agent.Hex(), "signingHash": first.Request.SigningHash, "requestId": rid}, "", "  ")
+		// 金样的 requestId 取服务端回执里回显的那个,不是本地算的
+		golden, _ := json.MarshalIndent(map[string]string{"agent": first.Request.Agent.Hex(), "signingHash": first.Request.SigningHash, "requestId": rc.RequestID}, "", "  ")
 		_ = os.WriteFile(filepath.Join(*dump, "request_id_golden.json"), golden, 0o644)
 		fmt.Printf("dumped to %s\n", *dump)
 	}
 	if r.fails > 0 {
-		os.Exit(1)
+		r.exit(1)
+	}
+	r.exit(0)
+}
+
+// cleanup 撤掉 A 在市场 m 上剩下的挂单。os.Exit 不跑 defer,所以失败出口前也显式调一次。
+func cleanup(a trader, m uint16) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	open, err := a.s.Orders(ctx, m)
+	if err != nil || len(open) == 0 {
+		return
+	}
+	seqs := make([]uint64, len(open))
+	for i, o := range open {
+		seqs[i] = o.Seq
+	}
+	if _, err := a.s.Cancel(ctx, m, seqs...); err != nil {
+		fmt.Printf("WARN  cleanup                    撤残留挂单失败: %v\n", err)
 	}
 }
