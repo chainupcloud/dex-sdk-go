@@ -109,7 +109,8 @@ base `444ca6a`。`GOWORK=off go test -race -count=1 -timeout=90s ./...` 与 `go 
 - `Equity(account, epoch)` 同水位快照，金额保持最小单位字符串；404 → `ErrNotRegistered`,500(`ledger_mismatch` / `valuation_mismatch`)与 503 一律是错误，不给快照。
 - `AgentRequestIdentity.RequestID()` = keccak256(代理地址 ‖ SigningHash),与 dex-os `SignedRequest::request_id` 同一定义(`testdata/request_id_golden.json` 的 requestId 取自真节点回执里服务端回显的值)。`ReceiptOf(identity, epoch)` 按 agent scope + 原 nonce 查询，核对回执声称的签名者、nonce 与纪元(纪元必填：换纪元后旧请求会显示成 not_found)。六种结论(executed / rejected / pending / not_found / conflict / history_unavailable)按状态返回；**只有无缺口的副本才会给 not_found**,history_unavailable 不能当成「没执行」。
 - **not_found 不是终局**:代理签名(AgentExec)没有过期窗口，nonce 被消耗前同一份签名随时可能被定序;`rejected` 且 `nonceConsumed=false` 同理。只有同一 nonce 被别的请求用掉(conflict)才证明原请求不会再执行。
-- `RequestReceipt.CheckReplace(req)` 用与写回执同一套逐项判据核对一次 `/replace` 的权威回执：nil = 全部生效;`*BatchOutcomeError` = 终局部分成功；其余 = 证据不可信。
+- `RequestReceipt.CheckReplace(req)` 用与写回执同一套逐项判据核对一次 `/replace` 的权威回执，并要求回执回显的 requestId(及 nonce)就是这个请求：nil = 全部生效;`*BatchOutcomeError` = 终局部分成功；其余 = 不是逐项结局或证据不可信。整批被业务拒绝(`rejected` 且 `nonceConsumed=true`)是终局但不是逐项结局，同样报错，调用方按拒绝处理。
+- `ReceiptOf` 的纪元必须在**发送前**取得：发送后才取，碰上换纪元仍会把「已执行」读成 not_found。
 - 请求日志(`ReplaceWithJournal` 的 `BeforeSend`/`AfterReceive`)失败时一律锁会话、nonce 不动，优先于终局拒绝与部分成功：结论只在内存里，没有落到持久层。
 
 真节点验证:`examples/contracts` 对本机全新纪元 dex-node 走一遍(两个新账户挂单吃单、逐项全成功与部分成功、原请求回执、not_found、成交翻页与续拉、纪元不符、Σ流水 == 权益快照余额、事件补拉),全部 PASS。同一节点上旧版 `Fills`(每页 1 笔)第二页即 `HTTP 400: resume requires epoch and upper from the first page`。
@@ -129,6 +130,7 @@ base `444ca6a`。`GOWORK=off go test -race -count=1 -timeout=90s ./...` 与 `go 
 | 部分成功/终局拒绝时记账失败仍不锁 | TestReplaceJournalFailureBlocksEvenOnFinalOutcome | 结果记账失败却没锁会话或推进了 nonce |
 | ReceiptOf 不核纪元 | TestReceiptOfChecksIdentity | 别的纪元的回执不能当成原请求的 |
 | CheckReplace 不核结论 | TestReceiptCheckReplaceUsesBatchItemRules | executed/nonceConsumed=false 不是批次结局 |
+| CheckReplace 不核回执身份 | TestReceiptCheckReplaceUsesBatchItemRules | 别的请求的回执冒充了这个请求 |
 | Limit 截断不标记 | TestFillsLimitTruncationIsMarked | 截断的结果没有标 Truncated |
 | 逐项 filledLots/resting 不与事件交叉核对 | TestUntrustworthyItemsBlockSession/filled_lots_contradict_event | 证据不可信应当 ErrIncompleteBatch 且锁会话,实得 nil |
 | 逐项必填字段按零值补齐 | TestItemMissingRequiredFieldIsNotZeroValue | 缺 inputIndex 的逐项结果被零值补成可信结局 |

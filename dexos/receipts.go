@@ -126,8 +126,9 @@ func (c *Client) Receipt(ctx context.Context, requestID string, q ReceiptQuery) 
 
 // ReceiptOf 按本地原请求身份查回执(agent scope + 原 nonce),并核对回执声称的签名者与 nonce。
 //
-// epoch 是原请求发出时节点所在的纪元(来自之前任一次历史调用的 Epoch),必填:节点换了纪元后,
-// 旧纪元里执行过的请求在新纪元会显示成 not_found,不核纪元就会把「已执行」读成「没执行」。
+// epoch 是原请求**发送前**取得的节点纪元(来自发送前某次历史调用的 Epoch),必填:节点换了纪元后,
+// 旧纪元里执行过的请求在新纪元会显示成 not_found,不核纪元就会把「已执行」读成「没执行」;
+// 发送后才取纪元同样挡不住这一条。
 func (c *Client) ReceiptOf(ctx context.Context, id AgentRequestIdentity, epoch string) (*RequestReceipt, error) {
 	if epoch == "" {
 		return nil, errors.New("dexos: 按原请求查回执必须给出原请求所在的纪元")
@@ -155,8 +156,18 @@ func (c *Client) ReceiptOf(ctx context.Context, id AgentRequestIdentity, epoch s
 
 // CheckReplace 用与写回执同一套逐项判据核对一次 /replace 的权威回执(见 checkBatchOutcome):
 // nil = 全部生效;*BatchOutcomeError = 终局部分成功;其余错误(含 ErrIncompleteBatch)= 证据不可信。
-// 只有 executed 且 nonce 已消耗才是批次结局,其余结论一律报错。
+//
+// 回执必须回显这个请求的身份(requestId,给了 nonce 也要相符):两笔逐项结果一模一样的换单
+// 不能互相冒充。只有 executed 且 nonce 已消耗才是批次结局;整批被业务拒绝(rejected 且
+// nonceConsumed=true)虽是终局,也不是逐项结局,这里同样报错,由调用方按拒绝处理。
 func (r *RequestReceipt) CheckReplace(req ReplaceRequest) error {
+	want, err := req.Identity.RequestID()
+	if err != nil {
+		return err
+	}
+	if !strings.EqualFold(r.RequestID, want) || (r.Nonce != nil && *r.Nonce != req.Identity.Nonce) {
+		return fmt.Errorf("dexos: 回执身份 %q 不是这个请求的 %s", r.RequestID, want)
+	}
 	if r.Status != ReceiptExecuted || r.NonceConsumed == nil || !*r.NonceConsumed {
 		return fmt.Errorf("dexos: 回执结论 %q 不是已执行的批次结局", r.Status)
 	}

@@ -163,10 +163,11 @@ func TestReceiptOfChecksIdentity(t *testing.T) {
 // CheckReplace 对权威回执用与写回执同一套逐项判据:全成功 nil、部分成功 *BatchOutcomeError、
 // 证据矛盾 ErrIncompleteBatch;不是「已执行且 nonce 已消耗」的结论不是批次结局。
 func TestReceiptCheckReplaceUsesBatchItemRules(t *testing.T) {
-	req := ReplaceRequest{Identity: AgentRequestIdentity{Account: 42}, Market: 7, Cancels: []uint64{3}, Orders: receiptOrders()}
+	req := ReplaceRequest{Identity: AgentRequestIdentity{Account: 42, Nonce: 5, SigningHash: "0x" + strings.Repeat("cd", 32)}, Market: 7, Cancels: []uint64{3}, Orders: receiptOrders()}
+	mine, _ := req.Identity.RequestID()
 	receipt := func(status string, consumed bool, items, events string) *RequestReceipt {
 		var r RequestReceipt
-		body := `{"status":"` + status + `","epoch":"k1-1","seq":120,"sub":0,"nonceConsumed":` + strconv.FormatBool(consumed) + `,"items":[` + items + `],"events":[` + events + `]}`
+		body := `{"status":"` + status + `","epoch":"k1-1","seq":120,"sub":0,"nonceConsumed":` + strconv.FormatBool(consumed) + `,"requestId":"` + mine + `","nonce":5,"items":[` + items + `],"events":[` + events + `]}`
 		if err := json.Unmarshal([]byte(body), &r); err != nil {
 			t.Fatal(err)
 		}
@@ -182,6 +183,16 @@ func TestReceiptCheckReplaceUsesBatchItemRules(t *testing.T) {
 	}
 	if err := receipt("executed", true, itemCancelOK, withSeq(eventCanceled3)).CheckReplace(req); !errors.Is(err, ErrIncompleteBatch) {
 		t.Fatalf("缺下单项的回执不可信: %v", err)
+	}
+	// 逐项结果一模一样、但身份是另一个请求的回执不能冒充这个请求
+	other, nonce := receipt("executed", true, itemCancelOK+","+itemPlaceOK, withSeq(eventCanceled3)+","+withSeq(eventAccepted4)), uint64(6)
+	other.RequestID = "0x" + strings.Repeat("ef", 32)
+	if err := other.CheckReplace(req); err == nil {
+		t.Fatal("别的请求的回执冒充了这个请求")
+	}
+	other.RequestID, other.Nonce = mine, &nonce
+	if err := other.CheckReplace(req); err == nil {
+		t.Fatal("nonce 不符的回执冒充了这个请求")
 	}
 	for _, r := range []*RequestReceipt{receipt("executed", false, itemCancelOK+","+itemPlaceOK, withSeq(eventCanceled3)+","+withSeq(eventAccepted4)), receipt("rejected", true, "", "")} {
 		if err := r.CheckReplace(req); err == nil || errors.As(err, &bo) {
