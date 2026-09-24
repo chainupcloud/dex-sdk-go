@@ -128,6 +128,12 @@ base `444ca6a`。`GOWORK=off go test -race -count=1 -timeout=90s ./...` 与 `go 
 | 请求身份只哈希摘要 | TestRequestIDMatchesServerDerivation | 本地请求身份与服务端不一致 |
 | 部分成功/终局拒绝时记账失败仍不锁 | TestReplaceJournalFailureBlocksEvenOnFinalOutcome | 结果记账失败却没锁会话或推进了 nonce |
 | ReceiptOf 不核纪元 | TestReceiptOfChecksIdentity | 别的纪元的回执不能当成原请求的 |
+| CheckReplace 不核结论 | TestReceiptCheckReplaceUsesBatchItemRules | executed/nonceConsumed=false 不是批次结局 |
+| Limit 截断不标记 | TestFillsLimitTruncationIsMarked | 截断的结果没有标 Truncated |
+| 逐项 filledLots/resting 不与事件交叉核对 | TestUntrustworthyItemsBlockSession/filled_lots_contradict_event | 证据不可信应当 ErrIncompleteBatch 且锁会话,实得 nil |
+| 逐项必填字段按零值补齐 | TestItemMissingRequiredFieldIsNotZeroValue | 缺 inputIndex 的逐项结果被零值补成可信结局 |
+| 503 配 not_found 当成答案 | TestReceiptFailuresAreErrors/not_found_under_503 | 应当报错,实得 not_found |
+| not_found 缺 asOfSeq 放行 | TestReceiptFailuresAreErrors/not_found_without_as_of | 应当报错,实得 not_found |
 
 ## 服务端前置
 
