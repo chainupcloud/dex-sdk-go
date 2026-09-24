@@ -58,7 +58,8 @@
 // seq 是 Raft 日志序号而非逐事件计数器(同一条命令的多个事件共享它,
 // 无事件的日志条目会让它跳号),**不能用来做丢帧检测**;事件身份是三段的
 // Event.ID() = "<seq>-<sub>-<idx>"。丢帧由服务端显式下发,SDK 投递到 Stream.Lost 并
-// 终止流;用 Session.Fills(FillQuery{After: 最后一个 Event.ID()}) 从成交账本补齐再重连。
+// 终止流;用 Session.Fills(FillQuery{After: 最后一个 Event.ID(), Epoch: 纪元}) 从成交账本补齐再重连
+// (纪元来自订阅前某次历史调用的 Epoch)。
 //
 // # 规范编码
 //

@@ -134,29 +134,21 @@ func (g *fakeGateway) recorded() []recordedWrite {
 	return append([]recordedWrite(nil), g.writes...)
 }
 
-// serveFills 装一个按游标分页的 /fills,行为与网关一致:严格大于 after、按 id 升序、多取一条判 hasMore。
-func (g *fakeGateway) serveFills(all []map[string]any, pageSize int) {
+// serveFills 装一个与网关同规则的 /fills(见 history_test.go 的 historyFake):
+// 续页缺 epoch/upper 即 400,严格大于 after、多取一条判 hasMore。
+func (g *fakeGateway) serveFills(all []map[string]any, pageSize int) *historyFake {
+	f := &historyFake{epoch: "k1-1", complete: uint64(len(all) + 10), field: "fills", rows: all}
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.fillsHandler = func(w http.ResponseWriter, r *http.Request) {
-		after := r.URL.Query().Get("after")
-		start := 0
-		if after != "" {
-			for i, f := range all {
-				if f["id"] == after {
-					start = i + 1
-					break
-				}
-			}
+		q := r.URL.Query()
+		if q.Get("limit") == "" {
+			q.Set("limit", fmt.Sprint(pageSize))
+			r.URL.RawQuery = q.Encode()
 		}
-		end := min(start+pageSize, len(all))
-		page := all[start:end]
-		next := ""
-		if len(page) > 0 {
-			next = page[len(page)-1]["id"].(string)
-		}
-		writeJSON(w, map[string]any{"account": 7, "fills": page, "next": next, "hasMore": end < len(all)})
+		f.ServeHTTP(w, r)
 	}
+	return f
 }
 
 func newTestSession(t *testing.T, g *fakeGateway) *Session {
@@ -297,10 +289,11 @@ func TestFillsBackfillPagesToCompletion(t *testing.T) {
 	}
 	g.serveFills(all, 5)
 	s := newTestSession(t, g)
-	got, err := s.Fills(context.Background(), FillQuery{})
-	if err != nil || len(got) != 12 {
-		t.Fatalf("应当拉全 12 笔,实得 %d 笔 err=%v", len(got), err)
+	h, err := s.Fills(context.Background(), FillQuery{})
+	if err != nil || len(h.Fills) != 12 {
+		t.Fatalf("应当拉全 12 笔,实得 %+v err=%v", h, err)
 	}
+	got := h.Fills
 	if got[0].ID != "1-0-0" || got[11].ID != "12-0-0" || got[0].Order != 100 || got[0].Fee == nil || *got[0].Fee != "12" {
 		t.Errorf("顺序 / 订单关联 / 费要原样带出:%+v", got[0])
 	}
@@ -314,16 +307,16 @@ func TestFillsResumeFromCursor(t *testing.T) {
 	}
 	g.serveFills(all, 10)
 	s := newTestSession(t, g)
-	got, err := s.Fills(context.Background(), FillQuery{After: "3-0-0"})
-	if err != nil || len(got) != 3 || got[0].ID != "4-0-0" {
-		t.Fatalf("续拉必须严格大于断点:%v %+v", err, got)
+	h, err := s.Fills(context.Background(), FillQuery{After: "3-0-0", Epoch: "k1-1"})
+	if err != nil || len(h.Fills) != 3 || h.Fills[0].ID != "4-0-0" {
+		t.Fatalf("续拉必须严格大于断点:%v %+v", err, h)
 	}
 }
 
 func TestFillsStopsOnNonAdvancingCursor(t *testing.T) {
 	g := newFakeGateway(t, 0)
 	g.fillsHandler = func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, map[string]any{"account": 7, "fills": []any{map[string]any{"id": "1-0-0"}}, "next": "1-0-0", "hasMore": true})
+		writeJSON(w, map[string]any{"account": 7, "epoch": "k1-1", "upper": "9-65535-4294967295", "fills": []any{map[string]any{"id": "1-0-0"}}, "next": "1-0-0", "hasMore": true})
 	}
 	s := newTestSession(t, g)
 	if _, err := s.Fills(context.Background(), FillQuery{}); err == nil {

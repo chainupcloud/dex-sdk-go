@@ -100,8 +100,8 @@ SDK 把它变成 `*RejectedError{Reason, Seq, Sub}`。它是状态机的终局�
 ### 收到 `Lost`
 
 本地镜像与历史完整性已不可信。流会终止;快照(`/risk` `/book`)只能校准状态,补不回逐笔成交 ——
-成交要从账本 `/fills` 补:记住流上最后一个 `Event.ID()`,`s.Fills(ctx, dexos.FillQuery{After: 那个 id})`
-拉到 `hasMore=false`,按 id 去重(与流上重叠是正常的),然后重新 `Subscribe`。
+成交要从账本 `/fills` 补:记住流上最后一个 `Event.ID()`,`s.Fills(ctx, dexos.FillQuery{After: 那个 id, Epoch: 纪元})`
+拉到上界,按 id 去重(与流上重叠是正常的),然后重新 `Subscribe`。
 
 ```go
 case n, ok := <-st.Lost:

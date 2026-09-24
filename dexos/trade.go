@@ -58,7 +58,7 @@ func (c *Client) BatchPlace(
 		"signature": sig,
 	}, &out)
 	if err == nil {
-		err = checkBatchOutcome(out.Events, account, orders, nil)
+		err = checkBatchOutcome(out.WriteReceipt, account, orders, nil)
 	}
 	return out.Events, err
 }
@@ -94,7 +94,7 @@ func (c *Client) BatchCancel(
 		"signature": sig,
 	}, &out)
 	if err == nil {
-		err = checkBatchOutcome(out.Events, account, nil, ids)
+		err = checkBatchOutcome(out.WriteReceipt, account, nil, ids)
 	}
 	return out.Events, err
 }
@@ -161,7 +161,7 @@ func (c *Client) batchReplaceWithJournal(ctx context.Context, agent *Signer, acc
 		request := ReplaceRequest{Identity: *result.Request, Market: market,
 			Cancels: append([]uint64{}, seqs...), Orders: append([]BatchOrder{}, orders...)}
 		if err := journal.BeforeSend(ctx, request); err != nil {
-			return result, fmt.Errorf("dexos: 原请求记账失败，未发送: %w", err)
+			return result, journalError{fmt.Errorf("dexos: 原请求记账失败，未发送: %w", err)}
 		}
 		if c.Domain != domain || c.BaseURL != endpoint {
 			return result, errors.New("dexos: 请求准备后场所或签名域变化，未发送")
@@ -188,44 +188,18 @@ func (c *Client) batchReplaceWithJournal(ctx context.Context, agent *Signer, acc
 	}, &out)
 	result.Receipt = out.evidence()
 	if err == nil {
-		err = checkBatchOutcome(out.Events, account, orders, ids)
-	}
-	if err == nil {
-		err = checkReplaceMetadata(out.WriteReceipt, len(orders), len(ids))
+		err = checkBatchOutcome(out.WriteReceipt, account, orders, ids)
 	}
 	if journal != nil {
 		copied, copyErr := copySubmission(result)
 		if copyErr != nil {
-			return result, errors.Join(err, fmt.Errorf("dexos: 回执证据复制失败: %w", copyErr))
+			return result, errors.Join(err, journalError{fmt.Errorf("dexos: 回执证据复制失败: %w", copyErr)})
 		}
 		if journalErr := journal.AfterReceive(ctx, copied, err); journalErr != nil {
-			err = errors.Join(err, fmt.Errorf("dexos: 执行结果记账失败: %w", journalErr))
+			err = errors.Join(err, journalError{fmt.Errorf("dexos: 执行结果记账失败: %w", journalErr)})
 		}
 	}
 	return result, err
-}
-
-// 聚合字段只能进一步否定完整成功，不能取代每个输入的事件证据。
-func checkReplaceMetadata(receipt WriteReceipt, places, cancels int) error {
-	if receipt.BatchStatus != nil && *receipt.BatchStatus != "ok" {
-		return fmt.Errorf("%w: batchStatus=%s", ErrIncompleteBatch, *receipt.BatchStatus)
-	}
-	for _, field := range []struct {
-		name string
-		got  *uint64
-		want uint64
-	}{
-		{"submitted", receipt.Submitted, uint64(places)},
-		{"submittedCancels", receipt.SubmittedCancels, uint64(cancels)},
-		{"accepted", receipt.Accepted, uint64(places)},
-		{"canceled", receipt.Canceled, uint64(cancels)},
-		{"rejected", receipt.Rejected, 0},
-	} {
-		if field.got != nil && *field.got != field.want {
-			return fmt.Errorf("%w: %s 与输入或事件矛盾", ErrIncompleteBatch, field.name)
-		}
-	}
-	return nil
 }
 
 // ordersJSON 网关的 JSON 字段名与内核的规范编码是两套东西:

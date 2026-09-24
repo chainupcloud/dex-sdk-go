@@ -266,7 +266,11 @@ func main() {
 	time.Sleep(1500 * time.Millisecond)
 	// 账本按成交身份升序;**最后一笔**才是刚才那笔吃单。前面若还有别的:那是账本重置前
 	// 旧内核里同一个账户号的历史(Fee=nil、Order=0,升级前就丢了源数据),分析库跨重置保留。
-	fills, err := s.Fills(ctx, dexos.FillQuery{})
+	fillsH, err := s.Fills(ctx, dexos.FillQuery{})
+	var fills []dexos.Fill
+	if fillsH != nil {
+		fills = fillsH.Fills
+	}
 	var mine *dexos.Fill
 	if len(fills) > 0 {
 		mine = &fills[len(fills)-1]
@@ -287,8 +291,8 @@ func main() {
 		streamMu.Unlock()
 		r.check("ws-fill-identity", onStream, fmt.Sprintf("账本 id %s 在事件流上%s(流上共 %d 笔 Fill,流错误=%v)", mine.ID,
 			map[bool]string{true: "看到了", false: "没看到"}[onStream], nFills, serr))
-		tail, err := s.Fills(ctx, dexos.FillQuery{After: mine.ID})
-		r.check("fills-cursor", err == nil && len(tail) == 0, fmt.Sprintf("after=%s → %d 笔", mine.ID, len(tail)))
+		tail, err := s.Fills(ctx, dexos.FillQuery{After: mine.ID, Epoch: fillsH.Epoch})
+		r.check("fills-cursor", err == nil && len(tail.Fills) == 0, fmt.Sprintf("after=%s → %d 笔 err=%v", mine.ID, len(tail.Fills), err))
 	}
 
 	// ── 11. 现货:买 100 lot BTC-USDC(≈ $8)→ base 余额出现;合约专属命令在现货上被拒 ──

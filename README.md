@@ -86,9 +86,11 @@ s.Replace(ctx, 0, oldSeqs, newQuotes)      // 原子换单
 | `SetLeverage(market, customImfPpm)` | 杠杆——参数是 ppm,用 `ImfPpmForLeverage(5)` 从倍数换算 |
 | `ScheduleCancel` | 断线保护(dead man's switch) |
 | `Fills` / `Risk` / `Orders` / `Markets` / `Book` / `Subscribe` | 只读,不消耗 nonce |
+| `Client.Ledger` / `Client.Equity` / `Client.Events` / `Client.ReceiptOf` | 资金流水 / 同水位权益 / 事件补拉 / 按原请求身份查回执(只读) |
 
-写方法返回 `([]EventEnvelope, error)`;`err` 的三类见 [API.md 拒因](docs/API.md#拒因):
-`*RejectedError`(业务拒绝,终局,不锁会话)、`ErrExecutionPending`(已定序结论未知,锁会话、别重发)、
+写方法返回 `([]EventEnvelope, error)`;`err` 见 [API.md 拒因](docs/API.md#拒因):
+`*RejectedError`(业务拒绝,终局,不锁会话)、`*BatchOutcomeError`(批次部分成功,逐项结局齐全,终局,不锁会话)、
+`ErrExecutionPending` / `ErrIncompleteBatch`(结论未知或证据不可信,锁会话、别重发,用 `ReceiptOf` 核查)、
 `*APIError`(传输层)。
 
 API 钱包私钥从前端拿:`/app` →「API 钱包」→ 生成 → 主钱包签一次授权,

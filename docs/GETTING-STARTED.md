@@ -164,7 +164,7 @@ for {
         }
     case n, ok := <-st.Lost:
         if ok { log.Printf("丢帧 %d 条", n) }
-        return <-st.Err        // 终止;用 s.Fills(FillQuery{After: 最后一个 ev.ID()}) 补齐再重连
+        return <-st.Err        // 终止;用 s.Fills(FillQuery{After: 最后一个 ev.ID(), Epoch: 纪元}) 补齐再重连
     case err := <-st.Err:
         return err
     }
@@ -175,8 +175,8 @@ for {
 
 ```go
 var lastID string                 // 循环里每收到一条 ev 就更新:lastID = ev.ID()
-fills, err := s.Fills(ctx, dexos.FillQuery{After: lastID})   // 自动翻到 hasMore=false
-for _, f := range fills { apply(f) }                          // 与流上已处理的按 f.ID 去重
+h, err := s.Fills(ctx, dexos.FillQuery{After: lastID, Epoch: epoch}) // 自动翻到上界;epoch = 上次结果的 h.Epoch
+for _, f := range h.Fills { apply(f) }                                 // 与流上已处理的按 f.ID 去重
 st, err = s.Subscribe(ctx, markets...)                        // 再重连
 ```
 

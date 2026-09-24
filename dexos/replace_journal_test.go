@@ -119,6 +119,30 @@ func TestReplaceJournalFailureFreezesWithoutResending(t *testing.T) {
 	}
 }
 
+// 场所结论是终局(部分成功 / 业务拒绝)也一样:记账失败 = 结论只在内存里,必须锁会话、nonce 不动。
+func TestReplaceJournalFailureBlocksEvenOnFinalOutcome(t *testing.T) {
+	for _, tc := range []struct{ name, body string }{
+		{"partial", batchBody(itemCancelOK+","+itemPlaceRejected, eventCanceled3, 0, 1, 1, "partial")},
+		{"rejected", `{"status":"rejected","seq":120,"sub":0,"folded":true,"reason":"InsufficientMargin","events":[]}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newReceiptFixture(t, http.StatusOK, tc.body)
+			storeErr := errors.New("journal commit unavailable")
+			journal := journalFixture{
+				before: func(context.Context, ReplaceRequest) error { return nil },
+				after:  func(context.Context, BatchSubmission, error) error { return storeErr },
+			}
+			_, err := f.session.ReplaceWithJournal(context.Background(), 7, []uint64{3}, receiptOrders(), journal)
+			if !errors.Is(err, storeErr) || !errors.Is(err, ErrSessionBlocked) || f.session.nonce != 0 {
+				t.Fatalf("结果记账失败却没锁会话或推进了 nonce: err=%v nonce=%d", err, f.session.nonce)
+			}
+			if _, err := f.session.ReplaceWithJournal(context.Background(), 7, nil, receiptOrders(), journal); !errors.Is(err, ErrSessionBlocked) || f.calls != 1 {
+				t.Fatal("记账失败后下一笔写仍然发出")
+			}
+		})
+	}
+}
+
 func TestReplaceJournalKeepsErrorEvidence(t *testing.T) {
 	f := newReceiptFixture(t, http.StatusOK, `{"status":"ok","seq":120,"sub":0,"folded":false,"events":[]}`)
 	seen := false

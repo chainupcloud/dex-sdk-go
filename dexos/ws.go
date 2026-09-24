@@ -100,8 +100,9 @@ func WithAccounts(a ...uint32) SubscribeOption {
 // 断线、坏帧或 Lagged 均终止流并报 ErrStreamGap(seq 回退**不算**:它不单调,见循环内注释);
 // 不自动重连 —— 重连会掩盖
 // 成交缺口。缺口有正路可补:记住流上最后一个 [Event.ID],用 [Session.Fills]
-// (FillQuery{After: 那个 id})把断开期间的成交从服务端账本 `/fills` 拉齐、按 id 去重,
-// 再重新 Subscribe。持仓 / 盘口快照(`/risk` `/book`)只能校准状态,补不回逐笔成交。
+// (FillQuery{After: 那个 id, Epoch: 纪元})把断开期间的成交从服务端账本 `/fills` 拉齐、按 id 去重,
+// 再重新 Subscribe。纪元只能来自订阅前某次历史调用(Fills/Ledger/Events/Equity 的 Epoch),
+// 所以订阅前先做一次历史读并记下它。持仓 / 盘口快照(`/risk` `/book`)只能校准状态,补不回逐笔成交。
 func (c *Client) Subscribe(ctx context.Context, opts ...SubscribeOption) (*Stream, error) {
 	u, err := url.Parse(c.BaseURL)
 	if err != nil {

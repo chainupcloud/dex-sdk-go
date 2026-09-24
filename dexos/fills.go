@@ -2,8 +2,6 @@ package dexos
 
 import (
 	"context"
-	"fmt"
-	"net/http"
 	"net/url"
 	"strconv"
 )
@@ -28,8 +26,10 @@ import (
 //
 // # 断线之后
 //
-// 记住事件流上收到的最后一个 [Fill.ID],重连后拿它当 [FillQuery.After] 调 [Session.Fills],
-// 拉到服务端说没有更多为止。重叠部分按 ID 去重 —— 与补拉重叠是**正常**的,不是 bug。
+// 记住事件流上收到的最后一个 [Fill.ID] **和它所属的纪元**(上一次 [FillHistory.Epoch]),
+// 重连后拿它们当 [FillQuery.After] / [FillQuery.Epoch] 调 [Session.Fills],拉到上界为止。
+// 重叠部分按 ID 去重 —— 与补拉重叠是**正常**的,不是 bug。纪元变了(账本换纪元)是
+// [ErrHistoryEpochMismatch]:旧游标整体作废,不能当成「没有新成交」。
 //
 // 「停止」不等于「补回来」:发现 Lagged 之后停下来只是不再把错的数据往下传,
 // 断线期间那几笔成交仍然得有人去取。这就是这个接口存在的理由。
@@ -69,13 +69,17 @@ type Fill struct {
 	// (dex-os INV-FEE-ATTRIB),可以直接用它算逐笔与整单盈亏。
 	Fee *string `json:"fee"`
 
-	TS int64 `json:"ts"`
+	// TS 成交所在区块的时间(毫秒)。nil = 服务端不知道(之前没有过区块),不是 1970 年。
+	TS *int64 `json:"ts"`
 }
 
 // FillQuery 成交查询条件。
 type FillQuery struct {
 	// After 游标:只要**严格大于**这个身份的成交。空 = 从头。
 	After string
+	// Epoch 游标所属的纪元(上一次结果的 [FillHistory.Epoch])。After 非空时必填 ——
+	// 游标只在它自己的纪元里有意义。
+	Epoch string
 	// Market 只看某个市场。nil = 全部。
 	Market *uint16
 	// PageSize 每次请求取多少条(1..=1000,0 = 用服务端默认)。
@@ -88,62 +92,34 @@ type FillQuery struct {
 	Limit int
 }
 
-// fillsPage 一页的线格式。
-type fillsPage struct {
-	Fills   []Fill `json:"fills"`
-	Next    string `json:"next"`
-	HasMore bool   `json:"hasMore"`
+// FillHistory 一次补拉的结果。Upper 是本轮的上界:「没有更多」只表示到 Upper 为止。
+// Truncated = 被 Limit 截断,只覆盖到最后一条,**没有**补齐到 Upper。
+type FillHistory struct {
+	Epoch     string
+	Upper     string
+	Truncated bool
+	Fills     []Fill
 }
 
-// Fills 拉取账户成交,**自动翻页直到服务端说没有更多**。
+// Fills 拉取账户成交,**自动翻页直到上界**。
 //
 //	// 断线补拉:从上次见到的最后一笔往后
-//	fills, err := s.Fills(ctx, dexos.FillQuery{After: lastSeenID})
+//	h, err := s.Fills(ctx, dexos.FillQuery{After: lastSeenID, Epoch: lastEpoch})
 //
-// 翻页封在这里而不是交给调用方,是因为那个 while 循环有两个容易写错的地方,
-// 而两个都**不会报错**:把「本页返回不足」当成结束(服务端可能恰好取满),
-// 以及忘了判游标不前进(服务端异常时无限空转)。
-func (c *Client) Fills(ctx context.Context, account uint32, q FillQuery) ([]Fill, error) {
-	var out []Fill
-	cursor := q.After
-	for {
-		v := url.Values{}
-		v.Set("account", strconv.FormatUint(uint64(account), 10))
-		if cursor != "" {
-			v.Set("after", cursor)
-		}
-		if q.Market != nil {
-			v.Set("market", strconv.FormatUint(uint64(*q.Market), 10))
-		}
-		if q.PageSize > 0 {
-			v.Set("limit", strconv.Itoa(q.PageSize))
-		}
-
-		var page fillsPage
-		if err := c.do(ctx, http.MethodGet, "/fills?"+v.Encode(), nil, &page); err != nil {
-			return out, err
-		}
-		out = append(out, page.Fills...)
-
-		if q.Limit > 0 && len(out) >= q.Limit {
-			return out[:q.Limit], nil
-		}
-		if !page.HasMore {
-			return out, nil
-		}
-		// 游标必须前进。不前进而 hasMore 仍为 true = 服务端异常,
-		// 朴素的循环会在这里永远转下去 —— 而补拉是启动路径上的一步,
-		// 卡住的表现是"进程起不来,也不说为什么"。宁可报错。
-		if page.Next == "" || page.Next == cursor {
-			return out, fmt.Errorf(
-				"dexos: 成交补拉的游标不前进(停在 %q,服务端仍说有更多)—— 已取 %d 笔,不再继续",
-				cursor, len(out))
-		}
-		cursor = page.Next
+// 翻页封在这里而不是交给调用方,是因为那个循环有几处容易写错、而且都**不会报错**:
+// 续页没带回第一页的 epoch/upper(服务端 400)、把「本页返回不足」当成结束、
+// 以及忘了判游标不前进(服务端异常时无限空转)。失败时返回已取到的部分与错误。
+func (c *Client) Fills(ctx context.Context, account uint32, q FillQuery) (*FillHistory, error) {
+	params := url.Values{"account": {strconv.FormatUint(uint64(account), 10)}}
+	if q.Market != nil {
+		params.Set("market", strconv.FormatUint(uint64(*q.Market), 10))
 	}
+	cur := &historyCursor{after: q.After, epoch: q.Epoch, pageSize: q.PageSize, limit: q.Limit}
+	fills, err := pageThrough[Fill](ctx, c, "/fills", params, "fills", cur)
+	return &FillHistory{Epoch: cur.epochOut, Upper: cur.upper, Truncated: cur.truncated, Fills: fills}, err
 }
 
 // Fills 本会话账户的成交(见 [Client.Fills])。
-func (s *Session) Fills(ctx context.Context, q FillQuery) ([]Fill, error) {
+func (s *Session) Fills(ctx context.Context, q FillQuery) (*FillHistory, error) {
 	return s.Client.Fills(ctx, s.Account, q)
 }
