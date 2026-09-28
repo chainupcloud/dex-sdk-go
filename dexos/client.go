@@ -384,7 +384,7 @@ type AccountRef struct {
 // Account 是 GET /account/:id 的账户视图。金额为最小单位十进制串。
 // 三项费率与其余字段出自同一代状态，是本账户的**档位费率**：只在市场没启用市场级协议费率
 // （dex-os D27）时等于实收；启用时撮合按市场费率另加附加费计。FeeTier 为 nil 表示按基准费率；
-// 账户不存在时两项费率为 nil，不当 0。
+// 账户不存在时两项费率为 nil，不当 0。某市场的实收费率用 AccountInMarket 读。
 type Account struct {
 	AccountID    uint32    `json:"accountId"`
 	Exists       bool      `json:"exists"`
@@ -409,6 +409,66 @@ func (c *Client) Account(ctx context.Context, account uint32) (*Account, error) 
 		return nil, fmt.Errorf("dexos: 账户视图身份不符: 请求 %d 得到 %d", account, a.AccountID)
 	}
 	return &a, nil
+}
+
+// MarketFees 是本账户在某市场**实际被收**的费率（ppm，1e6 = 100%），与撮合计费同一套判定。
+// taker 合计按各腿费率相加；实收是各腿分别截断后相加，折算不整除时两者可差 1。
+type MarketFees struct {
+	Market uint16 `json:"market"`
+	// RateSource 为 "market" 表示协议费率取该市场的市场级费率（dex-os D27，不看档位）；"tier" 表示按账户档位。
+	RateSource       string `json:"rateSource"`
+	ProtocolTakerPpm uint32 `json:"protocolTakerPpm"`
+	// ProtocolMakerPpm 负数表示返佣。
+	ProtocolMakerPpm int32 `json:"protocolMakerPpm"`
+	// DexFeeScalePpm 是 D24 dex 附加费：按协议 taker 费另收的比例，只有永续收。
+	DexFeeScalePpm uint32 `json:"dexFeeScalePpm"`
+	DeployerPpm    uint32 `json:"deployerPpm"`
+	BuilderPpm     uint32 `json:"builderPpm"`
+	// TakerTotalPpm 是订单无 builder 归属时 taker 的合计；TakerTotalWithBuilderPpm 是有归属时的合计。
+	TakerTotalPpm            uint64 `json:"takerTotalPpm"`
+	TakerTotalWithBuilderPpm uint64 `json:"takerTotalWithBuilderPpm"`
+	// MakerTotalPpm 是 maker 的合计（maker 没有附加费）；负数表示返佣。
+	MakerTotalPpm int32 `json:"makerTotalPpm"`
+}
+
+var marketFeesFields = []string{"market", "rateSource", "protocolTakerPpm", "protocolMakerPpm", "dexFeeScalePpm",
+	"deployerPpm", "builderPpm", "takerTotalPpm", "takerTotalWithBuilderPpm", "makerTotalPpm"}
+
+// AccountInMarket 读账户视图，另带本账户在 market 的实收费率；两者出自同一代状态。
+// 账户不存在时费率为 nil；市场不存在是 404 错误。账户存在而费率缺失、缺字段或市场号不符一律报错，不补 0。
+func (c *Client) AccountInMarket(ctx context.Context, account uint32, market uint16) (*Account, *MarketFees, error) {
+	var wire struct {
+		Account
+		MarketFees json.RawMessage `json:"marketFees"`
+	}
+	p := fmt.Sprintf("/account/%d?market=%d", account, market)
+	if err := c.do(ctx, http.MethodGet, p, nil, &wire); err != nil {
+		return nil, nil, err
+	}
+	a := wire.Account
+	if a.AccountID != account {
+		return nil, nil, fmt.Errorf("dexos: 账户视图身份不符: 请求 %d 得到 %d", account, a.AccountID)
+	}
+	if !a.Exists {
+		return &a, nil, nil
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(wire.MarketFees, &raw); err != nil || raw == nil {
+		return nil, nil, fmt.Errorf("dexos: 账户 %d 缺市场 %d 的实收费率", account, market)
+	}
+	for _, k := range marketFeesFields {
+		if v, ok := raw[k]; !ok || string(v) == "null" {
+			return nil, nil, fmt.Errorf("dexos: 账户 %d 的市场实收费率缺 %s", account, k)
+		}
+	}
+	var f MarketFees
+	if err := json.Unmarshal(wire.MarketFees, &f); err != nil {
+		return nil, nil, fmt.Errorf("dexos: 市场实收费率解析失败: %w", err)
+	}
+	if f.Market != market || (f.RateSource != "market" && f.RateSource != "tier") {
+		return nil, nil, fmt.Errorf("dexos: 市场实收费率不符: 请求市场 %d 得到 %d，来源 %q", market, f.Market, f.RateSource)
+	}
+	return &a, &f, nil
 }
 
 // ErrNotRegistered 这个地址还没有内核账户。

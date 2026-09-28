@@ -104,6 +104,15 @@
 
 - `takerFeePpm` / `makerFeePpm` 是本账户的档位费率（ppm），与其余字段同一代状态；`makerFeePpm` 负数为返佣。只在该市场没启用市场级协议费率（dex-os D27）时等于实收，启用时以市场费率加附加费为准。
 - `feeTier` 为 null 表示按基准费率；账户不存在时两项费率为 null。SDK：`Client.Account`。
+- 带 `?market=N` 时另给 `marketFees`：本账户在该市场**实际被收**的费率，与余额同一代状态。
+
+```json
+"marketFees":{"market":0,"rateSource":"market","protocolTakerPpm":600,"protocolMakerPpm":-15,"dexFeeScalePpm":500000,
+ "deployerPpm":40,"builderPpm":25,"takerTotalPpm":940,"takerTotalWithBuilderPpm":965,"makerTotalPpm":-15}
+```
+
+- `rateSource` 为 `market` 表示按该市场的市场级费率，为 `tier` 表示按账户档位。`takerTotalPpm` = 协议 taker + ⌊协议 taker × `dexFeeScalePpm` / 1e6⌋ + `deployerPpm`；有 builder 归属时再加 `builderPpm`。实收是各腿分别截断后相加，所以可能差 1。maker 没有附加费，`makerTotalPpm` = `protocolMakerPpm`。
+- 账户不存在时 `marketFees` 为 null；市场不存在回 404 `unknown market`。SDK：`Client.AccountInMarket`。账户存在而费率缺失、缺字段或市场号不符时报错，不补 0。
 
 ### `GET /risk/:account`
 
