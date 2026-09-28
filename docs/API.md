@@ -343,7 +343,7 @@ Go SDK **自动维护这条链** —— `Client` 记住见过的最大位号,每
 | 400 | 请求体格式问题(地址不合法、签名不是 65 字节、tif 越界) |
 | 401 | 签名验证失败 —— **通常是规范编码或域分隔符不对**,不是密钥问题 |
 | 409 | nonce 不匹配(陈旧或跳号) |
-| 200 + `status:"rejected"` | **业务拒绝**,`reason` 是内核 `KernelError` 变体名;SDK 抛 `*RejectedError`(终局结论,不重试,不锁会话) |
+| 200 + `status:"rejected"` | **业务拒绝**,`reason` 是内核 `KernelError` 变体名;SDK 抛 `*RejectedError`(终局结论,不重试,不锁会话)。批量写整批被拒但带齐逐项结果时抛 `*BatchOutcomeError`(`Whole` 即这个 `*RejectedError`,`errors.As` 两种都能取到) |
 
 常见业务拒因:
 

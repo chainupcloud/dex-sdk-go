@@ -158,8 +158,9 @@ func (c *Client) ReceiptOf(ctx context.Context, id AgentRequestIdentity, epoch s
 // nil = 全部生效;*BatchOutcomeError = 终局部分成功;其余错误(含 ErrIncompleteBatch)= 证据不可信。
 //
 // 回执必须回显这个请求的身份(requestId,给了 nonce 也要相符):两笔逐项结果一模一样的换单
-// 不能互相冒充。只有 executed 且 nonce 已消耗才是批次结局;整批被业务拒绝(rejected 且
-// nonceConsumed=true)虽是终局,也不是逐项结局,这里同样报错,由调用方按拒绝处理。
+// 不能互相冒充。executed 且 nonce 已消耗是批次结局;整批被业务拒绝(rejected 且 nonceConsumed=true)
+// 带逐项结果时同样是逐项结局(*BatchOutcomeError,Whole 带整批拒因),不带逐项结果时报错,
+// 由调用方按拒绝处理。
 func (r *RequestReceipt) CheckReplace(req ReplaceRequest) error {
 	want, err := req.Identity.RequestID()
 	if err != nil {
@@ -168,7 +169,8 @@ func (r *RequestReceipt) CheckReplace(req ReplaceRequest) error {
 	if !strings.EqualFold(r.RequestID, want) || (r.Nonce != nil && *r.Nonce != req.Identity.Nonce) {
 		return fmt.Errorf("dexos: 回执身份 %q 不是这个请求的 %s", r.RequestID, want)
 	}
-	if r.Status != ReceiptExecuted || r.NonceConsumed == nil || !*r.NonceConsumed {
+	whole := r.Status == ReceiptRejected && len(r.Items) > 0
+	if (r.Status != ReceiptExecuted && !whole) || r.NonceConsumed == nil || !*r.NonceConsumed {
 		return fmt.Errorf("dexos: 回执结论 %q 不是已执行的批次结局", r.Status)
 	}
 	cancels := make([]OrderID, len(req.Cancels))
@@ -179,7 +181,21 @@ func (r *RequestReceipt) CheckReplace(req ReplaceRequest) error {
 	for i, e := range r.Events {
 		events[i] = EventEnvelope{Kind: e.Kind, Data: e.Data}
 	}
-	return checkBatchOutcome(WriteReceipt{Items: r.Items, Events: events}, req.Identity.Account, req.Orders, cancels)
+	receipt := WriteReceipt{Items: r.Items, Events: events}
+	if whole {
+		re := &RejectedError{Reason: "Rejected"}
+		if r.Reason != nil && *r.Reason != "" {
+			re.Reason = *r.Reason
+		}
+		if r.Seq != nil {
+			re.Seq = *r.Seq
+		}
+		if r.Sub != nil {
+			re.Sub = *r.Sub
+		}
+		return checkWholeRejected(receipt, re, req.Identity.Account, req.Orders, cancels)
+	}
+	return checkBatchOutcome(receipt, req.Identity.Account, req.Orders, cancels)
 }
 
 // RequestID 服务端对这次请求的身份:keccak256(代理地址 ‖ SigningHash)。
