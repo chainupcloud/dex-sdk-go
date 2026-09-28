@@ -66,3 +66,69 @@ func TestAccountReadsEffectiveFeeRates(t *testing.T) {
 		t.Fatal("响应的账户号与请求不一致必须报错")
 	}
 }
+
+// 响应形状取自 dex-os 0694ac7（PR #10，/account/:id?market=N 的 marketFees）。
+func TestAccountInMarketReadsBilledRates(t *testing.T) {
+	const view = `"collateral":"250000000","balances":[],"nc":"250000000","imr":"0","withdrawable":"250000000","feeTier":2,"takerFeePpm":350,"makerFeePpm":-20`
+	const fees = `"rateSource":"market","protocolTakerPpm":600,"protocolMakerPpm":-15,"dexFeeScalePpm":500000,"deployerPpm":40,"builderPpm":25,"takerTotalPpm":940,"takerTotalWithBuilderPpm":965,"makerTotalPpm":-15`
+	answers := map[string]struct {
+		code int
+		body string
+	}{
+		"/account/7?market=0": {200, `{"accountId":7,"exists":true,` + view + `,"marketFees":{"market":0,` + fees + `}}`},
+		"/account/9?market=0": {200, `{"accountId":9,"exists":false,"collateral":"0","balances":[],"nc":"0","imr":"0","withdrawable":"0","feeTier":null,"takerFeePpm":null,"makerFeePpm":null,"marketFees":null}`},
+		"/account/7?market=5": {404, `{"error":"unknown market"}`},
+		"/account/7?market=6": {503, `{"error":"read_model_not_ready"}`},
+		"/account/1?market=0": {200, `{"accountId":1,"exists":true,` + view + `,"marketFees":null}`},
+		"/account/2?market=0": {200, `{"accountId":2,"exists":true,` + view + `}`},
+		"/account/3?market=0": {200, `{"accountId":3,"exists":true,` + view + `,"marketFees":{"market":0,"rateSource":"market","protocolTakerPpm":600,"protocolMakerPpm":-15,"dexFeeScalePpm":0,"deployerPpm":0,"builderPpm":0,"takerTotalPpm":600,"takerTotalWithBuilderPpm":600}}`},
+		"/account/4?market=0": {200, `{"accountId":4,"exists":true,` + view + `,"marketFees":{"market":1,` + fees + `}}`},
+		"/account/5?market=0": {200, `{"accountId":5,"exists":true,` + view + `,"marketFees":{"market":0,"rateSource":"vip",` + fees[len(`"rateSource":"market",`):] + `}}`},
+		"/account/8?market=0": {200, `{"accountId":6,"exists":true,` + view + `,"marketFees":{"market":0,` + fees + `}}`},
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		a, ok := answers[r.URL.Path+"?"+r.URL.RawQuery]
+		if !ok {
+			t.Errorf("意外请求 %s", r.URL)
+			w.WriteHeader(http.StatusTeapot)
+			return
+		}
+		w.WriteHeader(a.code)
+		_, _ = w.Write([]byte(a.body))
+	}))
+	defer server.Close()
+	c := NewClient(server.URL, 1)
+	ctx := context.Background()
+
+	a, f, err := c.AccountInMarket(ctx, 7, 0)
+	want := MarketFees{Market: 0, RateSource: "market", ProtocolTakerPpm: 600, ProtocolMakerPpm: -15, DexFeeScalePpm: 500000,
+		DeployerPpm: 40, BuilderPpm: 25, TakerTotalPpm: 940, TakerTotalWithBuilderPpm: 965, MakerTotalPpm: -15}
+	if err != nil || f == nil || *f != want || !a.Exists || a.Collateral != "250000000" || a.MakerFeePpm == nil || *a.MakerFeePpm != -20 {
+		t.Fatalf("市场实收费率与同一代账户视图没有按原样带出: %+v %+v %v", a, f, err)
+	}
+	if missing, f, err := c.AccountInMarket(ctx, 9, 0); err != nil || missing.Exists || f != nil {
+		t.Fatalf("账户不存在时市场费率必须为空: %+v %+v %v", missing, f, err)
+	}
+	var api *APIError
+	if _, _, err := c.AccountInMarket(ctx, 7, 5); !errors.As(err, &api) || api.Status != http.StatusNotFound {
+		t.Fatalf("市场不存在必须是错误: %v", err)
+	}
+	if _, _, err := c.AccountInMarket(ctx, 7, 6); !errors.As(err, &api) || api.Status != http.StatusServiceUnavailable {
+		t.Fatalf("读模型未就绪必须是错误: %v", err)
+	}
+	for _, bad := range []struct {
+		account uint32
+		why     string
+	}{
+		{1, "账户存在而市场费率为 null"},
+		{2, "账户存在而没有 marketFees（旧实例）"},
+		{3, "缺 makerTotalPpm 不能当 0"},
+		{4, "费率的市场号与请求不符"},
+		{5, "费率来源不是 market/tier"},
+		{8, "账户号与请求不符"},
+	} {
+		if _, f, err := c.AccountInMarket(ctx, bad.account, 0); err == nil {
+			t.Fatalf("%s，必须报错，却得到 %+v", bad.why, f)
+		}
+	}
+}
