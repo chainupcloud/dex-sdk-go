@@ -55,12 +55,27 @@ func (b *BatchItem) UnmarshalJSON(raw []byte) error {
 //
 // 它是**终局**结论,和 *RejectedError 一样不锁会话:被拒的是哪几项、为什么,全在 Rejected 里;
 // 其余项已按回执生效(完整逐项结果见 WriteReceipt.Items)。不要重发被接受的那部分。
+//
+// Whole 非 nil = 整批被拒:每一项都被拒,网关回 status:"rejected"(整批拒因与位号在 Whole 里)。
+// 此时 errors.As 也能取到 *RejectedError,与没有逐项结果的业务拒绝同一种判法。
 type BatchOutcomeError struct {
 	Rejected []BatchItem
+	Whole    *RejectedError
 }
 
 func (e *BatchOutcomeError) Error() string {
-	return fmt.Sprintf("dexos: 批次部分成功,%d 项被拒(首项 %s#%d: %s)", len(e.Rejected), e.Rejected[0].Kind, e.Rejected[0].InputIndex, deref(e.Rejected[0].Reason))
+	head := "批次部分成功"
+	if e.Whole != nil {
+		head = "批次整批被拒"
+	}
+	return fmt.Sprintf("dexos: %s,%d 项被拒(首项 %s#%d: %s)", head, len(e.Rejected), e.Rejected[0].Kind, e.Rejected[0].InputIndex, deref(e.Rejected[0].Reason))
+}
+
+func (e *BatchOutcomeError) Unwrap() error {
+	if e.Whole == nil {
+		return nil
+	}
+	return e.Whole
 }
 
 func deref(s *string) string {
@@ -157,6 +172,30 @@ func checkBatchOutcome(receipt WriteReceipt, account uint32, orders []BatchOrder
 		return &BatchOutcomeError{Rejected: rejected}
 	}
 	return nil
+}
+
+// wholeRejected 业务拒绝的回执带逐项结果时(整批被拒:命令已执行、每一项都被拒),按逐项判据核对:
+// 每一项都被拒才是终局的逐项结局(*BatchOutcomeError,Whole=原拒绝);有项生效或与事件/聚合矛盾
+// = ErrIncompleteBatch。没有逐项结果的拒绝(认证层、整条命令)原样返回。
+func wholeRejected(err error, receipt *WriteReceipt, account uint32, orders []BatchOrder, cancels []OrderID) error {
+	var re *RejectedError
+	if !errors.As(err, &re) || receipt == nil || len(receipt.Items) == 0 {
+		return err
+	}
+	return checkWholeRejected(*receipt, re, account, orders, cancels)
+}
+
+func checkWholeRejected(receipt WriteReceipt, re *RejectedError, account uint32, orders []BatchOrder, cancels []OrderID) error {
+	err := checkBatchOutcome(receipt, account, orders, cancels)
+	var bo *BatchOutcomeError
+	if errors.As(err, &bo) && len(bo.Rejected) == len(orders)+len(cancels) {
+		bo.Whole = re
+		return bo
+	}
+	if err == nil || bo != nil {
+		return fmt.Errorf("%w: 回执说整批被拒(%s),逐项却有项生效", ErrIncompleteBatch, re.Reason)
+	}
+	return err
 }
 
 // checkItemEvents 事件是逐项结果的独立旁证:被接受 / 被撤的每一项都要有对应事件,事件也不能多出接受。

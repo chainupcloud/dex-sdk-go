@@ -59,6 +59,8 @@ func (c *Client) BatchPlace(
 	}, &out)
 	if err == nil {
 		err = checkBatchOutcome(out.WriteReceipt, account, orders, nil)
+	} else {
+		err = wholeRejected(err, out.evidence(), account, orders, nil)
 	}
 	return out.Events, err
 }
@@ -95,6 +97,8 @@ func (c *Client) BatchCancel(
 	}, &out)
 	if err == nil {
 		err = checkBatchOutcome(out.WriteReceipt, account, nil, ids)
+	} else {
+		err = wholeRejected(err, out.evidence(), account, nil, ids)
 	}
 	return out.Events, err
 }
@@ -193,6 +197,8 @@ func (c *Client) batchReplaceWithJournal(ctx context.Context, agent *Signer, acc
 	result.Receipt = out.evidence()
 	if err == nil {
 		err = checkBatchOutcome(out.WriteReceipt, account, orders, ids)
+	} else {
+		err = wholeRejected(err, result.Receipt, account, orders, ids)
 	}
 	if journal != nil {
 		copied, copyErr := copySubmission(result)
