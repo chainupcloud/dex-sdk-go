@@ -26,6 +26,10 @@ type Config struct {
 	CodecVer     uint32      `json:"codecVer"`
 	SnapshotVer  uint32      `json:"snapshotVer"`
 	FinalityMode string      `json:"finalityMode"`
+	// FundingTickSec 资金费结算周期(秒),全市场共用,取自撮合结算实际用的配置。
+	// nil = 节点没给(旧网关缺该字段,或读模型未就绪回 null),不是 0;
+	// 非负整数以外的值整次发现失败。
+	FundingTickSec *uint64 `json:"fundingTickSec"`
 }
 
 type DomainInfo struct {

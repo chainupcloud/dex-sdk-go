@@ -34,9 +34,13 @@
     "systemGateway": "0x5E34…5d68",
     "tokens": [{"token":0,"erc20":"0xc607…1c86","extraWeiDecimals":0,"finalized":true}]
   },
-  "codecVer": 1, "snapshotVer": 19, "finalityMode": "head"
+  "codecVer": 1, "snapshotVer": 19, "finalityMode": "head",
+  "fundingTickSec": 3600
 }
 ```
+
+`fundingTickSec` 是资金费结算周期(秒),全市场共用,取自撮合结算实际用的配置。读模型未就绪时为
+`null`;SDK 的 `Config.FundingTickSec` 缺失或 `null` 都是 nil(未公布),不当 0。
 
 `token` 映射取自**内核**(`LinkToken` 写进状态机,入金识别按它判定),不是另存的副本。
 
@@ -74,9 +78,14 @@
   "oracle":118000,"mark":118003,"bestBid":117977,"bestAsk":118023,
   "openInterestLots":200,"fundingRatePpm":0,"fundingIndex":"0",
   "initialMarginPpm":50000,"maintenanceFractionPpm":600000,
-  "quotePerTickLot":1000,"priceDecimals":0,"sizeDecimals":3
+  "quotePerTickLot":1000,"priceDecimals":0,"sizeDecimals":3,
+  "minNotional":"0"
 }]}
 ```
+
+- `minNotional` 是下单最小名义额,计价币原子单位的十进制整数串(与 `oiCapNotional` 同口径)。
+  `"0"` = 场所明确不设名义额下限(执行层下单下限只有 1 手);旧网关缺该字段时 SDK 的
+  `Market.MinNotional` 为 nil(未公布),不当 0。非负整数以外的值整个目录读取报错。
 
 - `kind` 是 `"perp"` 或 `"spot"`;现货对另带 `base` / `quote`(内核 token id)与 `basePerLot`。
   现货成交是两腿过账,没有仓位 / 资金费 / 清算;合约专属命令在现货市场上一律 `SpotUnsupported`。
