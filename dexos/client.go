@@ -246,6 +246,9 @@ type Book struct {
 	Asks   []Level `json:"asks"`
 	Market uint16  `json:"market"`
 	Oracle uint32  `json:"oracle"`
+	// Seq 是这份档位所在的状态点（与写回执、/fills 上界同一条序号轴）。
+	// 不带 seq 的旧实例为 nil，不当 0；读模型未就绪时节点回 503，是错误而不是空盘口。
+	Seq *uint64 `json:"seq"`
 }
 
 func (c *Client) Book(ctx context.Context, market uint16, depth int) (*Book, error) {
@@ -376,6 +379,35 @@ type AccountRef struct {
 	IMR          string `json:"imr"`
 	Withdrawable string `json:"withdrawable"`
 	NextNonce    uint64 `json:"nextNonce"`
+}
+
+// Account 是 GET /account/:id 的账户视图。金额为最小单位十进制串。
+// 三项费率与其余字段出自同一代状态，是撮合对本账户实际计费用的值：
+// FeeTier 为 nil 表示按基准费率；账户不存在时两项费率为 nil，不当 0。
+type Account struct {
+	AccountID    uint32    `json:"accountId"`
+	Exists       bool      `json:"exists"`
+	Collateral   string    `json:"collateral"`
+	Balances     []Balance `json:"balances"`
+	NC           string    `json:"nc"`
+	IMR          string    `json:"imr"`
+	Withdrawable string    `json:"withdrawable"`
+	FeeTier      *uint8    `json:"feeTier"`
+	TakerFeePpm  *uint32   `json:"takerFeePpm"`
+	// MakerFeePpm 负数表示返佣。
+	MakerFeePpm *int32 `json:"makerFeePpm"`
+}
+
+// Account 按内核账户号读账户视图；响应的账户号与请求不一致即报错。
+func (c *Client) Account(ctx context.Context, account uint32) (*Account, error) {
+	var a Account
+	if err := c.do(ctx, http.MethodGet, "/account/"+strconv.FormatUint(uint64(account), 10), nil, &a); err != nil {
+		return nil, err
+	}
+	if a.AccountID != account {
+		return nil, fmt.Errorf("dexos: 账户视图身份不符: 请求 %d 得到 %d", account, a.AccountID)
+	}
+	return &a, nil
 }
 
 // ErrNotRegistered 这个地址还没有内核账户。

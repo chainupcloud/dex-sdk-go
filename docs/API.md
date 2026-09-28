@@ -87,10 +87,23 @@
 ### `GET /book/:market?n=<档数>`
 
 ```json
-{"bids":[[117977,20],[117953,20]],"asks":[[118023,20]],"market":0,"oracle":118000}
+{"bids":[[117977,20],[117953,20]],"asks":[[118023,20]],"market":0,"oracle":118000,"seq":8812}
 ```
 
 每档是 `[价格, 数量]`。bids 按价降序、asks 按价升序。
+
+- `seq` 是这份档位所在的状态点，与写回执、`/fills` 上界同一条序号轴；SDK 的 `Book.Seq`，不带 seq 的旧实例为 nil。
+- 读模型还没有齐全的一代时回 503 `read_model_not_ready`，不给空盘口。
+
+### `GET /account/:account`
+
+```json
+{"accountId":7,"exists":true,"collateral":"250000000","balances":[],"nc":"250000000","imr":"0",
+ "withdrawable":"250000000","feeTier":2,"takerFeePpm":350,"makerFeePpm":-20}
+```
+
+- `takerFeePpm` / `makerFeePpm` 是撮合对本账户实际计费用的费率（ppm），与其余字段同一代状态；`makerFeePpm` 负数为返佣。
+- `feeTier` 为 null 表示按基准费率；账户不存在时两项费率为 null。SDK：`Client.Account`。
 
 ### `GET /risk/:account`
 
