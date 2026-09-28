@@ -382,8 +382,9 @@ type AccountRef struct {
 }
 
 // Account 是 GET /account/:id 的账户视图。金额为最小单位十进制串。
-// 三项费率与其余字段出自同一代状态，是撮合对本账户实际计费用的值：
-// FeeTier 为 nil 表示按基准费率；账户不存在时两项费率为 nil，不当 0。
+// 三项费率与其余字段出自同一代状态，是本账户的**档位费率**：只在市场没启用市场级协议费率
+// （dex-os D27）时等于实收；启用时撮合按市场费率另加附加费计。FeeTier 为 nil 表示按基准费率；
+// 账户不存在时两项费率为 nil，不当 0。
 type Account struct {
 	AccountID    uint32    `json:"accountId"`
 	Exists       bool      `json:"exists"`

@@ -102,7 +102,7 @@
  "withdrawable":"250000000","feeTier":2,"takerFeePpm":350,"makerFeePpm":-20}
 ```
 
-- `takerFeePpm` / `makerFeePpm` 是撮合对本账户实际计费用的费率（ppm），与其余字段同一代状态；`makerFeePpm` 负数为返佣。
+- `takerFeePpm` / `makerFeePpm` 是本账户的档位费率（ppm），与其余字段同一代状态；`makerFeePpm` 负数为返佣。只在该市场没启用市场级协议费率（dex-os D27）时等于实收，启用时以市场费率加附加费为准。
 - `feeTier` 为 null 表示按基准费率；账户不存在时两项费率为 null。SDK：`Client.Account`。
 
 ### `GET /risk/:account`
