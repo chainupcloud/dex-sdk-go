@@ -226,6 +226,7 @@ func (s *Session) Resync(ctx context.Context) error {
 //     调用方须持久化未决请求,按 API 代理地址持有独占租约。
 //   - 请求日志失败(ReplaceWithJournal 的 BeforeSend / AfterReceive):不论场所结论是什么,
 //     本地都没记下来 → **锁定**,优先于上面两类终局判断。
+//   - BeforeSend 在落账前明确拒绝(ErrRequestDeclined):未发送、本地无记录 → 不锁,nonce 不动。
 func (s *Session) write(
 	ctx context.Context,
 	f func(nonce uint64) ([]EventEnvelope, error),
@@ -250,6 +251,10 @@ func (s *Session) write(
 	if errors.As(err, &je) {
 		s.blocked = fmt.Errorf("%w (nonce=%d): %w", ErrSessionBlocked, s.nonce, err)
 		return ev, s.blocked
+	}
+	var declined requestDeclined
+	if errors.As(err, &declined) {
+		return ev, err // 落账前拒绝：未发送、本地无记录，nonce 不动、不锁
 	}
 	var re *RejectedError
 	if errors.As(err, &re) && re.Reason != ReasonNonceMismatch {

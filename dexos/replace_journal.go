@@ -20,7 +20,18 @@ type ReplaceRequest struct {
 // ReplaceJournal 在同一 Session nonce 锁内提供发送前/收到结果后的持久化边界。
 // BeforeSend 必须先提交原请求与逐项关联，AfterReceive 必须保留错误及已有证据。
 // 两者任何失败（包括提交结果未知）均锁定会话；不得在回调中重入本 Session。
+// 唯一例外：BeforeSend 在**本地尚未留下任何记录**时决定不发，返回包了 ErrRequestDeclined 的错误——
+// 这时 SDK 不发送、不锁会话、nonce 不动，也不给出请求身份。已经落了账再拒绝不能用这个标记。
 // SDK 不实现存储、跨进程锁、服务端回执查询或自动重发。
+// ErrRequestDeclined 由 ReplaceJournal.BeforeSend 包装返回，声明「落账前拒绝、本地无记录、未发送」。
+var ErrRequestDeclined = errors.New("dexos: 请求日志在落账前拒绝了本次请求")
+
+// requestDeclined 只由发送前回调的明确拒绝产生，与 journalError 分开：它不锁会话。
+type requestDeclined struct{ err error }
+
+func (e requestDeclined) Error() string { return e.err.Error() }
+func (e requestDeclined) Unwrap() error { return e.err }
+
 type ReplaceJournal interface {
 	BeforeSend(context.Context, ReplaceRequest) error
 	AfterReceive(context.Context, BatchSubmission, error) error

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -201,5 +202,32 @@ func TestReplaceJournalCannotRewriteReturnedEvidence(t *testing.T) {
 	result, err := f.session.ReplaceWithJournal(context.Background(), 7, []uint64{3}, receiptOrders(), journal)
 	if err != nil || result.Request.Nonce != 0 || *result.Receipt.Seq != 120 || result.Receipt.Events[0].Data[0] != '{' {
 		t.Fatalf("日志回调改写 SDK 回执证据: %v", err)
+	}
+}
+
+// 日志在落账前明确拒绝（ErrRequestDeclined）：不发送、不锁会话、nonce 不动、不给出请求身份，
+// 下一次请求照常准备与发送。没带这个标记的落账失败仍然锁定（见上一个用例）。
+func TestReplaceJournalDeclineBeforePersistKeepsSessionUsable(t *testing.T) {
+	f := newReceiptFixture(t, http.StatusOK, completeReceipt)
+	decline := true
+	prepares, results := 0, 0
+	journal := journalFixture{
+		before: func(context.Context, ReplaceRequest) error {
+			prepares++
+			if decline {
+				return fmt.Errorf("%w: 风险读数未追平", ErrRequestDeclined)
+			}
+			return nil
+		},
+		after: func(context.Context, BatchSubmission, error) error { results++; return nil },
+	}
+	result, err := f.session.ReplaceWithJournal(context.Background(), 7, []uint64{3}, receiptOrders(), journal)
+	if !errors.Is(err, ErrRequestDeclined) || errors.Is(err, ErrSessionBlocked) || result.Request != nil || f.calls != 0 || f.session.nonce != 0 || results != 0 {
+		t.Fatalf("落账前拒绝不应发送、锁会话或给出请求身份: calls=%d nonce=%d request=%v err=%v", f.calls, f.session.nonce, result.Request, err)
+	}
+	decline = false
+	result, err = f.session.ReplaceWithJournal(context.Background(), 7, []uint64{3}, receiptOrders(), journal)
+	if err != nil || result.Request == nil || result.Request.Nonce != 0 || f.calls != 1 || f.session.nonce != 1 || prepares != 2 || results != 1 {
+		t.Fatalf("拒绝之后的下一次请求应当用同一 nonce 正常发送: calls=%d nonce=%d err=%v", f.calls, f.session.nonce, err)
 	}
 }

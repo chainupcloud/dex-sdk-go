@@ -161,6 +161,10 @@ func (c *Client) batchReplaceWithJournal(ctx context.Context, agent *Signer, acc
 		request := ReplaceRequest{Identity: *result.Request, Market: market,
 			Cancels: append([]uint64{}, seqs...), Orders: append([]BatchOrder{}, orders...)}
 		if err := journal.BeforeSend(ctx, request); err != nil {
+			if errors.Is(err, ErrRequestDeclined) {
+				result.Request = nil
+				return result, requestDeclined{fmt.Errorf("dexos: 原请求在落账前被拒绝，未发送: %w", err)}
+			}
 			return result, journalError{fmt.Errorf("dexos: 原请求记账失败，未发送: %w", err)}
 		}
 		if c.Domain != domain || c.BaseURL != endpoint {
