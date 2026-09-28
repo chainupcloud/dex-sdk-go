@@ -205,6 +205,23 @@ type Market struct {
 	// 元数据可缺失；nil 明确表示无法进行人类单位转换，不能当作0位精度。
 	PriceDecimals *int `json:"priceDecimals"`
 	SizeDecimals  *int `json:"sizeDecimals"`
+	// MinNotional 下单最小名义额,计价币原子单位的十进制整数串(与 oiCapNotional 同口径)。
+	// "0" = 场所明确不设名义额下限;nil = 网关没给(旧版本缺该字段),不是 0。
+	// 非负十进制整数以外的值整个目录读取失败。
+	MinNotional *string `json:"minNotional"`
+}
+
+// isAtomicAmount 报告 s 是否为非负十进制整数串。内核金额是 u128,不走 ParseUint。
+func isAtomicAmount(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 func (c *Client) Markets(ctx context.Context) ([]Market, error) {
@@ -229,6 +246,9 @@ func (c *Client) Markets(ctx context.Context) ([]Market, error) {
 		}
 		if wire.QuotePerTickLot == nil {
 			return nil, fmt.Errorf("dexos: 市场 %d 缺 quotePerTickLot", *wire.ID)
+		}
+		if n := wire.Market.MinNotional; n != nil && !isAtomicAmount(*n) {
+			return nil, fmt.Errorf("dexos: 市场 %d minNotional 不是非负十进制整数: %q", *wire.ID, *n)
 		}
 		market := wire.Market
 		market.Market, market.QuotePerTickLot = *wire.ID, *wire.QuotePerTickLot
