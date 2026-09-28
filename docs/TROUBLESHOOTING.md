@@ -68,7 +68,8 @@ fmt.Printf("%x\n", dexos.Keccak256(cmd))      // 这就是 commandHash
 业务拒绝**不是 4xx**:网关回 200,体里 `status:"rejected"`、`reason` 是内核 `KernelError` 变体名。
 SDK 把它变成 `*RejectedError{Reason, Seq, Sub}`。它是状态机的终局结论 —— 换台机器、换个时刻
 答案一样,**不要重试**;`Session` 也不会因为它锁定(锁定只针对结论未知:`NonceMismatch`、
-`ErrExecutionPending`、传输失败、批次部分成功)。
+`ErrExecutionPending`、传输失败、批次逐项证据不可信)。批量写整批被拒但带齐逐项结果时
+(如撤一张已不在簿上的单,逐项 `UnknownOrder`),SDK 给的是 `*BatchOutcomeError`,`Whole` 就是这个拒绝。
 
 | 拒因 | 含义 | 处置 |
 |---|---|---|

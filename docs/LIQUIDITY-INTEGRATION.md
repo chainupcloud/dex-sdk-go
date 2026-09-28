@@ -24,6 +24,7 @@
 
 - 每个输入恰好一项、账户/市场/撤单目标与输入一致、被接受的下单有同号且价量一致的 `OrderAccepted`、被撤的单有 `OrderCanceled`、事件里没有多出的接受、聚合与逐项一致 —— 全部成立才采信；
 - 采信且全部成功 → nil；采信但有项被拒 → `*BatchOutcomeError`(终局：命令已执行、nonce 已消耗，`Rejected` 带出被拒项与拒因，其余项已生效，不要重发)；
+- 整批被拒(网关 `status:"rejected"`、`batchStatus:"none"`)但带齐逐项结果 → 同样按上面的判据核：每一项都被拒才是 `*BatchOutcomeError`,`Whole` 带整批拒因与位号(`errors.As` 仍能取到 `*RejectedError`);有项生效或与事件/聚合矛盾 → `ErrIncompleteBatch`。例：撤一张已经不在簿上的单(已成交或已被别处撤掉),逐项拒因 `UnknownOrder`;不带逐项结果的拒绝(认证层、整条命令)仍是 `*RejectedError`；
 - 缺 `items` 或任何一条不成立 → `ErrIncompleteBatch`(证据不可信)。不退回旧的按事件推断。
 
 `Session` 在会话内串行写入,**结论未知**的写错误(传输失败、`ErrExecutionPending`、`NonceMismatch`、`ErrIncompleteBatch`)锁定后续写入及 `Resync`(`ErrSessionBlocked`),保留原 nonce 与事件供核查;终局结论不锁：状态机的业务拒绝(`*RejectedError`)——内核在 nonce 写入之后才判业务且 apply 不回滚,本地计数器 ++;发生在 nonce 之前的拒绝(scope 越权、未授权)计数器不动;逐项结局齐全的部分成功(`*BatchOutcomeError`)计数器 ++。锁定并不声称明确拒绝也是未知执行，只表示调用方尚未核对上次结果。不得通过创建新 Session、重读 nonce 或换新 nonce 盲重发绕过；按原请求身份查 `Client.ReceiptOf`。
@@ -109,7 +110,7 @@ base `444ca6a`。`GOWORK=off go test -race -count=1 -timeout=90s ./...` 与 `go 
 - `Equity(account, epoch)` 同水位快照，金额保持最小单位字符串；404 → `ErrNotRegistered`,500(`ledger_mismatch` / `valuation_mismatch`)与 503 一律是错误，不给快照。
 - `AgentRequestIdentity.RequestID()` = keccak256(代理地址 ‖ SigningHash),与 dex-os `SignedRequest::request_id` 同一定义(`testdata/request_id_golden.json` 的 requestId 取自真节点回执里服务端回显的值)。`ReceiptOf(identity, epoch)` 按 agent scope + 原 nonce 查询，核对回执声称的签名者、nonce 与纪元(纪元必填：换纪元后旧请求会显示成 not_found)。六种结论(executed / rejected / pending / not_found / conflict / history_unavailable)按状态返回；**只有无缺口的副本才会给 not_found**,history_unavailable 不能当成「没执行」。
 - **not_found 不是终局**:代理签名(AgentExec)没有过期窗口，nonce 被消耗前同一份签名随时可能被定序;`rejected` 且 `nonceConsumed=false` 同理。只有同一 nonce 被别的请求用掉(conflict)才证明原请求不会再执行。
-- `RequestReceipt.CheckReplace(req)` 用与写回执同一套逐项判据核对一次 `/replace` 的权威回执，并要求回执回显的 requestId(及 nonce)就是这个请求：nil = 全部生效;`*BatchOutcomeError` = 终局部分成功；其余 = 不是逐项结局或证据不可信。整批被业务拒绝(`rejected` 且 `nonceConsumed=true`)是终局但不是逐项结局，同样报错，调用方按拒绝处理。
+- `RequestReceipt.CheckReplace(req)` 用与写回执同一套逐项判据核对一次 `/replace` 的权威回执，并要求回执回显的 requestId(及 nonce)就是这个请求：nil = 全部生效;`*BatchOutcomeError` = 终局部分成功，或整批被拒且带齐逐项结果(`rejected` 且 `nonceConsumed=true`,`Whole` 带整批拒因);其余 = 不是逐项结局或证据不可信。整批被拒但没有逐项结果时同样报错，调用方按拒绝处理。
 - `ReceiptOf` 的纪元必须在**发送前**取得：发送后才取，碰上换纪元仍会把「已执行」读成 not_found。
 - 请求日志(`ReplaceWithJournal` 的 `BeforeSend`/`AfterReceive`)失败时一律锁会话、nonce 不动，优先于终局拒绝与部分成功：结论只在内存里，没有落到持久层。
 
@@ -128,6 +129,15 @@ base `444ca6a`。`GOWORK=off go test -race -count=1 -timeout=90s ./...` 与 `go 
 | 缺口当成 not_found | TestReceiptStatusesAreAnswersNotErrors/history_unavailable | 状态不对(not_found) |
 | 请求身份只哈希摘要 | TestRequestIDMatchesServerDerivation | 本地请求身份与服务端不一致 |
 | 部分成功/终局拒绝时记账失败仍不锁 | TestReplaceJournalFailureBlocksEvenOnFinalOutcome | 结果记账失败却没锁会话或推进了 nonce |
+
+整批被拒的逐项结局(2026-09-28,注入后逐字节还原并整包复绿):
+
+| 缺陷形态 | 定向测试 | 实际红因 |
+|---|---|---|
+| 整批被拒却有项生效仍当拒绝 | TestWholeRejectedWithContradictingItemsBlocks/item_took_effect | 证据不可信应当 ErrIncompleteBatch 且锁会话,实得 *RejectedError |
+| 整批被拒的逐项结局取不到 *RejectedError | TestWholeRejectedReplaceWithItemsIsPerItemOutcome | 整批被拒仍要能按 *RejectedError 识别并带出拒因与位号 |
+| 批量撤单不核整批被拒的逐项结果(原始缺陷) | TestWholeRejectedCancelAndPlaceWithItemsArePerItemOutcomes | 整批被拒的撤单应当是逐项结局且不锁会话,实得 *RejectedError |
+| /receipts 的整批被拒不当逐项结局(原始缺陷) | TestReceiptCheckReplaceAcceptsWholeRejectedItems | 回执结论 "rejected" 不是已执行的批次结局 |
 | ReceiptOf 不核纪元 | TestReceiptOfChecksIdentity | 别的纪元的回执不能当成原请求的 |
 | CheckReplace 不核结论 | TestReceiptCheckReplaceUsesBatchItemRules | executed/nonceConsumed=false 不是批次结局 |
 | CheckReplace 不核回执身份 | TestReceiptCheckReplaceUsesBatchItemRules | 别的请求的回执冒充了这个请求 |
