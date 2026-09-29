@@ -111,9 +111,15 @@ func (d Domain) RevokeAgentHash(owner Address, master uint32, agent Address, non
 // commandHash = keccak256(**规范命令编码**),由 codec.go 的 Encode* 产出。
 // 这一步把签名与具体命令字节绑死:改一个价格、少一张单,哈希就变,签名作废。
 func (d Domain) AgentExecHash(commandBytes []byte, nonce uint64) []byte {
+	return d.AgentExecHashOf(Keccak256(commandBytes), nonce)
+}
+
+// AgentExecHashOf 同 AgentExecHash,但直接给命令哈希 keccak256(规范命令编码):
+// 按原请求查回执时,服务端正是凭 commandHash + nonce 重算请求身份(dex-os #17)。
+func (d Domain) AgentExecHashOf(commandHash []byte, nonce uint64) []byte {
 	sh := Keccak256(
 		Keccak256([]byte(agentExecType)),
-		Keccak256(commandBytes),
+		commandHash,
 		wordU64(nonce),
 	)
 	return d.signingHash(sh)

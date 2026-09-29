@@ -1,6 +1,7 @@
 package dexos
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -324,5 +325,17 @@ func TestEquityParsesLiveSample(t *testing.T) {
 	got, err := c.Equity(context.Background(), sample.Account, "")
 	if err != nil || len(got.Groups) != 1 || got.Groups[0].NetInflow != "5000000000" {
 		t.Fatalf("实录权益快照解析不对: %+v %v", got, err)
+	}
+}
+
+// AgentExecHashOf 与 AgentExecHash 同一摘要,只是直接给命令哈希(服务端按回执查询重算身份用的就是这一步)。
+func TestAgentExecHashOfMatchesCommandBytes(t *testing.T) {
+	d := Domain{Name: "dex-os", Version: "1", ChainID: 84532}
+	command := []byte("canonical command bytes")
+	if !bytes.Equal(d.AgentExecHashOf(Keccak256(command), 7), d.AgentExecHash(command, 7)) {
+		t.Fatal("按命令哈希算出的待签摘要与按命令字节算的不同")
+	}
+	if bytes.Equal(d.AgentExecHashOf(Keccak256(command), 8), d.AgentExecHash(command, 7)) {
+		t.Fatal("nonce 没有进摘要")
 	}
 }
