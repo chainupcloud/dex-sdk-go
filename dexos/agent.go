@@ -47,14 +47,30 @@ func (c *Client) ApproveAgent(
 	if err != nil {
 		return nil, err
 	}
+	return c.SubmitApproveAgent(ctx, owner.Address(), master, agent, validUntilMs, nonce, sig)
+}
+
+// SubmitApproveAgent 提交一份**已由主账号签好**的授权,签名通常来自浏览器钱包
+// 对 ApproveAgentTypedData 的 eth_signTypedData_v4。
+//
+// 参数必须与签名时逐字一致(validUntilMs 同样 0 = 永不过期),任何一个不同都只会得到 401。
+func (c *Client) SubmitApproveAgent(
+	ctx context.Context,
+	owner Address,
+	master uint32,
+	agent Address,
+	validUntilMs uint64,
+	nonce uint64,
+	signature string,
+) ([]EventEnvelope, error) {
 	var out writeResp
-	err = c.do(ctx, http.MethodPost, "/agent/approve?wait=fold", map[string]any{
-		"owner":        owner.Address().Hex(),
+	err := c.do(ctx, http.MethodPost, "/agent/approve?wait=fold", map[string]any{
+		"owner":        owner.Hex(),
 		"master":       master,
 		"agent":        agent.Hex(),
 		"validUntilMs": validUntilMs,
 		"nonce":        nonce,
-		"signature":    sig,
+		"signature":    signature,
 	}, &out)
 	return out.Events, err
 }
@@ -75,13 +91,25 @@ func (c *Client) RevokeAgent(
 	if err != nil {
 		return nil, err
 	}
+	return c.SubmitRevokeAgent(ctx, owner.Address(), master, agent, nonce, sig)
+}
+
+// SubmitRevokeAgent 提交一份**已由主账号签好**的撤销,签名来自 RevokeAgentTypedData。
+func (c *Client) SubmitRevokeAgent(
+	ctx context.Context,
+	owner Address,
+	master uint32,
+	agent Address,
+	nonce uint64,
+	signature string,
+) ([]EventEnvelope, error) {
 	var out writeResp
-	err = c.do(ctx, http.MethodPost, "/agent/revoke?wait=fold", map[string]any{
-		"owner":     owner.Address().Hex(),
+	err := c.do(ctx, http.MethodPost, "/agent/revoke?wait=fold", map[string]any{
+		"owner":     owner.Hex(),
 		"master":    master,
 		"agent":     agent.Hex(),
 		"nonce":     nonce,
-		"signature": sig,
+		"signature": signature,
 	}, &out)
 	return out.Events, err
 }
