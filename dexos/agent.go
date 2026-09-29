@@ -53,7 +53,8 @@ func (c *Client) ApproveAgent(
 // SubmitApproveAgent 提交一份**已由主账号签好**的授权,签名通常来自浏览器钱包
 // 对 ApproveAgentTypedData 的 eth_signTypedData_v4。
 //
-// 参数必须与签名时逐字一致(validUntilMs 同样 0 = 永不过期),任何一个不同都只会得到 401。
+// 参数必须与签名时逐字一致(validUntilMs 同样 0 = 永不过期),任何一个不同都会被拒:
+// 状态机回 status=rejected、原因 BadSignature,以 RejectedError 返回,重试不会变。
 func (c *Client) SubmitApproveAgent(
 	ctx context.Context,
 	owner Address,
