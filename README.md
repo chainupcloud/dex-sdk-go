@@ -226,11 +226,15 @@ fmt.Println("内核账户", acc.AccountID)
 
 **4. 授权 API 钱包,然后交易**
 
-两条路都行:
+三条路都行:
 
 - **浏览器**(推荐给人用):`http://<部署机 IP>:17807/app` → 「API 钱包」→ 生成 →
   命名 → 选有效期 → 主钱包签一次。私钥只显示一次,页面同时给出可粘贴的接入代码。
 - **代码**(推荐给自动化):见下方「快速开始」,`ApproveAgent` 一次即可。
+- **主账号密钥不在服务端**(如后台生成 API 钱包、用户用浏览器钱包签):
+  `c.Domain.ApproveAgentTypedData(...)` 给出 `eth_signTypedData_v4` 可签的结构,
+  拿回签名后 `c.SubmitApproveAgent(...)` 提交,参数须与签名时逐字一致。撤销同理
+  (`RevokeAgentTypedData` / `SubmitRevokeAgent`)。
 
 ```go
 // 有了 API 钱包私钥,前面第 3 步的账户号其实也不用自己查了 ——
