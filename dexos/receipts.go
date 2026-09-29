@@ -31,7 +31,8 @@ const (
 	ReceiptRejected ReceiptStatus = "rejected"
 	// ReceiptPending 已定序、结论尚未持久 —— 稍后再问,不能重发。
 	ReceiptPending ReceiptStatus = "pending"
-	// ReceiptNotFound 截至 AsOfSeq 这个身份从未定序(本副本历史无缺口时才会给出)。
+	// ReceiptNotFound 截至 AsOfSeq 这个身份从未定序。依据是完整历史,或(Basis="agent_nonce")
+	// 查询带了 commandHash、截至 AsOfSeq 代理的下一个 nonce(NextNonce)还没走到查询的 nonce(dex-os #17)。
 	// **不是终局**:代理签名没有过期窗口,nonce 被消耗之前同一请求随时可能被定序;
 	// 只有同一 nonce 已被别的请求用掉(ReceiptConflict)才证明它不会再执行。
 	ReceiptNotFound ReceiptStatus = "not_found"
@@ -57,6 +58,8 @@ type RequestReceipt struct {
 	NonceScope         *string       `json:"nonceScope"`
 	Nonce              *uint64       `json:"nonce"`
 	AsOfSeq            *uint64       `json:"asOfSeq"`
+	Basis              *string       `json:"basis"`
+	NextNonce          *uint64       `json:"nextNonce"`
 	ConflictingRequest *string       `json:"conflictingRequest"`
 	Gaps               []Gap         `json:"gaps"`
 }

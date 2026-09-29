@@ -328,6 +328,18 @@ func TestEquityParsesLiveSample(t *testing.T) {
 	}
 }
 
+// 凭代理 nonce 证得的 not_found(dex-os #17 实跑形态)保留证明依据与计数。
+func TestReceiptNotFoundKeepsAgentNonceBasis(t *testing.T) {
+	c, _ := serveOnce(t, "/receipts/", 404, `{"requestId":"`+rid+`","status":"not_found","epoch":"k1-1","asOfSeq":32,"basis":"agent_nonce","nonceScope":"agent:0x19e7e376e7c213b7e7e7e46cc70a5dd086daff2a","nonce":1,"nextNonce":1}`)
+	got, err := c.Receipt(context.Background(), rid, ReceiptQuery{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != ReceiptNotFound || got.AsOfSeq == nil || *got.AsOfSeq != 32 || got.Basis == nil || *got.Basis != "agent_nonce" || got.NextNonce == nil || *got.NextNonce != 1 || got.Nonce == nil || *got.Nonce != 1 {
+		t.Fatalf("按 nonce 证得的 not_found 丢了依据或计数: %+v", got)
+	}
+}
+
 // AgentExecHashOf 与 AgentExecHash 同一摘要,只是直接给命令哈希(服务端按回执查询重算身份用的就是这一步)。
 func TestAgentExecHashOfMatchesCommandBytes(t *testing.T) {
 	d := Domain{Name: "dex-os", Version: "1", ChainID: 84532}
