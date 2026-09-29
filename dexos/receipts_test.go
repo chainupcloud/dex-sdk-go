@@ -1,6 +1,7 @@
 package dexos
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -124,10 +125,36 @@ func TestReceiptQueryCarriesScopeAndNonce(t *testing.T) {
 	}
 }
 
+// commandHash 让有历史缺口的副本凭代理 nonce 证明「从未执行」(dex-os #17);只配 agent scope + nonce。
+func TestReceiptQueryCarriesCommandHash(t *testing.T) {
+	c, seen := serveOnce(t, "/receipts/", 404, `{"requestId":"`+rid+`","status":"not_found","epoch":"k1-1","asOfSeq":3}`)
+	nonce := uint64(5)
+	agentScope := "agent:0x19e7e376e7c213b7e7e7e46cc70a5dd086daff2a"
+	hash := "0x" + strings.Repeat("cd", 32)
+	if _, err := c.Receipt(context.Background(), rid, ReceiptQuery{Scope: agentScope, Nonce: &nonce, CommandHash: hash}); err != nil {
+		t.Fatal(err)
+	}
+	if len(*seen) != 1 || !strings.Contains((*seen)[0], "commandHash="+hash) {
+		t.Fatalf("commandHash 没有带上: %v", *seen)
+	}
+	for name, q := range map[string]ReceiptQuery{
+		"without_scope": {CommandHash: hash},
+		"account_scope": {Scope: "account:7", Nonce: &nonce, CommandHash: hash},
+		"malformed":     {Scope: agentScope, Nonce: &nonce, CommandHash: "0xcd"},
+	} {
+		if _, err := c.Receipt(context.Background(), rid, q); err == nil {
+			t.Fatalf("%s: 应在本地拒绝", name)
+		}
+	}
+	if len(*seen) != 1 {
+		t.Fatalf("本地拒绝的查询不该发出: %v", *seen)
+	}
+}
+
 // ReceiptOf:按本地原请求身份查询,回执声称的签名者 / nonce 与原请求不符即报错。
 func TestReceiptOfChecksIdentity(t *testing.T) {
 	signer, _ := NewSigner(testAgentKey)
-	id := AgentRequestIdentity{Agent: signer.Address(), Account: 7, Nonce: 5, SigningHash: "0x" + strings.Repeat("ab", 32)}
+	id := AgentRequestIdentity{Agent: signer.Address(), Account: 7, Nonce: 5, CommandHash: "0x" + strings.Repeat("cd", 32), SigningHash: "0x" + strings.Repeat("ab", 32)}
 	want, err := id.RequestID()
 	if err != nil {
 		t.Fatal(err)
@@ -141,8 +168,13 @@ func TestReceiptOfChecksIdentity(t *testing.T) {
 	if err != nil || got.Status != ReceiptExecuted {
 		t.Fatalf("身份一致的回执应当通过: %+v %v", got, err)
 	}
-	if !strings.Contains((*seen)[0], "/receipts/"+want) || !strings.Contains((*seen)[0], "nonce=5") {
-		t.Fatalf("应按本地推导的请求身份 + agent scope + nonce 查询: %v", *seen)
+	if !strings.Contains((*seen)[0], "/receipts/"+want) || !strings.Contains((*seen)[0], "nonce=5") || !strings.Contains((*seen)[0], "commandHash="+id.CommandHash) {
+		t.Fatalf("应按本地推导的请求身份 + agent scope + nonce + commandHash 查询: %v", *seen)
+	}
+	noHash := id
+	noHash.CommandHash = ""
+	if _, err := c.ReceiptOf(context.Background(), noHash, "k1-1"); err == nil {
+		t.Fatal("原请求身份缺 CommandHash 应当在本地拒绝")
 	}
 	c2, _ := serveOnce(t, "/receipts/", 200, body("0x0000000000000000000000000000000000000001", "5"))
 	if _, err := c2.ReceiptOf(context.Background(), id, "k1-1"); err == nil {
@@ -293,5 +325,29 @@ func TestEquityParsesLiveSample(t *testing.T) {
 	got, err := c.Equity(context.Background(), sample.Account, "")
 	if err != nil || len(got.Groups) != 1 || got.Groups[0].NetInflow != "5000000000" {
 		t.Fatalf("实录权益快照解析不对: %+v %v", got, err)
+	}
+}
+
+// 凭代理 nonce 证得的 not_found(dex-os #17 实跑形态)保留证明依据与计数。
+func TestReceiptNotFoundKeepsAgentNonceBasis(t *testing.T) {
+	c, _ := serveOnce(t, "/receipts/", 404, `{"requestId":"`+rid+`","status":"not_found","epoch":"k1-1","asOfSeq":32,"basis":"agent_nonce","nonceScope":"agent:0x19e7e376e7c213b7e7e7e46cc70a5dd086daff2a","nonce":1,"nextNonce":1}`)
+	got, err := c.Receipt(context.Background(), rid, ReceiptQuery{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != ReceiptNotFound || got.AsOfSeq == nil || *got.AsOfSeq != 32 || got.Basis == nil || *got.Basis != "agent_nonce" || got.NextNonce == nil || *got.NextNonce != 1 || got.Nonce == nil || *got.Nonce != 1 {
+		t.Fatalf("按 nonce 证得的 not_found 丢了依据或计数: %+v", got)
+	}
+}
+
+// AgentExecHashOf 与 AgentExecHash 同一摘要,只是直接给命令哈希(服务端按回执查询重算身份用的就是这一步)。
+func TestAgentExecHashOfMatchesCommandBytes(t *testing.T) {
+	d := Domain{Name: "dex-os", Version: "1", ChainID: 84532}
+	command := []byte("canonical command bytes")
+	if !bytes.Equal(d.AgentExecHashOf(Keccak256(command), 7), d.AgentExecHash(command, 7)) {
+		t.Fatal("按命令哈希算出的待签摘要与按命令字节算的不同")
+	}
+	if bytes.Equal(d.AgentExecHashOf(Keccak256(command), 8), d.AgentExecHash(command, 7)) {
+		t.Fatal("nonce 没有进摘要")
 	}
 }

@@ -145,11 +145,13 @@ func main() {
 	}}), &rbo), fmt.Sprintf("err=%v", err))
 
 	// ── #3 从未发出的请求:无缺口的账本上是 not_found(带证明到的水位)──
+	// 身份由随机命令字节自洽推导(服务端会凭 commandHash + nonce 重算身份核对,dex-os #17)。
 	ghost := *first.Request
 	ghost.Nonce += 1000
-	var h [32]byte
-	_, _ = rand.Read(h[:])
-	ghost.SigningHash = "0x" + hex.EncodeToString(h[:])
+	var cmd [32]byte
+	_, _ = rand.Read(cmd[:])
+	ghost.CommandHash = "0x" + hex.EncodeToString(dexos.Keccak256(cmd[:]))
+	ghost.SigningHash = "0x" + hex.EncodeToString(ghost.Domain.AgentExecHash(cmd[:], ghost.Nonce))
 	nf, err := a.s.Client.ReceiptOf(ctx, ghost, epoch)
 	r.check("receipt-not-found", err == nil && nf.Status == dexos.ReceiptNotFound && nf.AsOfSeq != nil, fmt.Sprintf("err=%v", err))
 
