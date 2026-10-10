@@ -311,6 +311,12 @@ type Risk struct {
 	Withdrawable string     `json:"withdrawable"`
 	NextNonce    uint64     `json:"nextNonce"`
 	Positions    []Position `json:"positions"`
+	// Epoch 执行历史纪元(与 /fills、/ledger 返回的 epoch 同值);老网关不给时为空。
+	Epoch string `json:"epoch"`
+	// AsOfSeq 这份视图覆盖到的日志位置,与余额、仓位同一次取得;与 /book 的 seq、/equity 的上界
+	// 是同一条轴,`<AsOfSeq>-65535-4294967295` 可直接作 FillQuery / LedgerQuery 的 Upper。
+	// 老网关不给时为 nil(不补 0:0 是合法位置)。
+	AsOfSeq *uint64 `json:"asOfSeq"`
 }
 
 func (c *Client) Risk(ctx context.Context, account uint32) (*Risk, error) {

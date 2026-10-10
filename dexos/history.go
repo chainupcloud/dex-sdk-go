@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 )
 
 // 执行历史读接口(/fills /ledger /events)的共同契约(dex-os #1/#2/#5,
@@ -44,7 +45,13 @@ func (e *HistoryUnavailableError) Unwrap() error { return e.API }
 // ErrHistoryEpochMismatch 请求的纪元与节点当前纪元不符(409):账本已换纪元,旧游标作废。
 var ErrHistoryEpochMismatch = errors.New("dexos: 执行历史纪元与节点不符(账本已换纪元,旧游标作废)")
 
-// classifyAPIError 把网关错误体里有语义的两类挑出来,其余保持 *APIError。
+// ErrHistoryUpperIncomplete 调用方给的上界越过了本副本执行历史的完整前缀(400 `not yet complete`)。
+//
+// 上界取自实时视图(/risk 的 asOfSeq、/book 的 seq)时,视图可能比持久历史超前一点:
+// 这不是坏请求,稍后用同一个上界重读即可。
+var ErrHistoryUpperIncomplete = errors.New("dexos: 给定上界的执行历史还不完整(实时视图领先于持久历史,稍后重读)")
+
+// classifyAPIError 把网关错误体里有语义的几类挑出来,其余保持 *APIError。
 func classifyAPIError(ae *APIError) error {
 	var body struct {
 		Error  string `json:"error"`
@@ -59,6 +66,8 @@ func classifyAPIError(ae *APIError) error {
 		return &HistoryUnavailableError{Gaps: body.Gaps, API: ae}
 	case ae.Status == http.StatusConflict && body.Error == "history_epoch_mismatch":
 		return fmt.Errorf("%w: %w", ErrHistoryEpochMismatch, ae)
+	case ae.Status == http.StatusBadRequest && strings.Contains(body.Error, "not yet complete"):
+		return fmt.Errorf("%w: %w", ErrHistoryUpperIncomplete, ae)
 	}
 	return ae
 }
@@ -72,9 +81,10 @@ type historyPage struct {
 	CompleteSeq *uint64 `json:"completeSeq"`
 }
 
-// historyCursor 本轮翻页的起点与边界。
+// historyCursor 本轮翻页的起点与边界。upperIn 是调用方给的上界(空 = 由服务端定)。
 type historyCursor struct {
 	after, epoch    string
+	upperIn         string
 	pageSize, limit int
 	epochOut, upper string
 	completeSeq     uint64
@@ -83,8 +93,12 @@ type historyCursor struct {
 
 // pageThrough 按上述契约翻完一个历史接口,返回全部条目(失败时返回已取到的部分与错误)。
 //
-// 从已存游标续拉时,游标属于哪个纪元只有调用方知道,所以 after 必须与 epoch 一起给;
-// 当前上界先以该纪元探一页(limit=1、不带 after)取得 —— 纪元已变就在这一步 409。
+// 从已存游标续拉时,游标属于哪个纪元只有调用方知道,所以 after 必须与 epoch 一起给。
+// 上界有两种来源:
+//   - 调用方给了 upperIn:每一页(含首页)都带上它,不发探测;
+//   - 没给:当前上界先以该纪元探一页(limit=1、不带 after)取得 —— 纪元已变就在这一步 409。
+//     这一页不带游标,服务端从账户开户位置查缺口,开户被裁出保留窗口后它永远 503;
+//     能从实时视图拿到位置的调用方应当自己给上界(dex-os #28)。
 func pageThrough[T any](ctx context.Context, c *Client, path string, params url.Values, field string, cur *historyCursor) ([]T, error) {
 	if cur.after != "" && cur.epoch == "" {
 		return nil, errors.New("dexos: 从游标续拉必须同时给出游标所属的纪元")
@@ -127,7 +141,11 @@ func pageThrough[T any](ctx context.Context, c *Client, path string, params url.
 		return v
 	}
 	after := cur.after
-	if after != "" {
+	switch {
+	case cur.upperIn != "":
+		// 纪元可能为空(不带游标的首页):由首页响应给出
+		cur.epochOut, cur.upper = cur.epoch, cur.upperIn
+	case after != "":
 		probe := url.Values{"limit": {"1"}, "epoch": {cur.epoch}}
 		page, _, err := get(probe)
 		if err != nil {
@@ -141,14 +159,19 @@ func pageThrough[T any](ctx context.Context, c *Client, path string, params url.
 	var all []T
 	for {
 		q := size()
+		if cur.upper != "" {
+			q.Set("upper", cur.upper)
+		}
 		if after != "" {
 			q.Set("after", after)
 			q.Set("epoch", cur.epochOut)
-			q.Set("upper", cur.upper)
 		}
 		page, items, err := get(q)
 		if err != nil {
 			return all, err
+		}
+		if cur.epochOut == "" && cur.upper != "" {
+			cur.epochOut = page.Epoch
 		}
 		if cur.upper == "" {
 			cur.epochOut, cur.upper = page.Epoch, page.Upper
@@ -199,12 +222,16 @@ type LedgerEntry struct {
 	AckedAt      *string `json:"ackedAt,omitempty"`
 }
 
-// LedgerQuery 流水查询条件。After 非空时必须同时给 Epoch(见 FillQuery)。
+// LedgerQuery 流水查询条件。After 非空时必须同时给 Epoch;Upper 见 FillQuery。
 type LedgerQuery struct {
-	After    string
-	Epoch    string
-	Token    *uint32
-	Kind     string
+	After string
+	Epoch string
+	Upper string
+	Token *uint32
+	Kind  string
+	// External 只要跨出账户边界的资金往来(入金、出金、转账、金库申赎与调拨,
+	// 即 dex-os `LedgerKind::is_external`),哪些种类算外部由服务端判定。与 Kind 互斥。
+	External bool
 	PageSize int
 	Limit    int
 }
@@ -224,10 +251,16 @@ func (c *Client) Ledger(ctx context.Context, account uint32, q LedgerQuery) (*Le
 	if q.Token != nil {
 		params.Set("token", strconv.FormatUint(uint64(*q.Token), 10))
 	}
+	if q.External && q.Kind != "" {
+		return nil, errors.New("dexos: 流水查询 External 与 Kind 互斥,只能给一个")
+	}
 	if q.Kind != "" {
 		params.Set("kind", q.Kind)
 	}
-	cur := &historyCursor{after: q.After, epoch: q.Epoch, pageSize: q.PageSize, limit: q.Limit}
+	if q.External {
+		params.Set("external", "true")
+	}
+	cur := &historyCursor{after: q.After, epoch: q.Epoch, upperIn: q.Upper, pageSize: q.PageSize, limit: q.Limit}
 	entries, err := pageThrough[LedgerEntry](ctx, c, "/ledger", params, "entries", cur)
 	return &LedgerHistory{Epoch: cur.epochOut, Upper: cur.upper, Truncated: cur.truncated, Entries: entries}, err
 }

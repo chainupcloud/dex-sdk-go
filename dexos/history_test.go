@@ -96,6 +96,11 @@ func (f *historyFake) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		upper = v
 	}
+	// 与网关 history_error 同一条:上界越过本副本的完整前缀 → 400
+	if upper[0] > complete {
+		fail(http.StatusBadRequest, map[string]any{"error": "history: requested upper is not yet complete"})
+		return
+	}
 	for _, g := range gaps {
 		lo := uint64(0)
 		if hasAfter {
@@ -217,6 +222,95 @@ func TestFillsResumeProbesUpperThenContinues(t *testing.T) {
 	reqs := f.seen()
 	if len(reqs) != 2 || reqs[0].Has("after") || reqs[0].Get("epoch") != "k1-1" || reqs[1].Get("after") != "3-0-0" {
 		t.Fatalf("应当先探上界再续拉,实际请求 %v", reqs)
+	}
+}
+
+// 调用方自己给了上界(取自 /risk 的 asOfSeq 或 /book 的 seq):游标、纪元、上界一次带齐,
+// 不发不带游标的探测页 —— 那一页会从开户位置查缺口,开户被裁出保留窗口后永远 503(dex-os #28)。
+func TestFillsResumeWithExplicitUpperSkipsProbe(t *testing.T) {
+	f := &historyFake{epoch: "k1-1", complete: 50, field: "fills", rows: fillRows(6), gaps: []Gap{{First: 1, Last: 2}}}
+	c := newHistoryClient(t, "/fills", f)
+	got, err := c.Fills(context.Background(), 7, FillQuery{After: "3-0-0", Epoch: "k1-1", Upper: "5-65535-4294967295", PageSize: 1})
+	if err != nil {
+		t.Fatalf("带显式上界续拉失败(缺口在游标之前,不该相交): %v", err)
+	}
+	if len(got.Fills) != 2 || got.Fills[0].ID != "4-0-0" || got.Fills[1].ID != "5-0-0" {
+		t.Fatalf("应当只取游标之后、上界之内的 2 笔,实得 %+v", got.Fills)
+	}
+	if got.Epoch != "k1-1" || got.Upper != "5-65535-4294967295" {
+		t.Fatalf("结果要带回给定的纪元与上界,实得 %q %q", got.Epoch, got.Upper)
+	}
+	for i, q := range f.seen() {
+		if !q.Has("after") || q.Get("epoch") != "k1-1" || q.Get("upper") != "5-65535-4294967295" {
+			t.Fatalf("第 %d 个请求没有带齐 after/epoch/upper(不能有不带游标的探测): %v", i+1, q)
+		}
+	}
+}
+
+// 不带游标、只给上界:首页就带上它,结果固定在这个上界,纪元由服务端给出。
+func TestFillsFirstPageCarriesExplicitUpper(t *testing.T) {
+	f := &historyFake{epoch: "k1-1", complete: 50, field: "fills", rows: fillRows(6)}
+	c := newHistoryClient(t, "/fills", f)
+	got, err := c.Fills(context.Background(), 7, FillQuery{Upper: "4-65535-4294967295", PageSize: 3})
+	if err != nil {
+		t.Fatalf("带上界的首页失败: %v", err)
+	}
+	if len(got.Fills) != 4 || got.Epoch != "k1-1" || got.Upper != "4-65535-4294967295" {
+		t.Fatalf("应当翻到给定上界为止的 4 笔并带回纪元,实得 %+v", got)
+	}
+	reqs := f.seen()
+	if len(reqs) != 2 || reqs[0].Has("after") || reqs[0].Get("upper") != "4-65535-4294967295" {
+		t.Fatalf("首页应当不带游标、带上界,实际请求 %v", reqs)
+	}
+}
+
+// 实时视图比执行历史超前时,给定的上界可能还不完整(网关 400):必须可判别,调用方按暂不可用重试。
+func TestHistoryUpperNotYetCompleteIsTyped(t *testing.T) {
+	f := &historyFake{epoch: "k1-1", complete: 50, field: "fills", rows: fillRows(3)}
+	c := newHistoryClient(t, "/fills", f)
+	_, err := c.Fills(context.Background(), 7, FillQuery{After: "1-0-0", Epoch: "k1-1", Upper: "60-65535-4294967295"})
+	if !errors.Is(err, ErrHistoryUpperIncomplete) {
+		t.Fatalf("上界还不完整应当是 ErrHistoryUpperIncomplete,实得 %T %v", err, err)
+	}
+	var ae *APIError
+	if !errors.As(err, &ae) || ae.Status != http.StatusBadRequest {
+		t.Fatalf("仍应能取到 400 的 *APIError,实得 %v", err)
+	}
+	if n := len(f.seen()); n != 1 {
+		t.Fatalf("给了上界就不该有探测页,实发 %d 个请求", n)
+	}
+}
+
+// 只读外部资金流水(入金、出金、转账、金库):带 external=true,游标、纪元、上界一次带齐。
+func TestLedgerExternalWithExplicitUpper(t *testing.T) {
+	rows := []map[string]any{
+		{"id": "3-0-0", "seq": 3, "sub": 0, "idx": 0, "kind": "deposit", "token": 0, "amount": "5000000000", "market": nil, "counterparty": nil, "order": nil, "counterOrder": nil, "reference": nil, "ts": 1},
+		{"id": "12-0-0", "seq": 12, "sub": 0, "idx": 0, "kind": "send_asset", "token": 0, "amount": "-100", "market": nil, "counterparty": nil, "order": nil, "counterOrder": nil, "reference": "77", "ts": 3},
+	}
+	f := &historyFake{epoch: "k1-1", complete: 20, field: "entries", rows: rows}
+	c := newHistoryClient(t, "/ledger", f)
+	got, err := c.Ledger(context.Background(), 7, LedgerQuery{After: "2-65535-4294967295", Epoch: "k1-1", Upper: "15-65535-4294967295", External: true})
+	if err != nil {
+		t.Fatalf("外部资金流水增量读失败: %v", err)
+	}
+	if len(got.Entries) != 2 || got.Upper != "15-65535-4294967295" || got.Epoch != "k1-1" {
+		t.Fatalf("应当取回游标之后、上界之内的 2 条并带回纪元与上界,实得 %+v", got)
+	}
+	reqs := f.seen()
+	if len(reqs) != 1 || reqs[0].Get("external") != "true" || reqs[0].Get("after") == "" || reqs[0].Get("upper") != "15-65535-4294967295" || reqs[0].Has("kind") {
+		t.Fatalf("应当一次带齐 external/after/epoch/upper,实际请求 %v", reqs)
+	}
+}
+
+// external 与 kind 是两种互斥的筛选(网关同时给即 400):本地就拒绝,一个请求都不发。
+func TestLedgerExternalWithKindRejectedLocally(t *testing.T) {
+	f := &historyFake{epoch: "k1-1", complete: 20, field: "entries"}
+	c := newHistoryClient(t, "/ledger", f)
+	if _, err := c.Ledger(context.Background(), 7, LedgerQuery{External: true, Kind: "deposit"}); err == nil {
+		t.Fatal("external 与 kind 同时给应当报错")
+	}
+	if n := len(f.seen()); n != 0 {
+		t.Fatalf("本地就能判定的错误不该发请求,实发 %d", n)
 	}
 }
 
