@@ -317,6 +317,20 @@ type Risk struct {
 	// 是同一条轴,`<AsOfSeq>-65535-4294967295` 可直接作 FillQuery / LedgerQuery 的 Upper。
 	// 老网关不给时为 nil(不补 0:0 是合法位置)。
 	AsOfSeq *uint64 `json:"asOfSeq"`
+	// Groups 各抵押 token 的风险组(D24),与余额、仓位、AsOfSeq 同一次取视图(dex-os #29)。
+	// 老网关不给时为 nil,不补空组:空组读起来是「这个账户没有风险」。
+	Groups []RiskGroup `json:"groups"`
+}
+
+// RiskGroup 一个抵押 token 的风险组。金额是该 token 最小单位的十进制字符串;
+// withdrawable = nc − imr − openOrderMargin − hold。
+type RiskGroup struct {
+	Token           uint32 `json:"token"`
+	NC              string `json:"nc"`
+	IMR             string `json:"imr"`
+	MMR             string `json:"mmr"`
+	OpenOrderMargin string `json:"openOrderMargin"`
+	Withdrawable    string `json:"withdrawable"`
 }
 
 func (c *Client) Risk(ctx context.Context, account uint32) (*Risk, error) {

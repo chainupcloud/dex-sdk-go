@@ -139,6 +139,8 @@
 - `epoch` / `asOfSeq`(dex-os #28 起):这份视图所在的执行纪元与日志位置,与余额、仓位同一次取得;
   `asOfSeq` 与 `/book` 的 `seq` 是同一条轴,`<asOfSeq>-65535-4294967295` 可直接作 `/fills` `/ledger` 的 `upper`。
   SDK:`Risk.Epoch` / `Risk.AsOfSeq`(老网关不给时为空 / nil)。
+- `groups[]`:各抵押 token 的风险组(`token`、`nc`、`imr`、`mmr`、`openOrderMargin`、`withdrawable`),
+  dex-os #29 起与余额、仓位、`asOfSeq` 同一次取视图。SDK:`Risk.Groups`(老网关不给时为 nil,不补空组)。
 
 ### `GET /orders/:account?market=<m>`
 
