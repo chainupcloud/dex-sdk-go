@@ -136,6 +136,9 @@
 - `nc − hold(USDC) < mmr` 即可被清算。**这是权威判定**,前端展示的强平价只是估算。
 - `nextNonce` 是 **master 账户**的计数器(授权/撤销/提款用),不是 agent 的。
 - `collateral` 是现金:买入已付全额名义,所以持仓账户常为负;`nc = collateral + Σ仓位市值 + Σ未结算资金费`。
+- `epoch` / `asOfSeq`(dex-os #28 起):这份视图所在的执行纪元与日志位置,与余额、仓位同一次取得;
+  `asOfSeq` 与 `/book` 的 `seq` 是同一条轴,`<asOfSeq>-65535-4294967295` 可直接作 `/fills` `/ledger` 的 `upper`。
+  SDK:`Risk.Epoch` / `Risk.AsOfSeq`(老网关不给时为空 / nil)。
 
 ### `GET /orders/:account?market=<m>`
 
@@ -167,7 +170,9 @@
 |---|---|---|
 | `account` | 账户号(必填) | — |
 | `market` | 只看某个市场 | 全部 |
-| `after` | 游标:只返回**严格大于**这个 id 的成交 | 从头 |
+| `after` | 游标:只返回**严格大于**这个 id 的成交;给了就必须同时给 `epoch` 与 `upper` | 从头 |
+| `epoch` | 游标所属纪元,不符即 409 | — |
+| `upper` | 本轮上界 `<seq>-<sub>-<idx>`;越过本副本完整前缀即 400 `not yet complete` | 当前完整前缀 |
 | `limit` | 本页条数,1..=1000 | 200 |
 
 ```json
@@ -190,6 +195,10 @@
 
 Go SDK:`s.Fills(ctx, dexos.FillQuery{After: lastSeenID, Epoch: lastEpoch})` **自动翻页到上界**(续页带回第一页的 `epoch` + `upper`),游标不前进、页间上界漂移即报错;纪元不符 → `ErrHistoryEpochMismatch`,与缺口相交 → `*HistoryUnavailableError`;
 `FillQuery.Limit` 只在「看一眼」时用,补拉用它等于给自己留一个看起来成功的漏拉。
+从游标续拉而不给 `FillQuery.Upper` 时,SDK 先发一页**不带游标**的探测取上界;账户开户被裁出保留窗口后那一页永远 503。
+能拿到实时位置(`Risk.AsOfSeq` 或 `/book` 的 `seq`)就给 `Upper: "<seq>-65535-4294967295"`,不发探测;
+视图领先于持久历史时得到 `ErrHistoryUpperIncomplete`,稍后用同一上界重读。`/ledger` 同一套,另有 `external=true`
+只要入金、出金、转账、金库等外部资金往来(`LedgerQuery.External`,与 `kind` 互斥)。
 
 ### 其他
 

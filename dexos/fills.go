@@ -80,6 +80,13 @@ type FillQuery struct {
 	// Epoch 游标所属的纪元(上一次结果的 [FillHistory.Epoch])。After 非空时必填 ——
 	// 游标只在它自己的纪元里有意义。
 	Epoch string
+	// Upper 本轮上界(`<seq>-<sub>-<idx>`)。空 = 由服务端取当前完整前缀。
+	//
+	// 从游标续拉而不给 Upper 时,SDK 要先发一页**不带游标**的探测取上界;那一页从账户开户
+	// 位置查缺口,开户被裁出保留窗口后永远 503。能从实时视图拿到位置(/risk 的 AsOfSeq、
+	// /book 的 seq)的调用方应当给 `<seq>-65535-4294967295`:游标、纪元、上界一次带齐,
+	// 只查游标之后的缺口。视图领先于持久历史时得到 ErrHistoryUpperIncomplete,稍后重读即可。
+	Upper string
 	// Market 只看某个市场。nil = 全部。
 	Market *uint16
 	// PageSize 每次请求取多少条(1..=1000,0 = 用服务端默认)。
@@ -114,7 +121,7 @@ func (c *Client) Fills(ctx context.Context, account uint32, q FillQuery) (*FillH
 	if q.Market != nil {
 		params.Set("market", strconv.FormatUint(uint64(*q.Market), 10))
 	}
-	cur := &historyCursor{after: q.After, epoch: q.Epoch, pageSize: q.PageSize, limit: q.Limit}
+	cur := &historyCursor{after: q.After, epoch: q.Epoch, upperIn: q.Upper, pageSize: q.PageSize, limit: q.Limit}
 	fills, err := pageThrough[Fill](ctx, c, "/fills", params, "fills", cur)
 	return &FillHistory{Epoch: cur.epochOut, Upper: cur.upper, Truncated: cur.truncated, Fills: fills}, err
 }

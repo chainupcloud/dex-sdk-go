@@ -105,6 +105,9 @@ base `444ca6a`。`GOWORK=off go test -race -count=1 -timeout=90s ./...` 与 `go 
 对照 dex-os `5ee4759`(`crates/gateway/src/api.rs` 的 fills / account_ledger / events_backfill / equity_snapshot / request_receipt)。
 
 - `Fills` / `Ledger` / `Events` 自动翻页到上界：第一页给出 `epoch` + `upper`,续页原样带回(服务端缺一即 400)。结果带回 `Epoch` / `Upper`:「没有更多」只表示到 `Upper` 为止;设了 `Limit` 且被截断时 `Truncated=true`,只覆盖到最后一条，没有补齐到 `Upper`。从已存游标续拉必须同时给出游标所属纪元(`After` + `Epoch`),SDK 先以该纪元探一页取当前上界；缺纪元在本地拒绝、不发请求。页间纪元或上界漂移即报错，不把两段历史拼成一份。
+- **显式上界(dex-os #28)**:上面那一页探测不带游标，服务端从账户开户位置查缺口 —— 开户被裁出保留窗口后它永远 503,连带续拉失败。做市端应当从实时视图取位置(`Risk.AsOfSeq`,或 `/book` 的 `seq`),给 `FillQuery.Upper` / `LedgerQuery.Upper` = `<seq>-65535-4294967295`:游标、纪元、上界一次带齐，不发探测，只查游标之后的缺口。只给 `Upper` 不给 `After` 时首页就带上它。视图领先于持久历史时网关回 400 `not yet complete` → `ErrHistoryUpperIncomplete`,用同一个上界稍后重读即可。
+- `Risk.Epoch` / `Risk.AsOfSeq`:`/risk` 视图所在的执行纪元与日志位置(与余额、仓位同一次取得)。老网关不给时为空 / nil,调用方须当作不可用，不补默认值。
+- `LedgerQuery.External`(`external=true`):只要跨出账户边界的资金往来(入金、出金、转账、金库申赎与调拨，哪些种类算外部由服务端判定);与 `Kind` 互斥，同时给在本地拒绝。用来按游标增量核对出入金，不必从开户起重加流水。
 - 纪元不符(409)→ `ErrHistoryEpochMismatch`:账本换纪元，旧游标作废。与缺口相交(503)→ `*HistoryUnavailableError`(带缺口区间，仍可 `errors.As` 取 `*APIError`)—— 证明不了有没有，不是空结果。
 - `Fill.TS` 为 `*int64`:null = 服务端不知道成交时刻(之前没有过区块),不是 1970 年。
 - `Equity(account, epoch)` 同水位快照，金额保持最小单位字符串；404 → `ErrNotRegistered`,500(`ledger_mismatch` / `valuation_mismatch`)与 503 一律是错误，不给快照。
