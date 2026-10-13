@@ -16,6 +16,7 @@ go get github.com/chainupcloud/dex-sdk-go
 | [`examples/onboard`](examples/onboard/main.go) | 从零接入:生成地址 → 找账户 → 连接 → 交易 |
 | [`examples/discover`](examples/discover/main.go) | 只给一个 URL 完成 发现 → 授权 → 下单 |
 | [`examples/smoke`](examples/smoke/main.go) | **全新账号全链路 31 步**(测试栈:入金 → 授权 → 会话 → 挂/改/换/撤 → 杠杆 → 条件单 / TWAP / TP-SL → 吃单 → `/fills` 补拉 → 现货 → 拒绝不锁会话 → 撤销);`GW=… ADMIN_TOKEN=… go run ./examples/smoke` |
+| [`examples/vault`](examples/vault/main.go) | **以金库身份交易**(测试栈:入金 → 建库 → manager 账户授权 API 钱包 → `ForVault` 会话 → 金库主账户挂单 / 撤单);`GW=… ADMIN_TOKEN=… go run ./examples/vault -state <文件>` |
 | [做市接入](docs/MARKET-MAKING.md) | 高频报价:报价循环、原子换单、丢帧处置、错误恢复 |
 | [REST 参考](docs/API.md) | 接口字段、**写回执与 `RejectedError`**、`/fills` 成交账本、拒因表 |
 | [WebSocket 参考](docs/WEBSOCKET.md) | 事件流协议、事件目录、**断线补拉**、时延实测 |
@@ -111,6 +112,7 @@ exchange = Exchange(Account.from_key(API_KEY), URL, account_address=MAIN_ADDR)
 |---|---|
 | 只授权了一个账户 | `dexos.New(ctx, url, apiKey)` —— 账户号能推出来,不必传 |
 | 授权了多个 | `dexos.New(ctx, url, apiKey, dexos.ForAccount(id))` —— **必须指明** |
+| 以金库身份交易 | `dexos.New(ctx, url, apiKey, dexos.ForVault(vaultID))` —— 授权批在 manager 账户上,会话账户是金库主账户;与 `ForAccount` 互斥 |
 
 不指明时返回 `ErrAmbiguousAccount` 并列出候选,**不替你挑一个**:挑错的表现是
 订单落到另一个子账户上,仓位、保证金、风险全记在别处,**而且没有任何报错**。
