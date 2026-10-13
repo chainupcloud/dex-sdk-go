@@ -1,0 +1,1 @@
+{"chainId":11155111,"domain":{"name":"dex-os","version":"1","verifyingContract":"0x0000000000000000000000000000000000000000"},"deposit":{"systemGateway":"0x5e3448d7bd75cbc2d31acd8357f711f952195d68","tokens":[{"decimals":6,"erc20":"0xc607f6ef13405d6b7e02b798bc73e8d5c93d1c86","extraWeiDecimals":0,"finalized":true,"symbol":"USDC","token":0}]},"serverTime":1791887913432}

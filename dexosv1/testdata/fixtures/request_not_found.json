@@ -1,0 +1,1 @@
+{"error":{"code":"GatewayNotFound","details":{"requestId":"0xabababababababababababababababababababababababababababababababab","status":"not_found","epoch":"k1-1","asOfSeq":231461888},"message":"no execution with this requestId as of asOfSeq (history complete)","num":10404}}
