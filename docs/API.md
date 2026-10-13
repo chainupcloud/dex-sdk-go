@@ -202,20 +202,27 @@ Go SDK:`s.Fills(ctx, dexos.FillQuery{After: lastSeenID, Epoch: lastEpoch})` **�
 视图领先于持久历史时得到 `ErrHistoryUpperIncomplete`,稍后用同一上界重读。`/ledger` 同一套,另有 `external=true`
 只要入金、出金、转账、金库等外部资金往来(`LedgerQuery.External`,与 `kind` 互斥)。
 
-### `GET /vaults/:id`
+### `GET /vaults/:id` · `GET /vaults`
 
-单个金库详情。SDK 的 `Client.Vault` 只取以金库身份交易要用的四项:
+单个金库详情 / 全部金库(`{"vaults":[…]}`,每行与详情同形)。SDK 的 `Client.Vault` / `Client.Vaults`
+只取以金库身份交易和做准入要用的字段:
 
 ```json
-{"vault":6,"mainAccount":29,"manager":"0x…","hasManager":true,"tradingHalt":false, …}
+{"vault":6,"name":"…","mainAccount":29,"manager":"0x…","hasManager":true,"tradingHalt":false,
+ "whitelist":null,"blacklist":[],"maxLeverages":[{"market":0,"symbol":"BTC-USD","maxLeverage":5}],
+ "depositorWhitelist":["0x…"],"config":{"managerLiqPortionPpm":null, …}, …}
 ```
 
 - `mainAccount` 是金库主账户:以金库身份交易时,下单、换单、撤单签的就是它。它没有 owner,
   代它签名、被 agent 代执行时都解析成 manager 账户。
 - `manager` 是 manager 账户 owner 的**地址**,不是账户号;待认领(fresh)金库为 `null`,`hasManager` 为 `false`。
 - `tradingHalt` 为 `true` 时金库熔断:dex-os 已撤光挂单并强平,新单被拒。
-- 不存在回 404 `unknown vault`(SDK:`ErrVaultNotFound`)。这个接口每次调用都在分析库里扫事件,
-  只在开会话、准入这类低频场合读,不要轮询。
+- `whitelist` 为 `null` 是不限市场;是数组时只许其中的市场,删空后的 `[]` 是哪个市场都不许
+  (SDK:`HasWhitelist` + `Whitelist`)。`blacklist` 是禁止的市场,`maxLeverages` 是各市场杠杆上限(倍数)。
+- `depositorWhitelist` 为空表是不限出资人。`config.managerLiqPortionPpm` 是熔断线,`null` = 永不熔断,建库后不可改。
+- 以上字段缺失或自相矛盾时 SDK 一律报错,不补默认值;列表里一行不合格整次报错。
+- 不存在回 404 `unknown vault`(SDK:`ErrVaultNotFound`)。这两个接口每次调用都在分析库里扫事件,
+  只在开会话、导入、准入这类低频场合读,不要轮询。
 
 ### 其他
 

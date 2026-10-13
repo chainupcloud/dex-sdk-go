@@ -12,13 +12,6 @@ import (
 	"testing"
 )
 
-const (
-	testManager = "0x3333333333333333333333333333333333333333"
-	// 金库 3:主账户 30;manager 地址的主账户是 12
-	testVaultBody = `{"vault":3,"mainAccount":30,"manager":"` + testManager + `","hasManager":true,"tradingHalt":false,
-		"creator":"` + testManager + `","whitelist":null,"depositorWhitelist":["` + testManager + `"],"nextNonce":0}`
-)
-
 type vaultGW struct {
 	url   string
 	seen  []string
@@ -34,7 +27,7 @@ func vaultGateway(t *testing.T, agent Address, grants string, routes map[string]
 			"verifyingContract":"0x0000000000000000000000000000000000000000"},
 			"deposit":{"tokens":[]},"codecVer":%d,"snapshotVer":20,"finalityMode":"head"}`, CodecVersion),
 		"/agent/" + agent.Hex():              `{"agent":"` + agent.Hex() + `","nextNonce":41,"grants":` + grants + `}`,
-		"/vaults/3":                          testVaultBody,
+		"/vaults/3":                          vaultRow(3, nil),
 		"/account/by-address/" + testManager: `{"accountId":12,"collateral":"0","nc":"0","imr":"0","withdrawable":"0","nextNonce":0}`,
 	}
 	for k, v := range routes {
@@ -126,7 +119,9 @@ func TestForVaultRejections(t *testing.T) {
 	}{
 		{"金库不存在", grantsJSON(live(12)), map[string]string{"/vaults/3": `404:{"error":"unknown vault"}`},
 			func(err error) bool { return errors.Is(err, ErrVaultNotFound) }},
-		{"金库未认领", grantsJSON(live(12)), map[string]string{"/vaults/3": `{"vault":3,"mainAccount":30,"manager":null,"hasManager":false,"tradingHalt":false}`},
+		{"金库未认领", grantsJSON(live(12)), map[string]string{"/vaults/3": vaultRow(3, func(m map[string]any) {
+			m["manager"], m["hasManager"] = nil, false
+		})},
 			func(err error) bool { return errors.Is(err, ErrVaultUnclaimed) }},
 		// 授权批在金库主账户 30 上是用不上的(dex-os 按 manager 查),不能拿它凑数
 		{"manager 没授权这把 key", grantsJSON(live(5), live(30)), nil,
@@ -163,32 +158,5 @@ func TestForVaultConflictsWithForAccount(t *testing.T) {
 	}
 	if len(g.seen) != 0 {
 		t.Fatalf("冲突的选项不该发出请求: %v", g.seen)
-	}
-}
-
-// /vaults/:id 的身份字段缺失或自相矛盾时不能猜:主账户缺失会把单签到账户 0 上。
-func TestVaultRejectsMissingOrInconsistentIdentity(t *testing.T) {
-	for name, body := range map[string]string{
-		"缺 vault":        `{"mainAccount":30,"manager":"` + testManager + `","hasManager":true,"tradingHalt":false}`,
-		"金库号不符":          `{"vault":4,"mainAccount":30,"manager":"` + testManager + `","hasManager":true,"tradingHalt":false}`,
-		"缺 mainAccount":  `{"vault":3,"manager":"` + testManager + `","hasManager":true,"tradingHalt":false}`,
-		"缺 hasManager":   `{"vault":3,"mainAccount":30,"manager":"` + testManager + `","tradingHalt":false}`,
-		"缺 manager":      `{"vault":3,"mainAccount":30,"hasManager":false,"tradingHalt":false}`,
-		"缺 tradingHalt":  `{"vault":3,"mainAccount":30,"manager":"` + testManager + `","hasManager":true}`,
-		"有 manager 却没地址": `{"vault":3,"mainAccount":30,"manager":null,"hasManager":true,"tradingHalt":false}`,
-		"无 manager 却有地址": `{"vault":3,"mainAccount":30,"manager":"` + testManager + `","hasManager":false,"tradingHalt":false}`,
-		"manager 地址非法":   `{"vault":3,"mainAccount":30,"manager":"0x12","hasManager":true,"tradingHalt":false}`,
-	} {
-		t.Run(name, func(t *testing.T) {
-			c, _ := serveOnce(t, "/vaults/3", 200, body)
-			if v, err := c.Vault(context.Background(), 3); err == nil {
-				t.Fatalf("应当拒绝,得到 %+v", v)
-			}
-		})
-	}
-	c, _ := serveOnce(t, "/vaults/3", 200, `{"vault":3,"mainAccount":30,"manager":"`+testManager+`","hasManager":true,"tradingHalt":true}`)
-	v, err := c.Vault(context.Background(), 3)
-	if err != nil || v.Vault != 3 || v.MainAccount != 30 || v.Manager == nil || v.Manager.Hex() != testManager || !v.TradingHalt {
-		t.Fatalf("金库视图不完整: %+v %v", v, err)
 	}
 }

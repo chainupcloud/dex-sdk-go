@@ -145,12 +145,14 @@ func main() {
 	vaultID := *st.Vault
 	v, err := c.Vault(ctx, vaultID)
 	r.must("vault", err)
-	whitelist, err := depositorWhitelist(ctx, gw, vaultID)
-	r.must("vault", err)
 	r.check("vault", v.Manager != nil && *v.Manager == manager.Address() && !v.TradingHalt &&
-		slices.Equal(whitelist, []string{manager.Address().Hex()}),
+		slices.Equal(v.DepositorWhitelist, []dexos.Address{manager.Address()}),
 		fmt.Sprintf("vault=%d mainAccount=%d manager=%v tradingHalt=%v depositorWhitelist=%v",
-			vaultID, v.MainAccount, v.Manager, v.TradingHalt, whitelist))
+			vaultID, v.MainAccount, v.Manager, v.TradingHalt, v.DepositorWhitelist))
+	vs, err := c.Vaults(ctx)
+	r.must("vaults", err)
+	listed := slices.ContainsFunc(vs, func(x dexos.Vault) bool { return x.Vault == vaultID && x.MainAccount == v.MainAccount })
+	r.check("vaults", listed, fmt.Sprintf("列表 %d 个金库,含 vault=%d:%v", len(vs), vaultID, listed))
 
 	// ── 4. 在 manager 账户上授权 API 钱包(manager 账户的 nonce)──
 	if !st.Approved {
@@ -324,26 +326,6 @@ func wordAddr(a dexos.Address) []byte {
 	var w [32]byte
 	copy(w[12:], a[:])
 	return w[:]
-}
-
-// depositorWhitelist 读金库的出资人白名单(SDK 的 Vault 不带这一项,这里只为核建库结果)。
-func depositorWhitelist(ctx context.Context, gw string, vault uint16) ([]string, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("%s/vaults/%d", gw, vault), nil)
-	if err != nil {
-		return nil, err
-	}
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	var out struct {
-		DepositorWhitelist []string `json:"depositorWhitelist"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return nil, err
-	}
-	return out.DepositorWhitelist, nil
 }
 
 func seqOf(events []dexos.EventEnvelope, kind string) (uint64, bool) {
