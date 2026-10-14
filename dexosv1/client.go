@@ -52,19 +52,48 @@ func (c *Client) ObserveSeq(v uint64) {
 	}
 }
 
-// AccountRef v1 的账户寻址:主钱包地址 + 子账户序号(0 = 主账户)。
+// AccountRef v1 的账户寻址:主钱包地址 + 子账户序号(0 = 主账户),或者金库号(v1.1 §4.3)。
+//
+// Vault 非 nil = 以金库身份寻址:读写的是金库主账户,与 Address / Subaccount 互斥(二者须为零值)。
+// 金库身份能读汇总 / 持仓 / 挂单 / 成交 / 流水 / nonce、能订私有频道、能交易;
+// API 钱包列表([Client.Agents])与 portfolio 不接受金库身份。
 //
 // v1 不按数字账户号寻址;nonce 接口返回的 signingAccountId 只用来填签名结构体。
 type AccountRef struct {
 	Address    dexos.Address
 	Subaccount uint32
+	Vault      *uint16
 }
 
-func (r AccountRef) values() url.Values {
-	return url.Values{
-		"address":    {r.Address.Hex()},
-		"subaccount": {strconv.FormatUint(uint64(r.Subaccount), 10)},
+// VaultAccount 以金库身份寻址金库 id。
+func VaultAccount(id uint16) AccountRef { return AccountRef{Vault: &id} }
+
+func (r AccountRef) values() (url.Values, error) {
+	if r.Vault == nil {
+		return url.Values{
+			"address":    {r.Address.Hex()},
+			"subaccount": {strconv.FormatUint(uint64(r.Subaccount), 10)},
+		}, nil
 	}
+	if !r.Address.IsZero() || r.Subaccount != 0 {
+		return nil, fmt.Errorf("dexosv1: 金库 %d 的寻址不能再带地址 / 子账户(%s/%d)", *r.Vault, r.Address.Hex(), r.Subaccount)
+	}
+	return url.Values{"vault": {strconv.FormatUint(uint64(*r.Vault), 10)}}, nil
+}
+
+// walletValues 只接受钱包寻址的端点(金库身份服务端回 400,这里先拦住)。
+func (r AccountRef) walletValues(what string) (url.Values, error) {
+	if r.Vault != nil {
+		return nil, fmt.Errorf("dexosv1: %s 不接受金库身份(金库 %d)", what, *r.Vault)
+	}
+	return r.values()
+}
+
+func (r AccountRef) String() string {
+	if r.Vault != nil {
+		return fmt.Sprintf("vault %d", *r.Vault)
+	}
+	return fmt.Sprintf("%s/%d", r.Address.Hex(), r.Subaccount)
 }
 
 // readKind 决定一次读要不要带 `x-dexos-min-seq`。

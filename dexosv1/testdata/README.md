@@ -1,7 +1,9 @@
 # dexosv1 测试数据
 
 - `openapi-v1.json`:dex-os 开放 API v1.1 规格的副本,取自 chainupcloud/dex-os `web/openapi-v1.json`
-  @ `724acfc`(main;该文件最后一次修改在 `5434efc`),逐字节相同。
+  @ `3c1ce22`(main,含 v1.1 §4.3 金库身份 #79;该文件最后一次修改在 `dac96d0`),逐字节相同。
+  其中 `/v1/vaults`、`/v1/vaults/{id}` 的响应只有 `type: object`,没有字段表:`vault.go` 按网关 `vault_json`
+  读,`vault.json` / `vaults.json` 照开发环境的真实响应整理。
   dex-os 改了 v1 接口面就同步更新这份副本,再跑 `go test ./dexosv1/`;`write_test.go` 的 `specDeviations`
   登记已知的规格与实现差异,条目过期(规格已修好)测试会失败,提醒删掉。
 - `fixtures/`:假服务的响应样例。形状按开发环境的真实响应整理,地址换成了假地址;
@@ -13,6 +15,9 @@
   再替换进去,所以 SDK 本地算的身份与"网关"算的对不上就会被测出来。
 - v1.1 新增的只读样例:`prices.json`(24h 统计)、`candles.json`(`1M` 周期)、`portfolio.json`、
   `agent_grants.json`(`/v1/agents/{address}`)、`my_vaults.json`(`/v1/account/vaults`)。
+- 金库身份(v1.1 §4.3)样例:`vault.json` / `vaults.json`(manager 认领在子账户 2、creator 在子账户 1;列表里另有
+  一个待认领的金库)、`account_vault.json` / `ledger_vault.json`(`?vault=3` 读,身份字段只有 `vault`)、
+  `w_nonce_vault.json`(`?vault=3&signer=`,`signingAccountId` 31 是金库主账户)。
 - `eip712_golden.json`:主钱包签名结构体(Order / Cancel / Leverage)的摘要与签名金样,由 ethers 6.17 的
   `TypedDataEncoder.hash` / `Wallet.signTypedData` 生成(私钥 `0x42…42`,两个不同的域),与本包的 Go 实现互相独立。
   重新生成:对每个向量按 `eip712.go` 的类型串组 `types`,调用上面两个函数,输出同样的 JSON。

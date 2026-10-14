@@ -289,12 +289,28 @@ func canonical(params map[string]any) (string, error) {
 	return string(out), err
 }
 
+// accountRoute 私有频道的路由键:钱包 = 地址 + 子账户,金库身份 = 金库号(帧里只回显其一)。
 func accountRoute(channel string, ref AccountRef) string {
+	if ref.Vault != nil {
+		return fmt.Sprintf("%s:vault:%d", channel, *ref.Vault)
+	}
 	return fmt.Sprintf("%s:%s:%d", channel, strings.ToLower(ref.Address.Hex()), ref.Subaccount)
 }
 
 func accountParams(channel string, ref AccountRef) map[string]any {
+	if ref.Vault != nil {
+		return map[string]any{"channel": channel, "vault": *ref.Vault}
+	}
 	return map[string]any{"channel": channel, "address": strings.ToLower(ref.Address.Hex()), "subaccount": ref.Subaccount}
+}
+
+// accountSub 私有频道订阅的公共部分;金库寻址同时带了地址 / 子账户的,在这里拒掉。
+func accountSub(channel string, ref AccountRef, snapshot bool) (*Subscription, error) {
+	if _, err := ref.values(); err != nil {
+		return nil, err
+	}
+	return &Subscription{channel: channel, route: accountRoute(channel, ref), snapshot: snapshot, private: true,
+		params: accountParams(channel, ref)}, nil
 }
 
 // Run 连上并保持连接,直到 ctx 结束(返回 ctx.Err())。断线按指数退避重连,重连后重订全部未失效的订阅。
@@ -687,6 +703,7 @@ func routeOf(channel string, data json.RawMessage) (string, error) {
 		Symbol     string  `json:"symbol"`
 		Address    string  `json:"address"`
 		Subaccount *uint32 `json:"subaccount"`
+		Vault      *uint16 `json:"vault"`
 	}
 	if err := json.Unmarshal(data, &h); err != nil {
 		return "", fmt.Errorf("dexosv1: %s 帧的 data 不是对象: %w", channel, err)
@@ -697,10 +714,13 @@ func routeOf(channel string, data json.RawMessage) (string, error) {
 	case "book", "bbo", "trades":
 		return channel + ":" + strings.ToUpper(h.Symbol), nil
 	case "orders", "fills", "account", "positions", "ledger":
-		if h.Address == "" || h.Subaccount == nil {
-			return "", fmt.Errorf("dexosv1: %s 帧缺 address / subaccount", channel)
+		switch {
+		case h.Vault != nil && h.Address == "" && h.Subaccount == nil:
+			return accountRoute(channel, VaultAccount(*h.Vault)), nil
+		case h.Vault == nil && h.Address != "" && h.Subaccount != nil:
+			return fmt.Sprintf("%s:%s:%d", channel, strings.ToLower(h.Address), *h.Subaccount), nil
 		}
-		return fmt.Sprintf("%s:%s:%d", channel, strings.ToLower(h.Address), *h.Subaccount), nil
+		return "", fmt.Errorf("dexosv1: %s 帧的身份应为 address + subaccount 或 vault 之一", channel)
 	}
 	// 本包不订的频道(candles / funding / events):不该收到
 	return "unsubscribed:" + channel, nil
