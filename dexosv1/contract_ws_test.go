@@ -135,7 +135,7 @@ func TestContractStream(t *testing.T) {
 		<-done
 	}()
 
-	// 全部就绪:快照类收到快照,流水类补拉到视图
+	// 全部就绪:快照类收到快照,流水类补拉到确认帧的起点
 	deadline := time.Now().Add(30 * time.Second)
 	for _, s := range subs {
 		for s.State() != StateLive {
