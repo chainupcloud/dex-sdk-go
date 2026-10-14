@@ -84,14 +84,16 @@ type Receipt struct {
 }
 
 // envelope 统一签名信封。`signer` 给了就是 API 钱包代签,此时 `nowMs` 必填(它在内层命令里、进签名)。
+// 被操作账户二选一:钱包寻址带 `subaccount`;金库身份带 `vault`、`account` 是 manager 的主钱包(同给是 400)。
 type envelope struct {
-	Account    string `json:"account"`
-	Subaccount uint32 `json:"subaccount"`
-	Signer     string `json:"signer,omitempty"`
-	Nonce      uint64 `json:"nonce"`
-	ExpiresAt  uint64 `json:"expiresAt,omitempty"`
-	NowMs      uint64 `json:"nowMs,omitempty"`
-	Signature  string `json:"signature"`
+	Account    string  `json:"account"`
+	Subaccount *uint32 `json:"subaccount,omitempty"`
+	Vault      *uint16 `json:"vault,omitempty"`
+	Signer     string  `json:"signer,omitempty"`
+	Nonce      uint64  `json:"nonce"`
+	ExpiresAt  uint64  `json:"expiresAt,omitempty"`
+	NowMs      uint64  `json:"nowMs,omitempty"`
+	Signature  string  `json:"signature"`
 }
 
 // wireOrderReq 一张限价单的请求形状。批量项每项都带信封(规格的 PlaceOrder 要求每项带);

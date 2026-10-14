@@ -94,19 +94,15 @@ func (s *Session) ReplaceJournaled(ctx context.Context, m *Market, cancels []uin
 			}
 			return id, &journalError{err: err}
 		}
-		sig, err := s.Agent.SignHashHex(digest)
-		var sendErr error
-		if err != nil {
-			sendErr = err
-		} else {
-			env := &envelope{Account: s.Account.Address.Hex(), Subaccount: s.Account.Subaccount, Signer: agent.Hex(), Nonce: nonce, Signature: sig, NowMs: now}
-			status, raw, perr := s.Client.post(ctx, "/v1/orders/replace", wireReplaceReq{envelope: env, Symbol: m.Symbol, Cancels: wireCancels, Orders: items})
-			sendErr = perr
-			if perr == nil {
-				var r Receipt
-				if r, sendErr = receipt(status, raw, id); sendErr == nil {
-					out, sendErr = batchResult(m, r, raw, len(orders), len(cancels))
-				}
+		// exec 按同一 nonce 与命令重算出同一个请求身份(确定性签名),发出去的就是日志里那一条。
+		_, status, raw, sendErr := s.exec(ctx, nonce, cmd, "/v1/orders/replace", func(env *envelope) any {
+			env.NowMs = now
+			return wireReplaceReq{envelope: env, Symbol: m.Symbol, Cancels: wireCancels, Orders: items}
+		})
+		if sendErr == nil {
+			var r Receipt
+			if r, sendErr = receipt(status, raw, id); sendErr == nil {
+				out, sendErr = batchResult(m, r, raw, len(orders), len(cancels))
 			}
 		}
 		if sendErr != nil {

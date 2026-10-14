@@ -43,7 +43,11 @@ func (c *Client) SubmitApproval(ctx context.Context, a SignedApproval) (*Receipt
 	owner := a.Account.Address
 	digest := a.Domain.ApproveAgentHash(owner, a.SigningAccountID, a.Agent, a.ValidUntil, a.Nonce)
 	id := newIdentity(owner, fmt.Sprintf("account:%d", a.SigningAccountID), a.Nonce, digest, nil)
-	env := &envelope{Account: owner.Hex(), Subaccount: a.Account.Subaccount, Nonce: a.Nonce, Signature: a.Signature}
+	if a.Account.Vault != nil {
+		return nil, errors.New("dexosv1: 授权 API 钱包要在钱包账户上签,不接受金库身份")
+	}
+	sub := a.Account.Subaccount
+	env := &envelope{Account: owner.Hex(), Subaccount: &sub, Nonce: a.Nonce, Signature: a.Signature}
 	status, raw, err := c.post(ctx, "/v1/account/agents/approve", wireApproveReq{envelope: env, Agent: a.Agent.Hex(), ValidUntil: a.ValidUntil, Label: a.Label})
 	if err != nil {
 		return nil, err

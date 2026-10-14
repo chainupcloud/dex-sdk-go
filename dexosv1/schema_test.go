@@ -250,6 +250,11 @@ var fixtureSchemas = []struct {
 	{"agent_grants.json", "/v1/agents/{address}", "200", ""},
 	{"my_vaults.json", "/v1/account/vaults", "200", ""},
 	{"subaccounts.json", "/v1/account/subaccounts", "200", ""},
+	{"vault.json", "/v1/vaults/{id}", "200", ""},
+	{"vaults.json", "/v1/vaults", "200", ""},
+	{"account_vault.json", "/v1/account", "200", ""},
+	{"ledger_vault.json", "/v1/account/ledger", "200", ""},
+	{"w_nonce_vault.json", "/v1/account/nonce", "200", ""},
 }
 
 // postFixtureSchemas 写接口回执的 fixture(形状照原生 v1 的 v1_write.rs 整理)。

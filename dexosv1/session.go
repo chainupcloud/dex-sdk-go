@@ -116,12 +116,21 @@ type Session struct {
 
 	domain    dexos.Domain
 	signingID uint32
-	guard     nonceGuard
+	// owner 信封的 account:钱包寻址 = Account.Address;金库身份 = manager 的主钱包(网关按它核对 manager)。
+	owner dexos.Address
+	guard nonceGuard
 }
 
 // NewSession 读连接参数、授权列表与 agent nonce,建会话。
 // 这把钥匙不在 ref 账户的授权列表里 → ErrAgentNotAuthorized;已到期 → ErrAgentExpired。
+//
+// ref 是金库身份([VaultAccount])时以金库主账户交易(v1.1 §4.3):授权要挂在 manager 认领金库所用的账户上,
+// 本函数从 `/v1/vaults/{id}` 读出那个账户来核对;金库待认领时报错。nonce 仍是这把 API 钱包自己的计数器。
+// 金库身份只能交易:下单、撤单、换单、撤全部、断线保护(资金类动作由网关以 403 拒)。
 func NewSession(ctx context.Context, c *Client, agent *dexos.Signer, ref AccountRef) (*Session, error) {
+	if _, err := ref.values(); err != nil {
+		return nil, err
+	}
 	ex, err := c.Exchange(ctx)
 	if err != nil {
 		return nil, err
@@ -130,11 +139,26 @@ func NewSession(ctx context.Context, c *Client, agent *dexos.Signer, ref Account
 	if err != nil {
 		return nil, err
 	}
-	agents, err := c.Agents(ctx, ref)
+	grant := ref
+	if ref.Vault != nil {
+		v, err := c.Vault(ctx, *ref.Vault)
+		if err != nil {
+			return nil, err
+		}
+		if v.Manager == nil {
+			return nil, fmt.Errorf("dexosv1: 金库 %d 待认领,没有 manager,不能交易", *ref.Vault)
+		}
+		manager, err := dexos.ParseAddress(*v.Manager)
+		if err != nil {
+			return nil, fmt.Errorf("dexosv1: 金库 %d 的 manager: %w", *ref.Vault, err)
+		}
+		grant = AccountRef{Address: manager, Subaccount: *v.ManagerSubaccount}
+	}
+	agents, err := c.Agents(ctx, grant)
 	if err != nil {
 		return nil, err
 	}
-	s := &Session{Client: c, Agent: agent, Account: ref, domain: d}
+	s := &Session{Client: c, Agent: agent, Account: ref, domain: d, owner: grant.Address}
 	found := false
 	for _, a := range agents {
 		if a.Address == agent.Address().Hex() {
@@ -148,7 +172,7 @@ func NewSession(ctx context.Context, c *Client, agent *dexos.Signer, ref Account
 		}
 	}
 	if !found {
-		return nil, fmt.Errorf("%w: %s 不在 %s/%d 的授权列表里", ErrAgentNotAuthorized, agent.Address().Hex(), ref.Address.Hex(), ref.Subaccount)
+		return nil, fmt.Errorf("%w: %s 不在 %s 的授权列表里(会话账户 %s)", ErrAgentNotAuthorized, agent.Address().Hex(), grant, ref)
 	}
 	addr := agent.Address()
 	n, err := c.Nonce(ctx, ref, &addr)
@@ -185,7 +209,12 @@ func (s *Session) exec(ctx context.Context, nonce uint64, cmd []byte, path strin
 	if err != nil {
 		return id, 0, nil, err
 	}
-	env := &envelope{Account: s.Account.Address.Hex(), Subaccount: s.Account.Subaccount, Signer: agent.Hex(), Nonce: nonce, Signature: sig}
+	env := &envelope{Account: s.owner.Hex(), Signer: agent.Hex(), Nonce: nonce, Signature: sig}
+	if s.Account.Vault != nil {
+		env.Vault = s.Account.Vault
+	} else {
+		env.Subaccount = &s.Account.Subaccount
+	}
 	status, raw, err := s.Client.post(ctx, path, body(env))
 	return id, status, raw, err
 }
@@ -437,7 +466,7 @@ func (w *Wallet) sign(nonce uint64, digest []byte) (*envelope, *RequestIdentity,
 	if err != nil {
 		return nil, id, err
 	}
-	return &envelope{Account: owner.Hex(), Subaccount: w.Account.Subaccount, Nonce: nonce, Signature: sig}, id, nil
+	return &envelope{Account: owner.Hex(), Subaccount: &w.Account.Subaccount, Nonce: nonce, Signature: sig}, id, nil
 }
 
 // PlaceOrder 单笔限价单。expiresAt 零值 = 签名不过期(它进签名)。

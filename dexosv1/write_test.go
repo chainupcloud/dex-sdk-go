@@ -26,6 +26,8 @@ const (
 	agentAddr = "0x5975c152fe58cdcb7e25586a3c9b994a16dbb615"
 	// signingAccountId 与 nonce 见 w_nonce_*.json。
 	signingID = 7
+	// vaultMainID 金库 3 的主账户号:以金库身份签的命令里 account 填它(见 w_nonce_vault.json)。
+	vaultMainID = 31
 )
 
 // testDomain exchange.json 里的域。
@@ -155,6 +157,10 @@ func gatewayRequestID(t *testing.T, cat *Catalog, path string, body any) string 
 	var digest []byte
 	signerHex, isAgent := env["signer"].(string)
 	if isAgent {
+		acct := uint32(signingID)
+		if env["vault"] != nil {
+			acct = vaultMainID
+		}
 		var cmd []byte
 		switch path {
 		case "/v1/orders":
@@ -162,13 +168,13 @@ func gatewayRequestID(t *testing.T, cat *Catalog, path string, body any) string 
 			for i, it := range items {
 				orders[i] = gatewayOrder(t, cat, m(it))
 			}
-			cmd = dexos.EncodeBatchPlace(signingID, num(t, env["nowMs"]), orders)
+			cmd = dexos.EncodeBatchPlace(acct, num(t, env["nowMs"]), orders)
 		case "/v1/orders/cancel":
 			ids := make([]dexos.OrderID, len(items))
 			for i, it := range items {
 				ids[i] = orderID(m(it)["symbol"], m(it)["orderId"])
 			}
-			cmd = dexos.EncodeBatchCancel(signingID, ids)
+			cmd = dexos.EncodeBatchCancel(acct, ids)
 		case "/v1/orders/replace":
 			var ids []dexos.OrderID
 			for _, c := range env["cancels"].([]any) {
@@ -178,11 +184,11 @@ func gatewayRequestID(t *testing.T, cat *Catalog, path string, body any) string 
 			for _, o := range env["orders"].([]any) {
 				orders = append(orders, gatewayOrder(t, cat, m(o)))
 			}
-			cmd = dexos.EncodeBatchReplace(signingID, num(t, env["nowMs"]), ids, orders)
+			cmd = dexos.EncodeBatchReplace(acct, num(t, env["nowMs"]), ids, orders)
 		case "/v1/orders/cancel-all":
-			cmd = dexos.EncodeScheduleCancel(signingID, num(t, env["nowMs"]), num(t, env["nowMs"]))
+			cmd = dexos.EncodeScheduleCancel(acct, num(t, env["nowMs"]), num(t, env["nowMs"]))
 		case "/v1/orders/schedule-cancel":
-			cmd = dexos.EncodeScheduleCancel(signingID, num(t, env["at"]), num(t, env["nowMs"]))
+			cmd = dexos.EncodeScheduleCancel(acct, num(t, env["at"]), num(t, env["nowMs"]))
 		default:
 			t.Fatalf("假网关不会算 %s 的 API 钱包请求身份", path)
 		}
@@ -673,7 +679,7 @@ func TestWalletWrites(t *testing.T) {
 }
 
 // specDeviations 本包按实现读、而钉住的规格里没有的字段:发现了就报给 dex-os,规格改好、同步副本后
-// 删掉对应条目 —— 条目多余时测试会红。dex-os 724acfc(v1.1 #72 / #75)之后没有已知偏差。
+// 删掉对应条目 —— 条目多余时测试会红。dex-os 3c1ce22(v1.1 #79 金库身份)之后没有已知偏差。
 var specDeviations = map[string][]string{}
 
 // 本包解码 / 发送用到的每个字段都必须在规格里,specDeviations 除外。

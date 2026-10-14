@@ -152,8 +152,10 @@ func (st *Stream) SubscribeTrades(symbol string, fn func(Trade)) (*Subscription,
 
 // SubscribeAccount 账户汇总(`account`,与 `GET /v1/account` 同一份体、同一次取视图),块边界有变化才推。
 func (st *Stream) SubscribeAccount(ref AccountRef, fn func(*Account)) (*Subscription, error) {
-	sub := &Subscription{channel: "account", route: accountRoute("account", ref), snapshot: true, private: true,
-		params: accountParams("account", ref)}
+	sub, err := accountSub("account", ref, true)
+	if err != nil {
+		return nil, err
+	}
 	sub.apply = func(f *wsFrame) error {
 		a, err := decodeAccount(f.Data, "WS account 帧")
 		if err != nil {
@@ -167,8 +169,10 @@ func (st *Stream) SubscribeAccount(ref AccountRef, fn func(*Account)) (*Subscrip
 
 // SubscribePositions 持仓(`positions`,与 `GET /v1/account/positions` 同一份体),块边界有变化才推。每帧是全部持仓。
 func (st *Stream) SubscribePositions(ref AccountRef, fn func([]Position)) (*Subscription, error) {
-	sub := &Subscription{channel: "positions", route: accountRoute("positions", ref), snapshot: true, private: true,
-		params: accountParams("positions", ref)}
+	sub, err := accountSub("positions", ref, true)
+	if err != nil {
+		return nil, err
+	}
 	sub.apply = func(f *wsFrame) error {
 		var w struct {
 			Positions []wirePosition `json:"positions"`
@@ -237,8 +241,10 @@ type wireOrderEvent struct {
 // 本包维护在挂单集合:快照整体替换,status 为 open 即在挂、否则移除。帧与本地集合对不上时不猜,
 // 退订重订换一帧新快照(期间 Syncing)。
 func (st *Stream) SubscribeOrders(ref AccountRef, fn func(OrdersUpdate)) (*Subscription, error) {
-	sub := &Subscription{channel: "orders", route: accountRoute("orders", ref), snapshot: true, private: true,
-		params: accountParams("orders", ref)}
+	sub, err := accountSub("orders", ref, true)
+	if err != nil {
+		return nil, err
+	}
 	open := map[uint64]Order{}
 	emit := func(snapshot bool, ev *OrderEvent, seq uint64) {
 		list := make([]Order, 0, len(open))
