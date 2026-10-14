@@ -1,0 +1,261 @@
+{
+ "note": "由 ethers 6.17.0 的 TypedDataEncoder / Wallet.signTypedData 生成(私钥 0x42…42),与 Go 实现互相独立;勿手改",
+ "signer": "0x17c5185167401ed00cf5f5b2fc97d9bbfdb7d025",
+ "privateKey": "0x4242424242424242424242424242424242424242424242424242424242424242",
+ "vectors": [
+  {
+   "type": "Order",
+   "domain": {
+    "chainId": 11155111,
+    "verifyingContract": "0x0000000000000000000000000000000000000000"
+   },
+   "message": {
+    "trader": "0x17c5185167401eD00cF5F5b2fc97D9BBfDb7D025",
+    "accountId": "7",
+    "market": "0",
+    "side": "0",
+    "price": "6500000",
+    "lots": "15",
+    "tif": "0",
+    "reduceOnly": false,
+    "nonce": "0",
+    "expiry": "0"
+   },
+   "digest": "0x1a0da9c68980ec2ea5a5a38c7803375b54cbbbe8cad28db0c149870b27804d55",
+   "signature": "0xcc3bacf40b6e0be7a24172b0028a654c188d282f89c9c7a659a39a5578ca997842e058500fd62c08ef4972af9abd5c621af713f64d5a9bfd2d6b17861dab8c2b1b"
+  },
+  {
+   "type": "Order",
+   "domain": {
+    "chainId": 11155111,
+    "verifyingContract": "0x0000000000000000000000000000000000000000"
+   },
+   "message": {
+    "trader": "0x17c5185167401eD00cF5F5b2fc97D9BBfDb7D025",
+    "accountId": "4294967295",
+    "market": "65535",
+    "side": "1",
+    "price": "4294967295",
+    "lots": "18446744073709551615",
+    "tif": "3",
+    "reduceOnly": true,
+    "nonce": "18446744073709551615",
+    "expiry": "1791887913432"
+   },
+   "digest": "0x5da2e3b37e4fa3f7047bc73116c96e3d777c53ee5454c1292bdf8e25dce9b549",
+   "signature": "0x04cfc9025fee840cf52e37fe6806217a6253e8c189fce071c19067593b4fc8ff276960dedfea4bc821c05e5f4f36ae2cde9b5875c451eb06be753e3b7997014e1b"
+  },
+  {
+   "type": "Order",
+   "domain": {
+    "chainId": 11155111,
+    "verifyingContract": "0x0000000000000000000000000000000000000000"
+   },
+   "message": {
+    "trader": "0x17c5185167401eD00cF5F5b2fc97D9BBfDb7D025",
+    "accountId": "23",
+    "market": "21",
+    "side": "1",
+    "price": "12345",
+    "lots": "100",
+    "tif": "2",
+    "reduceOnly": false,
+    "nonce": "42",
+    "expiry": "0"
+   },
+   "digest": "0x43a64eec79f36786d0b2283b685455faa464f43b8add531200a6bd54f2c47f6c",
+   "signature": "0x5eed642b4f8745b4fd2a7a9fb6f710550430d41b1c599ae8b61523ac729d4e5a096835e9bc2cad649dd2698b87c6d133d6fcb78350950a52d0c72ca2d5b6a65e1b"
+  },
+  {
+   "type": "Cancel",
+   "domain": {
+    "chainId": 11155111,
+    "verifyingContract": "0x0000000000000000000000000000000000000000"
+   },
+   "message": {
+    "trader": "0x17c5185167401eD00cF5F5b2fc97D9BBfDb7D025",
+    "accountId": "7",
+    "market": "3",
+    "orderSeq": "123456789",
+    "nonce": "9"
+   },
+   "digest": "0x6edc99406233623671c4ab9d4f0384f1a22e26212ead916977a5a7bd9a4c38b4",
+   "signature": "0x1ee73363ceaa2e76d7cd7ceace34c40aaca1027e3d8b778d2047dec8911de33b425cf06deae8c7e40d72f9cf5bfc93c9af3ab6325913b764281c6322aeaedc741c"
+  },
+  {
+   "type": "Cancel",
+   "domain": {
+    "chainId": 11155111,
+    "verifyingContract": "0x0000000000000000000000000000000000000000"
+   },
+   "message": {
+    "trader": "0x17c5185167401eD00cF5F5b2fc97D9BBfDb7D025",
+    "accountId": "0",
+    "market": "65535",
+    "orderSeq": "281474976710655",
+    "nonce": "18446744073709551615"
+   },
+   "digest": "0x60a928d026baeef1c941292c4ac63db3fa4af67ae11f8f1dfcd3b81d6771b579",
+   "signature": "0xb0d9e125b9a6def513228251eca9c0e2ddd6cb343180c3d10d96e99fb75237647588efb4422d0877d0d9b7d51b08c0d06b4d9a772c4e63b64e7d8d80489affd81b"
+  },
+  {
+   "type": "Leverage",
+   "domain": {
+    "chainId": 11155111,
+    "verifyingContract": "0x0000000000000000000000000000000000000000"
+   },
+   "message": {
+    "trader": "0x17c5185167401eD00cF5F5b2fc97D9BBfDb7D025",
+    "accountId": "7",
+    "market": "1",
+    "customImfPpm": "50000",
+    "nonce": "3"
+   },
+   "digest": "0x49253026b2c4b6c28b1a13a038e0b2930e283db73b60862f06c0a9e7fa053c53",
+   "signature": "0x15ccc2301707eba22bfba2cd7ad1e2000344866feb794dae9c4abfd971a9ab7e435077238b22f19fe50ddc0fceb2efbdc6b96e89a976aa2166eb560ac68bab7a1c"
+  },
+  {
+   "type": "Leverage",
+   "domain": {
+    "chainId": 11155111,
+    "verifyingContract": "0x0000000000000000000000000000000000000000"
+   },
+   "message": {
+    "trader": "0x17c5185167401eD00cF5F5b2fc97D9BBfDb7D025",
+    "accountId": "7",
+    "market": "1",
+    "customImfPpm": "0",
+    "nonce": "4"
+   },
+   "digest": "0x43a95098fde82fc994f24354ff419b700b47b90d90a12656719aa5f7ab42b597",
+   "signature": "0x84cebb0ca31926b329a7d82ab4e839315bde65bc5c85c06d1d9b6fb47ca8997d42bc616b9ad2525611298c16430f3bb7e32f7c18fb7b72e46ceec9c318d0d3f81b"
+  },
+  {
+   "type": "Order",
+   "domain": {
+    "chainId": 1337,
+    "verifyingContract": "0x00000000000000000000000000000000000000aa"
+   },
+   "message": {
+    "trader": "0x17c5185167401eD00cF5F5b2fc97D9BBfDb7D025",
+    "accountId": "7",
+    "market": "0",
+    "side": "0",
+    "price": "6500000",
+    "lots": "15",
+    "tif": "0",
+    "reduceOnly": false,
+    "nonce": "0",
+    "expiry": "0"
+   },
+   "digest": "0x04ae804c9b2ee68f21c1ed8e747fe674cc78cfea8e8184d852eec51a59fd6148",
+   "signature": "0x5168e697557de8c24b3fa784ac428118bf51b712087e23796caa3277c4cf5091387598358e326b6681e3536c923577d84373d7add327d3598ad8525a4035c3471c"
+  },
+  {
+   "type": "Order",
+   "domain": {
+    "chainId": 1337,
+    "verifyingContract": "0x00000000000000000000000000000000000000aa"
+   },
+   "message": {
+    "trader": "0x17c5185167401eD00cF5F5b2fc97D9BBfDb7D025",
+    "accountId": "4294967295",
+    "market": "65535",
+    "side": "1",
+    "price": "4294967295",
+    "lots": "18446744073709551615",
+    "tif": "3",
+    "reduceOnly": true,
+    "nonce": "18446744073709551615",
+    "expiry": "1791887913432"
+   },
+   "digest": "0xf8684e1550ab02fde00779855c3b57c8e9e38ac3beeb724f54ee92fc810d337e",
+   "signature": "0x5610c33793324c2b058cfd8dbe9625176fea4eefb565ebe4a8e1b1756471678615740c9f59c30b0c8c4334e0ce4932c97c569369045a8f5395480e8c70c98ab61b"
+  },
+  {
+   "type": "Order",
+   "domain": {
+    "chainId": 1337,
+    "verifyingContract": "0x00000000000000000000000000000000000000aa"
+   },
+   "message": {
+    "trader": "0x17c5185167401eD00cF5F5b2fc97D9BBfDb7D025",
+    "accountId": "23",
+    "market": "21",
+    "side": "1",
+    "price": "12345",
+    "lots": "100",
+    "tif": "2",
+    "reduceOnly": false,
+    "nonce": "42",
+    "expiry": "0"
+   },
+   "digest": "0xd8e2b56b712ade875dea8af21df4d367267152a2d5878adb22ccaf4ce074dbdb",
+   "signature": "0xd5fcc8bd55dba3bf566f9cca1a7a9d9348f5e86f8ecd3c72427293fa837f457e230485026a874628adc91c230f752613f89570f97e4c74def098dc6365135ad71c"
+  },
+  {
+   "type": "Cancel",
+   "domain": {
+    "chainId": 1337,
+    "verifyingContract": "0x00000000000000000000000000000000000000aa"
+   },
+   "message": {
+    "trader": "0x17c5185167401eD00cF5F5b2fc97D9BBfDb7D025",
+    "accountId": "7",
+    "market": "3",
+    "orderSeq": "123456789",
+    "nonce": "9"
+   },
+   "digest": "0x4e1491a06f4f98bb3ed2db38aa7ffa1d149dd7c59d8486da252a6d588d97b901",
+   "signature": "0x13848ed4378097d9682ec6cf4e64a6a11395bc11fc558b474ac8084cfefbbc4b63e8fa06da0baa8d3b25117f541af407801dae9c760a1b6f2031b133f42d9d711b"
+  },
+  {
+   "type": "Cancel",
+   "domain": {
+    "chainId": 1337,
+    "verifyingContract": "0x00000000000000000000000000000000000000aa"
+   },
+   "message": {
+    "trader": "0x17c5185167401eD00cF5F5b2fc97D9BBfDb7D025",
+    "accountId": "0",
+    "market": "65535",
+    "orderSeq": "281474976710655",
+    "nonce": "18446744073709551615"
+   },
+   "digest": "0xcc13cb2092d83e6879dec24349a26eb0f47c8f2764c6c821e7af11eccf8e50bf",
+   "signature": "0x7aab434261dbbea50f89c4a7bc4eeb17e0b35cd331c002c797fcada52339f65822ff69905baf44f7aaeca123af631c8259f33e5677e0c3f36f832ad5be6103811b"
+  },
+  {
+   "type": "Leverage",
+   "domain": {
+    "chainId": 1337,
+    "verifyingContract": "0x00000000000000000000000000000000000000aa"
+   },
+   "message": {
+    "trader": "0x17c5185167401eD00cF5F5b2fc97D9BBfDb7D025",
+    "accountId": "7",
+    "market": "1",
+    "customImfPpm": "50000",
+    "nonce": "3"
+   },
+   "digest": "0xfd378d014665cdbe292955b1ef970016159cb98cdaa32b868f53540057086e2b",
+   "signature": "0x1fdf11aafde8ec2592ff01be18ee4afac767759c4f18b2618df3a27ba82793ac289ea00904625507ec3f99cecb907485f3c4d654a320c7cf6bc9ea595ba0a9091b"
+  },
+  {
+   "type": "Leverage",
+   "domain": {
+    "chainId": 1337,
+    "verifyingContract": "0x00000000000000000000000000000000000000aa"
+   },
+   "message": {
+    "trader": "0x17c5185167401eD00cF5F5b2fc97D9BBfDb7D025",
+    "accountId": "7",
+    "market": "1",
+    "customImfPpm": "0",
+    "nonce": "4"
+   },
+   "digest": "0xd67a0ae4d61c7a6cf6afd44151601f1a03f3ab8b837ae660afd30c980a10ce8b",
+   "signature": "0x12bb153258aca1e115139148540884da5bba88de9f5cb767fc3126ebe9aab8870b9cb1c7199fc5c9ee7a3d0b25477511a8c9d62bf8ccd4023b08a2fc5f995d291c"
+  }
+ ]
+}

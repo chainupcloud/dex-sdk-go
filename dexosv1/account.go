@@ -2,23 +2,35 @@ package dexosv1
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"net/url"
 	"strconv"
+	"strings"
 
 	"github.com/chainupcloud/dex-sdk-go/dexos"
 )
 
 // Account 账户汇总(`GET /v1/account`)。金额是 USDC 十进制字符串。
+//
+// 风险字段与 Epoch / AsOfSeq 取自**同一次**风险视图(v1.1 §4.2):AsOfSeq 是这份视图覆盖到的日志位号,
+// Epoch 是账本纪元 —— 纪元变了(账本重置、账户号重排)就要按新纪元重建本地状态,不拿旧游标续读。
 type Account struct {
-	Address             string    `json:"address"`
-	Subaccount          uint32    `json:"subaccount"`
-	Collateral          string    `json:"collateral"`
-	Equity              string    `json:"equity"`
-	MarginUsed          string    `json:"marginUsed"`
-	MaintenanceMargin   string    `json:"maintenanceMargin"`
+	Address           string `json:"address"`
+	Subaccount        uint32 `json:"subaccount"`
+	Epoch             string `json:"epoch"`
+	AsOfSeq           uint64 `json:"asOfSeq"`
+	Collateral        string `json:"collateral"`
+	Equity            string `json:"equity"`
+	MarginUsed        string `json:"marginUsed"`
+	MaintenanceMargin string `json:"maintenanceMargin"`
+	// OpenOrderMargin 在簿非只减仓挂单占用的初始保证金。
+	OpenOrderMargin     string    `json:"openOrderMargin"`
 	AvailableToTrade    string    `json:"availableToTrade"`
 	AvailableToWithdraw string    `json:"availableToWithdraw"`
 	Balances            []Balance `json:"balances"`
+	// Groups 按结算 token 分的风险组(USDC 一组,另有其他抵押 token 的 dex 各一组)。
+	Groups []RiskGroup `json:"groups"`
 	// FeeTier / TakerFee / MakerFee nil = 服务端给了 null(市场级费率的市场看 Market 的 fees)。
 	FeeTier        *int    `json:"feeTier"`
 	TakerFee       *string `json:"takerFee"`
@@ -40,16 +52,39 @@ type Balance struct {
 	Available string `json:"available"`
 }
 
+// RiskGroup 一个风险组(同一结算 token)。金额是该 token 的十进制字符串。
+type RiskGroup struct {
+	Token           string `json:"token"`
+	Collateral      string `json:"collateral"`
+	Equity          string `json:"equity"`
+	IMR             string `json:"imr"`
+	MMR             string `json:"mmr"`
+	OpenOrderMargin string `json:"openOrderMargin"`
+	Withdrawable    string `json:"withdrawable"`
+}
+
 // MarketLeverage 一个市场上设过的杠杆倍数。
 type MarketLeverage struct {
 	Symbol   string `json:"symbol"`
 	Leverage int    `json:"leverage"`
 }
 
+// Account 账户汇总。响应缺 epoch / asOfSeq 时报错:没有它们就判断不了纪元有没有变、视图新不新。
 func (c *Client) Account(ctx context.Context, ref AccountRef) (*Account, error) {
-	var a Account
-	if err := c.get(ctx, "/v1/account", ref.values(), accountRead, &a); err != nil {
+	var raw json.RawMessage
+	if err := c.get(ctx, "/v1/account", ref.values(), accountRead, &raw); err != nil {
 		return nil, err
+	}
+	var a Account
+	if err := json.Unmarshal(raw, &a); err != nil {
+		return nil, fmt.Errorf("dexosv1: /v1/account 响应解析失败: %w", err)
+	}
+	var head struct {
+		Epoch   *string `json:"epoch"`
+		AsOfSeq *uint64 `json:"asOfSeq"`
+	}
+	if err := json.Unmarshal(raw, &head); err != nil || head.Epoch == nil || *head.Epoch == "" || head.AsOfSeq == nil {
+		return nil, fmt.Errorf("dexosv1: /v1/account 缺 epoch / asOfSeq: %s", raw)
 	}
 	return &a, nil
 }
@@ -213,4 +248,62 @@ func (c *Client) Agents(ctx context.Context, ref AccountRef) ([]Agent, error) {
 		return nil, err
 	}
 	return resp.Agents, nil
+}
+
+// AgentGrant 一把 API 钱包被授权代表的一个账户(`GET /v1/agents/{address}`)。
+// Address 是被代表账户的主钱包地址;金库授权时是 manager 的主钱包,Vault 给出金库号、Subaccount 为 nil。
+type AgentGrant struct {
+	Address    string  `json:"address"`
+	Subaccount *uint32 `json:"subaccount"`
+	Vault      *uint16 `json:"vault"`
+	Label      string  `json:"label"`
+	ValidUntil *int64  `json:"validUntil"`
+	// Expired 过期的授权也列出(需要续期,不是被撤销)。
+	Expired bool `json:"expired"`
+}
+
+// AgentGrants 按 API 钱包地址反查它被授权的账户。只凭 API 钱包私钥起步的进程用它找到要交易的账户。
+func (c *Client) AgentGrants(ctx context.Context, agent dexos.Address) ([]AgentGrant, error) {
+	var resp struct {
+		Agent  string       `json:"agent"`
+		Grants []AgentGrant `json:"grants"`
+	}
+	if err := c.get(ctx, "/v1/agents/"+url.PathEscape(agent.Hex()), nil, accountRead, &resp); err != nil {
+		return nil, err
+	}
+	if !strings.EqualFold(resp.Agent, agent.Hex()) {
+		return nil, fmt.Errorf("dexosv1: 问 %s 的授权,答的是 %q", agent.Hex(), resp.Agent)
+	}
+	return resp.Grants, nil
+}
+
+// VaultPosition 账户在一个金库里的头寸(`GET /v1/account/vaults`)。金额是 USDC 十进制字符串。
+type VaultPosition struct {
+	Vault uint16 `json:"vault"`
+	Name  string `json:"name"`
+	// Class "lp" | "manager"。
+	Class         string `json:"class"`
+	Shares        string `json:"shares"`
+	BalanceShare  string `json:"balanceShare"`
+	Equity        string `json:"equity"`
+	InitialEquity string `json:"initialEquity"`
+	AllTimePnl    string `json:"allTimePnl"`
+	LockUntilMs   int64  `json:"lockUntilMs"`
+	Locked        bool   `json:"locked"`
+	LockedShares  string `json:"lockedShares"`
+	Withdrawable  struct {
+		OK     bool    `json:"ok"`
+		Reason *string `json:"reason"`
+	} `json:"withdrawable"`
+}
+
+// MyVaults 主钱包名下在各金库的头寸。
+func (c *Client) MyVaults(ctx context.Context, owner dexos.Address) ([]VaultPosition, error) {
+	var resp struct {
+		Positions []VaultPosition `json:"positions"`
+	}
+	if err := c.get(ctx, "/v1/account/vaults", url.Values{"address": {owner.Hex()}}, accountRead, &resp); err != nil {
+		return nil, err
+	}
+	return resp.Positions, nil
 }

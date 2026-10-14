@@ -222,11 +222,13 @@ type LedgerEntry struct {
 	Symbol *string `json:"symbol"`
 }
 
-// LedgerQuery 流水查询:Kind / Token 是可选过滤,其余同 [HistoryQuery]。
+// LedgerQuery 流水查询:Kind / Token / External 是可选过滤,其余同 [HistoryQuery]。
+// Token 收符号(`USDC`)。External 只要外部资金流水(出入金、划转、金库存取),不能与 Kind 同给。
 type LedgerQuery struct {
 	HistoryQuery
-	Kind  string
-	Token string
+	Kind     string
+	Token    string
+	External bool
 }
 
 // LedgerHistory 一轮补拉的结果,语义同 [FillHistory]。
@@ -239,9 +241,15 @@ type LedgerHistory struct {
 
 // Ledger 账户资金流水(`/v1/account/ledger`),自动翻页到上界。失败时返回已取到的部分与错误。
 func (c *Client) Ledger(ctx context.Context, ref AccountRef, q LedgerQuery) (*LedgerHistory, error) {
+	if q.External && q.Kind != "" {
+		return nil, errors.New("dexosv1: 流水的 external 与 kind 不能同给")
+	}
 	params := ref.values()
 	if q.Kind != "" {
 		params.Set("kind", q.Kind)
+	}
+	if q.External {
+		params.Set("external", "true")
 	}
 	if q.Token != "" {
 		params.Set("token", q.Token)

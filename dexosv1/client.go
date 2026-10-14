@@ -18,6 +18,9 @@ import (
 type Client struct {
 	BaseURL string
 	HTTP    *http.Client
+	// AckWait 写请求等结论的预算(`?waitMs=`,上限 5s);0 = 服务端缺省(`V1_ACK_WAIT_MS`)。
+	// 预算内没等到折叠回 202,会话按结论未知锁定([ErrPending])。
+	AckWait time.Duration
 
 	// seq 这个客户端见过的最大提交位号(`x-dexos-seq`)。语义与 dexos.Client 相同:账户类读取带上
 	// `x-dexos-min-seq`,落后的只读副本以 412 明确失败,而不是悄悄返回写之前的状态。
