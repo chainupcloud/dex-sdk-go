@@ -274,6 +274,12 @@ var postFixtureSchemas = []struct {
 	{"w_schedule.json", "/v1/orders/schedule-cancel", "200"},
 	{"w_leverage.json", "/v1/account/leverage", "200"},
 	{"w_approve.json", "/v1/account/agents/approve", "200"},
+	{"w_revoke.json", "/v1/account/agents/revoke", "200"},
+	{"w_vault_create.json", "/v1/vaults", "200"},
+	{"w_vault_deposit.json", "/v1/vaults/{id}/deposit", "200"},
+	{"w_vault_redeem.json", "/v1/vaults/{id}/redeem", "200"},
+	{"w_vault_claim.json", "/v1/vaults/{id}/claim", "200"},
+	{"w_vault_config.json", "/v1/vaults/{id}/config", "200"},
 }
 
 func TestFixturesConformToPinnedSpec(t *testing.T) {

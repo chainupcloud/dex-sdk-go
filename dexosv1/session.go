@@ -17,8 +17,8 @@ import (
 //
 //   - [Session]:API 钱包(agent)代签。做市跑在这里:批量下单、撤单、原子换单、撤全部、断线保护。
 //     nonce 是 **agent 地址自己的**计数器,同一把钥匙被多个账户授权时几个账户共用它。
-//   - [Wallet]:主钱包自签。单笔下单 / 撤单、设杠杆、授权 API 钱包 —— 授权之外一般用不到,
-//     主钱包密钥不该放在跑策略的机器上。
+//   - [Wallet]:主钱包自签。单笔下单 / 撤单、设杠杆、授权与撤销 API 钱包、金库的建库 / 存入 / 赎回 / 认领 /
+//     改配置 —— 这些之外一般用不到,主钱包密钥不该放在跑策略的机器上。
 //
 // 两者都把写串行化,nonce 规则与 dexos.Session 相同(见 nonceGuard.run)。
 
@@ -622,6 +622,45 @@ func (w *Wallet) ApproveAgent(ctx context.Context, agent dexos.Address, validUnt
 		}
 		if !strings.EqualFold(wr.Agent, agent.Hex()) {
 			return id, fmt.Errorf("dexosv1: 授权 %s,回执是 %q", agent.Hex(), wr.Agent)
+		}
+		return id, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+type wireRevokeReq struct {
+	*envelope
+	Agent string `json:"agent"`
+}
+
+// RevokeAgent 撤销一把 API 钱包在本账户上的授权(主钱包签 RevokeAgent)。只撤这一对账户 / API 钱包,
+// 它在别的账户上的授权与它自己的 nonce 不变。
+func (w *Wallet) RevokeAgent(ctx context.Context, agent dexos.Address) (*Receipt, error) {
+	var out Receipt
+	err := w.guard.run(ctx, func(nonce uint64) (*RequestIdentity, error) {
+		env, id, err := w.sign(nonce, w.domain.RevokeAgentHash(w.Owner.Address(), w.signingID, agent, nonce))
+		if err != nil {
+			return id, err
+		}
+		status, raw, err := w.Client.post(ctx, "/v1/account/agents/revoke", wireRevokeReq{envelope: env, Agent: agent.Hex()})
+		if err != nil {
+			return id, err
+		}
+		if out, err = receipt(status, raw, id); err != nil {
+			return id, err
+		}
+		var wr struct {
+			Agent   string `json:"agent"`
+			Revoked bool   `json:"revoked"`
+		}
+		if err := decodeInto(raw, &wr, "撤销授权回执"); err != nil {
+			return id, err
+		}
+		if !strings.EqualFold(wr.Agent, agent.Hex()) || !wr.Revoked {
+			return id, fmt.Errorf("dexosv1: 撤销 %s 的授权,回执是 %s", agent.Hex(), raw)
 		}
 		return id, nil
 	})

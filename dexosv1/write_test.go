@@ -217,8 +217,13 @@ func gatewayRequestID(t *testing.T, cat *Catalog, path string, body any) string 
 			digest = leverageHash(testDomain, owner, signingID, market(env["symbol"]).SigningMarketID, imf, nonce)
 		case "/v1/account/agents/approve":
 			digest = testDomain.ApproveAgentHash(owner, signingID, mustAddr(t, env["agent"].(string)), optional("validUntil"), nonce)
+		case "/v1/account/agents/revoke":
+			digest = testDomain.RevokeAgentHash(owner, signingID, mustAddr(t, env["agent"].(string)), nonce)
 		default:
-			t.Fatalf("假网关不会算 %s 的主钱包请求身份", path)
+			if !strings.HasPrefix(path, "/v1/vaults") {
+				t.Fatalf("假网关不会算 %s 的主钱包请求身份", path)
+			}
+			digest = gatewayVaultDigest(t, cat, path, owner, env, nonce)
 		}
 	}
 	signer := mustAddr(t, signerHex)
@@ -715,6 +720,12 @@ func TestWriteFieldsExistInPinnedSpec(t *testing.T) {
 		{"schedule-cancel", reflect.TypeFor[wireScheduleReq](), props(requestSchema(t, spec, "/v1/orders/schedule-cancel"))},
 		{"leverage", reflect.TypeFor[wireLeverageReq](), props(requestSchema(t, spec, "/v1/account/leverage"))},
 		{"approve", reflect.TypeFor[wireApproveReq](), props(requestSchema(t, spec, "/v1/account/agents/approve"))},
+		{"revoke", reflect.TypeFor[wireRevokeReq](), props(requestSchema(t, spec, "/v1/account/agents/revoke"))},
+		{"vault create", reflect.TypeFor[wireVaultCreateReq](), props(requestSchema(t, spec, "/v1/vaults"))},
+		{"vault deposit", reflect.TypeFor[wireVaultAmountReq](), props(requestSchema(t, spec, "/v1/vaults/{id}/deposit"))},
+		{"vault claim", reflect.TypeFor[wireVaultAmountReq](), props(requestSchema(t, spec, "/v1/vaults/{id}/claim"))},
+		{"vault redeem", reflect.TypeFor[wireVaultSharesReq](), props(requestSchema(t, spec, "/v1/vaults/{id}/redeem"))},
+		{"vault config", reflect.TypeFor[wireVaultConfigReq](), props(requestSchema(t, spec, "/v1/vaults/{id}/config"))},
 	}
 	for _, c := range cases {
 		allowed := map[string]bool{}

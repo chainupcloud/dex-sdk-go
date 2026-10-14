@@ -3,8 +3,10 @@ package dexosv1
 import (
 	"context"
 	"errors"
+	"math/big"
 	"net/http"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -296,5 +298,234 @@ func TestStreamVaultSubscriptions(t *testing.T) {
 	}
 	if len(h.connErrors()) != 0 {
 		t.Fatalf("连接错误: %v", h.connErrors())
+	}
+}
+
+// gatewayVaultDigest 假网关按金库写的请求体重建待签结构体,做法同 dex-os v1_write.rs:十进制金额 / 份额按 6 位换成
+// 原子单位,比例换成 ppm,市场符号换成市场号;改配置时与 kind 无关的字段置零。
+func gatewayVaultDigest(t *testing.T, cat *Catalog, path string, owner dexos.Address, env map[string]any, nonce uint64) []byte {
+	t.Helper()
+	atoms := func(k string) *big.Int {
+		s, _ := env[k].(string)
+		if s == "" {
+			return new(big.Int)
+		}
+		v, err := ParseFixed(s, 6)
+		if err != nil {
+			t.Fatalf("%s %s %q: %v", path, k, s, err)
+		}
+		return v
+	}
+	u := func(k string) uint64 {
+		if env[k] == nil {
+			return 0
+		}
+		return num(t, env[k])
+	}
+	if path == "/v1/vaults" {
+		mv := managedVault{owner: owner, accountID: signingID, profitSharePpm: uint32(atoms("profitShare").Uint64()),
+			depositMinDurationMs: u("depositMinDurationMs"), managerMinPortionPpm: uint32(atoms("managerMinPortion").Uint64()),
+			managerLiqPortionPpm: uint32(atoms("managerLiqPortion").Uint64()), withdrawWindowS: uint32(u("withdrawWindowS")),
+			withdrawDurationS: uint32(u("withdrawDurationS")), depositCap: atoms("depositCap"), seedAmount: atoms("seedAmount"), nonce: nonce}
+		if s, ok := env["manager"].(string); ok {
+			mv.manager = mustAddr(t, s)
+		}
+		for _, a := range asSlice(env["depositorWhitelist"]) {
+			mv.depositorWhitelist = append(mv.depositorWhitelist, mustAddr(t, a.(string)))
+		}
+		return createManagedVaultHash(testDomain, mv)
+	}
+	id, action, _ := strings.Cut(strings.TrimPrefix(path, "/v1/vaults/"), "/")
+	n, err := strconv.ParseUint(id, 10, 16)
+	if err != nil {
+		t.Fatalf("金库写的路径 %s", path)
+	}
+	vault := uint16(n)
+	switch action {
+	case "deposit":
+		return vaultAmountHash(testDomain, vaultDepositType, owner, vault, signingID, atoms("amount"), nonce)
+	case "redeem":
+		return vaultAmountHash(testDomain, vaultRedeemType, owner, vault, signingID, atoms("shares"), nonce)
+	case "claim":
+		return vaultAmountHash(testDomain, claimVaultManagerType, owner, vault, signingID, atoms("amount"), nonce)
+	case "config":
+		kind := vaultConfigKinds[env["kind"].(string)]
+		var ids []uint16
+		for _, s := range asSlice(env["markets"]) {
+			mk, err := cat.Market(s.(string))
+			if err != nil {
+				t.Fatal(err)
+			}
+			ids = append(ids, mk.SigningMarketID)
+		}
+		limit, lev, markets := new(big.Int), uint32(0), make([]byte, 32)
+		if kind == 0 {
+			limit = atoms("cap")
+		}
+		if kind == 6 {
+			lev = uint32(u("maxLeverage"))
+		}
+		if kind != 0 && kind != 3 {
+			markets = marketsHash(ids)
+		}
+		return vaultConfigChangeHash(testDomain, owner, vault, signingID, kind, limit, lev, markets, nonce)
+	}
+	t.Fatalf("假网关不会算 %s 的请求身份", path)
+	return nil
+}
+
+// 主钱包的金库写与撤销授权:签 dex-os 的具名结构体,假网关按请求体重建验签;请求体符合钉住的规格,回执的金库号 /
+// API 钱包要对得上;本地能判的错不发请求、不动 nonce。
+func TestWalletVaultWrites(t *testing.T) {
+	ctx := context.Background()
+	f, c := newWriteFake(t)
+	cat, err := c.Catalog(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	btc, _ := cat.Market("BTC-USD")
+	eth, _ := cat.Market("ETH-USD")
+	w, err := NewWallet(ctx, c, signer(t, ownerKey), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner, other, agent := mustAddr(t, ownerAddr), mustAddr(t, testAddr), mustAddr(t, agentAddr)
+	// sent 最近一个写请求:符合规格、签名能按请求体恢复出主钱包
+	sent := func(path, specPath string) map[string]any {
+		t.Helper()
+		req := f.last(t)
+		if req.path != path {
+			t.Fatalf("应写 %s,写的是 %s", path, req.path)
+		}
+		body := m(req.body)
+		conformsRequest(t, specPath, body)
+		var digest []byte
+		if path == "/v1/account/agents/revoke" {
+			digest = testDomain.RevokeAgentHash(owner, signingID, mustAddr(t, body["agent"].(string)), num(t, body["nonce"]))
+		} else {
+			digest = gatewayVaultDigest(t, cat, path, owner, body, num(t, body["nonce"]))
+		}
+		if body["account"] != ownerAddr || num(t, body["subaccount"]) != 0 || body["signer"] != nil || body["vault"] != nil ||
+			recoverAddr(t, digest, body["signature"].(string)) != ownerAddr {
+			t.Fatalf("%s 的信封 / 签名: %v", path, body)
+		}
+		return body
+	}
+
+	f.answer(t, "/v1/vaults", 200, "w_vault_create.json")
+	created, err := w.CreateVault(ctx, VaultCreate{Name: "sdk-vault", Description: "d", Manager: &owner, ProfitSharePpm: 200000,
+		DepositMinDurationMs: 86400000, ManagerMinPortionPpm: 100000, ManagerLiqPortionPpm: 50000, WithdrawWindowS: 604800,
+		WithdrawDurationS: 86400, DepositCap: "1000", SeedAmount: "200.5", DepositorWhitelist: []dexos.Address{other, owner, other}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := sent("/v1/vaults", "/v1/vaults")
+	if created.Vault != 5 || created.Request.Scope != "account:7" || body["profitShare"] != "0.2" || body["managerMinPortion"] != "0.1" ||
+		body["managerLiqPortion"] != "0.05" || body["depositCap"] != "1000" || body["seedAmount"] != "200.5" || body["manager"] != ownerAddr ||
+		len(asSlice(body["depositorWhitelist"])) != 3 {
+		t.Fatalf("建库: %+v / %v", created, body)
+	}
+	// 待认领、什么都不设:可选字段不上线,签名里是 0 / 零地址 / 全零摘要
+	if _, err := w.CreateVault(ctx, VaultCreate{Name: "fresh", SeedAmount: "0"}); err != nil {
+		t.Fatal(err)
+	}
+	body = sent("/v1/vaults", "/v1/vaults")
+	for _, k := range []string{"manager", "profitShare", "depositCap", "seedAmount", "depositorWhitelist", "withdrawWindowS"} {
+		if _, ok := body[k]; ok {
+			t.Fatalf("没设的 %s 不该上线: %v", k, body)
+		}
+	}
+
+	f.answer(t, "/v1/vaults/3/deposit", 200, "w_vault_deposit.json")
+	if _, err := w.DepositToVault(ctx, 3, "100.50"); err != nil {
+		t.Fatal(err)
+	}
+	if body = sent("/v1/vaults/3/deposit", "/v1/vaults/{id}/deposit"); body["amount"] != "100.5" {
+		t.Fatalf("存入: %v", body)
+	}
+	f.answer(t, "/v1/vaults/3/redeem", 200, "w_vault_redeem.json")
+	if _, err := w.RedeemFromVault(ctx, 3, "123456789"); err != nil {
+		t.Fatal(err)
+	}
+	if body = sent("/v1/vaults/3/redeem", "/v1/vaults/{id}/redeem"); body["shares"] != "123.456789" {
+		t.Fatalf("赎回的份额按 6 位小数上线: %v", body)
+	}
+	f.answer(t, "/v1/vaults/4/claim", 200, "w_vault_claim.json")
+	if _, err := w.ClaimVault(ctx, 4, "50"); err != nil {
+		t.Fatal(err)
+	}
+	sent("/v1/vaults/4/claim", "/v1/vaults/{id}/claim")
+
+	f.answer(t, "/v1/vaults/3/config", 200, "w_vault_config.json")
+	for _, cc := range []VaultConfigChange{
+		{Kind: VaultConfigAddBlacklist, Markets: []*Market{eth, btc}},
+		{Kind: VaultConfigDepositCap, Cap: "500"},
+		{Kind: VaultConfigDepositCap},
+		{Kind: VaultConfigSetMaxLeverage, Markets: []*Market{btc}, MaxLeverage: 5},
+		{Kind: VaultConfigClearWhitelist},
+	} {
+		if _, err := w.ChangeVaultConfig(ctx, 3, cc); err != nil {
+			t.Fatalf("%+v: %v", cc, err)
+		}
+		body = sent("/v1/vaults/3/config", "/v1/vaults/{id}/config")
+		if body["kind"] != cc.Kind || len(asSlice(body["markets"])) != len(cc.Markets) {
+			t.Fatalf("改配置 %+v: %v", cc, body)
+		}
+	}
+
+	f.answer(t, "/v1/account/agents/revoke", 200, "w_revoke.json")
+	if _, err := w.RevokeAgent(ctx, agent); err != nil {
+		t.Fatal(err)
+	}
+	if body = sent("/v1/account/agents/revoke", "/v1/account/agents/revoke"); body["agent"] != agentAddr {
+		t.Fatalf("撤销授权: %v", body)
+	}
+	if w.Nonce() != 2+11 {
+		t.Fatalf("十一次成功写之后 nonce 应为 13,得到 %d", w.Nonce())
+	}
+
+	// 本地能判的错:不发请求、不动 nonce
+	before := f.count()
+	for name, call := range map[string]func() error{
+		"没名字": func() error { _, err := w.CreateVault(ctx, VaultCreate{Name: " "}); return err },
+		"种子没对齐": func() error {
+			_, err := w.CreateVault(ctx, VaultCreate{Name: "x", SeedAmount: "1.0000001"})
+			return err
+		},
+		"存入 0":    func() error { _, err := w.DepositToVault(ctx, 3, "0"); return err },
+		"存入负数":    func() error { _, err := w.DepositToVault(ctx, 3, "-1"); return err },
+		"认领不是十进制": func() error { _, err := w.ClaimVault(ctx, 4, "1e3"); return err },
+		"份额带小数":   func() error { _, err := w.RedeemFromVault(ctx, 3, "1.5"); return err },
+		"份额 0":    func() error { _, err := w.RedeemFromVault(ctx, 3, "0"); return err },
+		"未知种类":    func() error { _, err := w.ChangeVaultConfig(ctx, 3, VaultConfigChange{Kind: "nope"}); return err },
+		"清白名单带市场": func() error {
+			_, err := w.ChangeVaultConfig(ctx, 3, VaultConfigChange{Kind: VaultConfigClearWhitelist, Markets: []*Market{btc}})
+			return err
+		},
+		"加黑名单带上限": func() error {
+			_, err := w.ChangeVaultConfig(ctx, 3, VaultConfigChange{Kind: VaultConfigAddBlacklist, Markets: []*Market{btc}, Cap: "1"})
+			return err
+		},
+		"上限带杠杆": func() error {
+			_, err := w.ChangeVaultConfig(ctx, 3, VaultConfigChange{Kind: VaultConfigDepositCap, MaxLeverage: 3})
+			return err
+		},
+		"市场为空": func() error {
+			_, err := w.ChangeVaultConfig(ctx, 3, VaultConfigChange{Kind: VaultConfigAddWhitelist, Markets: []*Market{nil}})
+			return err
+		},
+	} {
+		if err := call(); err == nil {
+			t.Errorf("%s 应本地报错", name)
+		}
+	}
+	if f.count() != before || w.Nonce() != 13 {
+		t.Fatalf("本地报错不该发请求、动 nonce: 请求 %d → %d,nonce %d", before, f.count(), w.Nonce())
+	}
+
+	// 回执的金库号对不上:写已执行但说不清是哪个金库,按结论未知锁住
+	f.answer(t, "/v1/vaults/9/deposit", 200, "w_vault_deposit.json")
+	if _, err := w.DepositToVault(ctx, 9, "1"); !errors.Is(err, ErrSessionBlocked) || w.Pending() == nil {
+		t.Fatalf("回执金库号对不上应锁住: %v", err)
 	}
 }
