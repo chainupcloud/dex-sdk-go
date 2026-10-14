@@ -42,23 +42,15 @@ func TestVaultDetailAndList(t *testing.T) {
 		t.Fatalf("待认领的金库: %+v", fresh)
 	}
 
-	// 问 4 答 3、manager 与它的子账户序号只给一个、市场没有符号:都不猜
+	// 问 4 答 3、manager 与它的子账户序号只给一个:都不猜
 	f.routes["/v1/vaults/4"] = serve(t, 200, "vault.json")
 	if _, err := c.Vault(ctx, 4); err == nil {
 		t.Fatal("问 4 答 3 要报错")
 	}
-	for name, edit := range map[string][2]string{
-		"manager 缺子账户": {`"managerSubaccount":2`, `"managerSubaccount":null`},
-		"市场没有符号":       {`{"market":1,"symbol":"ETH-USD"}]`, `{"market":1,"symbol":null}]`},
-	} {
-		body := strings.Replace(string(fixture(t, "vault.json")), edit[0], edit[1], 1)
-		if body == string(fixture(t, "vault.json")) {
-			t.Fatalf("%s: fixture 里没有 %s", name, edit[0])
-		}
-		f.routes["/v1/vaults/3"] = func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(body)) }
-		if _, err := c.Vault(ctx, 3); err == nil {
-			t.Errorf("%s 要报错", name)
-		}
+	body := strings.Replace(string(fixture(t, "vault.json")), `"managerSubaccount":2`, `"managerSubaccount":null`, 1)
+	f.routes["/v1/vaults/3"] = func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(body)) }
+	if _, err := c.Vault(ctx, 3); err == nil {
+		t.Error("manager 缺子账户要报错")
 	}
 }
 
@@ -234,10 +226,10 @@ func TestVaultSessionRejections(t *testing.T) {
 }
 
 // 按金库订阅私有频道:订阅参数只有 vault;帧按 vault 路由,与同一连接上按地址的订阅互不串;
-// 流水补拉按 vault 读,WS 帧里的 vault_* 条目带上金库号。
+// 流水补拉按 vault 读,WS 帧的条目与 REST 相同(vault_* 条目带金库号)。
 func TestStreamVaultSubscriptions(t *testing.T) {
 	h := newWSHarness(t, nil)
-	fh := h.history(700, 701)
+	fh := h.history(701)
 	fh.add("/v1/account/ledger", ledgerRow("700-0-0"))
 	vault := VaultAccount(3)
 	if _, err := h.st.SubscribeOrders(AccountRef{Vault: vault.Vault, Subaccount: 1}, func(OrdersUpdate) {}); err == nil {
@@ -257,7 +249,7 @@ func TestStreamVaultSubscriptions(t *testing.T) {
 		if q.Params["vault"] != nil {
 			vaultReqs = append(vaultReqs, q)
 		}
-		conn.ack(t, q, testEpoch)
+		conn.ack(t, q, testEpoch, 700)
 	}
 	for _, q := range vaultReqs {
 		if len(q.Params) != 2 || q.Params["vault"] != float64(3) {
@@ -292,11 +284,10 @@ func TestStreamVaultSubscriptions(t *testing.T) {
 	}
 	quiet(t, walletOrders, 30*time.Millisecond)
 
-	frame := func(id, kind string) map[string]any {
-		return map[string]any{"vault": 3, "id": id, "kind": kind, "token": "USDC", "amount": "50", "symbol": nil, "orderId": nil, "ts": 1}
-	}
-	conn.push(t, "ledger", frame("701-0-0", "vault_deposit"), 701, testEpoch, false)
-	conn.push(t, "ledger", frame("701-0-1", "trade"), 701, testEpoch, false)
+	// 一条命令一帧:身份是 vault,条目与 REST 相同 —— vault_* 条目带 vault,其余不带
+	deposit, trade := ledgerRow("701-0-0"), ledgerRow("701-0-1")
+	deposit["kind"], deposit["vault"] = "vault_deposit", 3
+	conn.push(t, "ledger", map[string]any{"vault": 3, "entries": []any{deposit, trade}}, 701, testEpoch, false)
 	if e := recv(t, entries); e.ID != "701-0-0" || e.Vault == nil || *e.Vault != 3 {
 		t.Fatalf("金库 vault_* 流水帧: %+v", e)
 	}

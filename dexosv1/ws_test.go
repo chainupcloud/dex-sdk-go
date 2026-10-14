@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"reflect"
 	"sort"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -140,9 +141,10 @@ func (c *fakeConn) send(t *testing.T, v any) {
 	}
 }
 
-func (c *fakeConn) ack(t *testing.T, q wsReq, epoch string) {
+// ack 确认订阅;seq 是起点:位号大于它的事件都会在这个订阅上推。
+func (c *fakeConn) ack(t *testing.T, q wsReq, epoch string, seq uint64) {
 	t.Helper()
-	c.send(t, map[string]any{"channel": "subscribed", "data": q.Params, "epoch": epoch, "id": q.ID})
+	c.send(t, map[string]any{"channel": "subscribed", "data": q.Params, "epoch": epoch, "seq": seq, "id": q.ID})
 }
 
 // push 一帧数据。epoch 空 = 公共频道(不带纪元)。
@@ -219,7 +221,6 @@ func newWSHarness(t *testing.T, tune func(*StreamOptions)) *wsHarness {
 		ReadTimeout:  time.Hour,
 		ReconnectMin: 10 * time.Millisecond,
 		ReconnectMax: 40 * time.Millisecond,
-		SettleDelay:  time.Hour,
 		CatchUpWait:  3 * time.Second,
 		OnState: func(e StateEvent) {
 			h.mu.Lock()
@@ -325,26 +326,17 @@ func quiet[T any](t *testing.T, ch <-chan T, d time.Duration) {
 type fakeHistory struct {
 	mu       sync.Mutex
 	epoch    string
-	asOf     uint64 // 账户视图位号
-	complete uint64 // 执行历史已完整到的日志位号;上界超过它答 400 not yet complete
+	complete uint64 // 执行历史已完整到的日志位号;上界超过它答 400 GatewayHistoryIncomplete
 	rows     map[string][]map[string]any
 	queries  map[string][]url.Values
 }
 
-// history 装上 /v1/account 与成交 / 流水两个补拉接口。
-func (h *wsHarness) history(asOf, complete uint64) *fakeHistory {
-	fh := &fakeHistory{epoch: testEpoch, asOf: asOf, complete: complete,
+// history 装上成交 / 流水两个补拉接口。
+func (h *wsHarness) history(complete uint64) *fakeHistory {
+	fh := &fakeHistory{epoch: testEpoch, complete: complete,
 		rows: map[string][]map[string]any{}, queries: map[string][]url.Values{}}
-	account := jsonObj(h.t, fixture(h.t, "account.json"), nil)
 	h.f.mu.Lock()
 	defer h.f.mu.Unlock()
-	h.f.routes["/v1/account"] = func(w http.ResponseWriter, _ *http.Request) {
-		fh.mu.Lock()
-		body := private(account)
-		body["epoch"], body["asOfSeq"] = fh.epoch, fh.asOf
-		fh.mu.Unlock()
-		writeJSON(w, 200, body)
-	}
 	h.f.routes["/v1/account/fills"] = fh.handler(h.t, "/v1/account/fills", "fills")
 	h.f.routes["/v1/account/ledger"] = fh.handler(h.t, "/v1/account/ledger", "entries")
 	return fh
@@ -393,8 +385,8 @@ func (fh *fakeHistory) handler(t *testing.T, path, field string) http.HandlerFun
 			return
 		}
 		if upper.seq > fh.complete {
-			writeJSON(w, 400, map[string]any{"error": map[string]any{"code": "GatewayBadRequest",
-				"message": fmt.Sprintf("upper %d not yet complete (complete through %d)", upper.seq, fh.complete), "num": 10400}})
+			writeJSON(w, 400, map[string]any{"error": map[string]any{"code": "GatewayHistoryIncomplete",
+				"message": fmt.Sprintf("history: requested upper %d is not yet complete (complete through %d)", upper.seq, fh.complete), "num": 10400}})
 			return
 		}
 		out := []map[string]any{}
@@ -419,6 +411,11 @@ func ledgerRow(id string) map[string]any {
 	p, _ := parseCursor(id)
 	return map[string]any{"id": id, "seq": p.seq, "sub": p.sub, "idx": p.idx, "kind": "trade", "token": "USDC",
 		"amount": "-1.5", "symbol": "ETH-USD", "order": 7}
+}
+
+// ledgerFrame ledger 帧的 data:身份 + entries[](一条命令一帧,条目与 REST 相同)。
+func ledgerFrame(entries ...map[string]any) map[string]any {
+	return map[string]any{"address": testAddr, "subaccount": 0, "entries": entries}
 }
 
 // private 私有帧的 data:REST 的行加上地址与子账户序号。
@@ -474,7 +471,7 @@ func TestStreamSnapshotChannels(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := h.st.SubscribeBook("ETH-USD", 0, func(*Book) {}); err == nil {
-		t.Fatal("同一市场的第二个盘口订阅要拒绝(帧里分不出是哪个)")
+		t.Fatal("同一市场的第二个盘口订阅要拒绝(帧按符号路由)")
 	}
 	if _, err := h.st.SubscribeBook("BTC-USD", 101, func(*Book) {}); err == nil {
 		t.Fatal("档数超过 100 要拒绝")
@@ -497,7 +494,7 @@ func TestStreamSnapshotChannels(t *testing.T) {
 		t.Fatalf("account 订阅参数 %v", reqs["account"].Params)
 	}
 	for _, q := range reqs {
-		conn.ack(t, q, testEpoch)
+		conn.ack(t, q, testEpoch, 231461887)
 	}
 	// 确认之后、快照之前不算就绪
 	conn.silent(t, 30*time.Millisecond)
@@ -505,7 +502,7 @@ func TestStreamSnapshotChannels(t *testing.T) {
 		t.Fatalf("快照之前就就绪了: book %s account %s", bs.State(), as.State())
 	}
 
-	conn.push(t, "book", jsonObj(t, fixture(t, "book.json"), nil), 231461888, "", true)
+	conn.push(t, "book", jsonObj(t, fixture(t, "book.json"), map[string]any{"depth": 5}), 231461888, "", true)
 	conn.push(t, "bbo", map[string]any{"symbol": "ETH-USD", "bid": []string{"2492.6", "3"}, "ask": nil, "ts": 1}, 231461888, "", true)
 	conn.push(t, "prices", jsonObj(t, fixture(t, "prices.json"), nil), 231461888, "", true)
 	conn.push(t, "account", jsonObj(t, fixture(t, "account.json"), nil), 231461888, testEpoch, true)
@@ -513,7 +510,7 @@ func TestStreamSnapshotChannels(t *testing.T) {
 	for _, s := range []*Subscription{bs, bb, ps, as, pos} {
 		h.waitState(s, StateLive)
 	}
-	if b := recv(t, books); b.Symbol != "ETH-USD" || b.Bids[0] != (Level{Price: 24926, Lots: 300}) || b.Asks[1] != (Level{Price: 24936, Lots: 2}) {
+	if b := recv(t, books); b.Symbol != "ETH-USD" || b.Depth != 5 || b.Bids[0] != (Level{Price: 24926, Lots: 300}) || b.Asks[1] != (Level{Price: 24936, Lots: 2}) {
 		t.Fatalf("盘口换算不对: %+v", b)
 	}
 	if b := recv(t, bbos); b.Bid == nil || *b.Bid != (Level{Price: 24926, Lots: 300}) || b.Ask != nil {
@@ -530,13 +527,13 @@ func TestStreamSnapshotChannels(t *testing.T) {
 	}
 
 	// 块边界的整帧(非快照标记)照常回调
-	conn.push(t, "book", map[string]any{"symbol": "ETH-USD", "bids": [][]string{{"2492.7", "1"}}, "asks": [][]string{}, "seq": 231461890, "ts": 2},
+	conn.push(t, "book", map[string]any{"symbol": "ETH-USD", "depth": 5, "bids": [][]string{{"2492.7", "1"}}, "asks": [][]string{}, "seq": 231461890, "ts": 2},
 		231461890, "", false)
 	if b := recv(t, books); b.Bids[0] != (Level{Price: 24927, Lots: 100}) || len(b.Asks) != 0 || b.Seq != 231461890 {
 		t.Fatalf("增量整帧不对: %+v", b)
 	}
 	// 价格不在刻度上:只这个订阅置 Syncing 报出原因,稍后退订重订;别的订阅不受影响
-	conn.push(t, "book", map[string]any{"symbol": "ETH-USD", "bids": [][]string{{"2492.75", "1"}}, "asks": [][]string{}, "seq": 231461891, "ts": 3},
+	conn.push(t, "book", map[string]any{"symbol": "ETH-USD", "depth": 5, "bids": [][]string{{"2492.75", "1"}}, "asks": [][]string{}, "seq": 231461891, "ts": 3},
 		231461891, "", false)
 	if e := h.waitState(bs, StateSyncing); e.Err == nil || errors.Is(e.Err, ErrConnLost) {
 		t.Fatalf("坏帧原因 %v", e.Err)
@@ -560,7 +557,7 @@ func orderFrame(fields map[string]any) map[string]any {
 	return out
 }
 
-// orders 状态机:快照整体替换;status 为 open 即在挂、否则移除;null 不改成员;对不上就重订换快照。
+// orders 状态机:快照整体替换;status 为 open 即在挂、否则移除;对不上就重订换快照。
 func TestStreamOrdersStateMachine(t *testing.T) {
 	h := newWSHarness(t, nil)
 	ups := make(chan OrdersUpdate, 16)
@@ -568,7 +565,7 @@ func TestStreamOrdersStateMachine(t *testing.T) {
 	h.run()
 	conn := h.fw.accept(t)
 	q := conn.subscribes(t, 1)["orders"]
-	conn.ack(t, q, testEpoch)
+	conn.ack(t, q, testEpoch, 9)
 
 	// 快照之前的增量不应用(快照会包含它)
 	conn.push(t, "orders", orderFrame(map[string]any{"orderId": "5", "event": "canceled", "status": "canceled", "remaining": "0"}), 10, testEpoch, false)
@@ -602,11 +599,11 @@ func TestStreamOrdersStateMachine(t *testing.T) {
 	if o := open(u)[2240412712968]; o.RemainingLots != 30 || o.FilledLots != 20 || u.Event.FillID != "13-0-1" || *u.Event.LastFilledLots != 10 {
 		t.Fatalf("maker 成交不对: %+v / %+v", o, u.Event)
 	}
-	// 吃单成交帧先于它的下单结论(status null):集合不变
-	conn.push(t, "orders", orderFrame(map[string]any{"orderId": "2240412712971", "event": "fill", "fillId": "14-0-0",
-		"lastFilled": "0.1", "remaining": nil, "status": nil}), 14, testEpoch, false)
-	if u = recv(t, ups); len(u.Open) != 3 || u.Event.Status != nil || u.Event.RemainingLots != nil {
-		t.Fatalf("status null 不该改集合: %+v", u)
+	// 协议代下的单(强平 / 金库熔断扫簿)成交:orderId 0、filled、余量 0,集合不变
+	conn.push(t, "orders", orderFrame(map[string]any{"orderId": "0", "event": "fill", "fillId": "14-0-0",
+		"lastFilled": "0.1", "remaining": "0", "status": "filled"}), 14, testEpoch, false)
+	if u = recv(t, ups); len(u.Open) != 3 || u.Event.OrderID != 0 || u.Event.Status != "filled" || u.Event.RemainingLots != 0 {
+		t.Fatalf("协议代下单的成交不该改集合: %+v", u)
 	}
 	// 没挂上的下单结论(吃满):不进集合
 	conn.push(t, "orders", orderFrame(map[string]any{"orderId": "2240412712971", "event": "accepted", "status": "filled",
@@ -633,7 +630,7 @@ func TestStreamOrdersStateMachine(t *testing.T) {
 	if q.Method != "subscribe" || q.Params["channel"] != "orders" {
 		t.Fatalf("要重订: %+v", q)
 	}
-	conn.ack(t, q, testEpoch)
+	conn.ack(t, q, testEpoch, 16)
 	// 新快照之前的增量不应用
 	conn.push(t, "orders", orderFrame(map[string]any{"orderId": "2240412712968", "event": "canceled", "status": "canceled", "remaining": "0.3"}),
 		17, testEpoch, false)
@@ -645,10 +642,10 @@ func TestStreamOrdersStateMachine(t *testing.T) {
 	quiet(t, ups, 30*time.Millisecond)
 }
 
-// fills 补拉:订阅后先补到账户视图;订阅前后没推的那段在第一帧到达时补齐(历史没写到就等);之后的帧直接交付;不缺不重。
-func TestStreamFillsBackfillGapAndDedup(t *testing.T) {
+// fills 补拉:确认帧之后补拉到它给的起点(历史没写到就等,期间到的帧先缓存);接上之后的帧直接交付;不缺不重。
+func TestStreamFillsBackfillAndDedup(t *testing.T) {
 	h := newWSHarness(t, nil)
-	fh := h.history(102, 102)
+	fh := h.history(102)
 	fh.add("/v1/account/fills", fillRow("100-0-0"), fillRow("101-0-0"), fillRow("102-0-1"), fillRow("103-0-0"),
 		fillRow("104-0-0"), fillRow("104-0-2"))
 	fills := make(chan Fill, 32)
@@ -665,21 +662,19 @@ func TestStreamFillsBackfillGapAndDedup(t *testing.T) {
 	if q.Params["address"] != testAddr || q.Params["subaccount"] != float64(0) {
 		t.Fatalf("fills 订阅参数 %v", q.Params)
 	}
-	conn.ack(t, q, testEpoch)
-
-	// 补到视图(102)
-	if got := ids(t, fills, 2, fillID); !reflect.DeepEqual(got, []string{"101-0-0", "102-0-1"}) {
-		t.Fatalf("补到视图: %v", got)
+	// 起点 103,执行历史只写到 102:补拉先等;起点之后的帧先缓存,不交付
+	conn.ack(t, q, testEpoch, 103)
+	conn.push(t, "fills", private(fillRow("104-0-0")), 104, testEpoch, false)
+	quiet(t, fills, 150*time.Millisecond)
+	if sub.State() != StateSyncing {
+		t.Fatalf("补齐之前不该就绪: %s", sub.State())
+	}
+	fh.set(func(fh *fakeHistory) { fh.complete = 104 })
+	if got := ids(t, fills, 4, fillID); !reflect.DeepEqual(got, []string{"101-0-0", "102-0-1", "103-0-0", "104-0-0"}) {
+		t.Fatalf("补到起点再放行缓存: %v", got)
 	}
 	h.waitState(sub, StateLive)
 
-	// 103 发生在订阅前后、没有推;第一帧是 104-0-0,执行历史还没写到 104:先等,不交付
-	conn.push(t, "fills", private(fillRow("104-0-0")), 104, testEpoch, false)
-	quiet(t, fills, 150*time.Millisecond)
-	fh.set(func(fh *fakeHistory) { fh.complete = 104 })
-	if got := ids(t, fills, 2, fillID); !reflect.DeepEqual(got, []string{"103-0-0", "104-0-0"}) {
-		t.Fatalf("补齐缺口: %v", got)
-	}
 	// 接上之后:重复帧丢掉,新帧直接交付
 	conn.push(t, "fills", private(fillRow("104-0-0")), 104, testEpoch, false)
 	conn.push(t, "fills", private(fillRow("104-0-2")), 104, testEpoch, false)
@@ -695,67 +690,73 @@ func TestStreamFillsBackfillGapAndDedup(t *testing.T) {
 	if got := h.trail(sub); !reflect.DeepEqual(got, []State{StateLive}) {
 		t.Fatalf("状态轨迹 %v", got)
 	}
-	asked := fh.asked("/v1/account/fills")
-	if first := asked[0]; first.Get("after") != "100-0-0" || first.Get("upper") != "102-65535-4294967295" || first.Get("epoch") != testEpoch {
-		t.Fatalf("第一次补拉 %v", first)
-	}
-	if last := asked[len(asked)-1]; last.Get("after") != "102-0-1" || last.Get("upper") != "104-0-0" {
-		t.Fatalf("补缺口 %v", last)
+	for _, q := range fh.asked("/v1/account/fills") {
+		if q.Get("after") != "100-0-0" || q.Get("upper") != "103-65535-4294967295" || q.Get("epoch") != testEpoch {
+			t.Fatalf("补拉要从游标到确认帧的起点: %v", q)
+		}
 	}
 }
 
-// 流水订阅建立后迟迟没有帧:SettleDelay 后再按视图补一次,不必等下一帧。
-func TestStreamFillsSettlePass(t *testing.T) {
-	h := newWSHarness(t, func(o *StreamOptions) { o.SettleDelay = 300 * time.Millisecond })
-	fh := h.history(500, 501)
-	fh.add("/v1/account/fills", fillRow("501-0-0"))
+// 连接上先来过 lagged、之后才确认的流水订阅:服务端不再推不超过 lagged 上界的帧,补拉要补到那个上界。
+func TestStreamFillsJoinAfterEarlierLagged(t *testing.T) {
+	h := newWSHarness(t, nil)
+	fh := h.history(210)
+	fh.add("/v1/account/fills", fillRow("201-0-0"), fillRow("203-0-0"), fillRow("205-0-1"))
 	fills := make(chan Fill, 8)
-	sub, _ := h.st.SubscribeFills(h.ref, HistoryCursor{After: "500-65535-4294967295", Epoch: testEpoch}, func(f Fill) { fills <- f })
+	sub, _ := h.st.SubscribeFills(h.ref, HistoryCursor{After: "200-65535-4294967295", Epoch: testEpoch}, func(f Fill) { fills <- f })
 	h.run()
 	conn := h.fw.accept(t)
-	conn.ack(t, conn.subscribes(t, 1)["fills"], testEpoch)
+	q := conn.subscribes(t, 1)["fills"]
+	conn.send(t, map[string]any{"channel": "lagged", "data": map[string]any{"dropped": 3, "epoch": testEpoch,
+		"upper": "205-0-4294967295", "reason": "buffer"}})
+	conn.ack(t, q, testEpoch, 202)
+	if got := ids(t, fills, 3, fillID); !reflect.DeepEqual(got, []string{"201-0-0", "203-0-0", "205-0-1"}) {
+		t.Fatalf("要补到 lagged 上界: %v", got)
+	}
 	h.waitState(sub, StateLive)
-	// 501 在订阅那一刻前后发生,当时还没进视图
-	fh.set(func(fh *fakeHistory) { fh.asOf = 501 })
-	if f := recv(t, fills); f.ID != "501-0-0" || f.Price != 24926 || f.Lots != 10 || *f.OrderID != 7 {
-		t.Fatalf("settle 补拉 %+v", f)
+	conn.push(t, "fills", private(fillRow("206-0-0")), 206, testEpoch, false)
+	if f := recv(t, fills); f.ID != "206-0-0" || f.Price != 24926 || f.Lots != 10 || *f.OrderID != 7 {
+		t.Fatalf("接上之后的帧 %+v", f)
+	}
+	if q := fh.asked("/v1/account/fills"); len(q) != 1 || q[0].Get("upper") != "205-0-4294967295" {
+		t.Fatalf("补拉上界: %v", q)
 	}
 }
 
-// ledger:补拉与 WS 帧拼接;WS 帧的 seq / sub / idx 从 id 解出。
+// ledger:一条命令一帧,条目在 entries[] 里、与 REST 逐字段相同;补拉与 WS 帧拼接;没有 entries 的帧不猜。
 func TestStreamLedger(t *testing.T) {
 	h := newWSHarness(t, nil)
-	fh := h.history(601, 602)
-	fh.add("/v1/account/ledger", ledgerRow("600-0-0"), ledgerRow("601-0-1"), ledgerRow("602-0-3"))
+	fh := h.history(602)
+	fh.add("/v1/account/ledger", ledgerRow("600-0-0"), ledgerRow("601-0-1"))
 	entries := make(chan LedgerEntry, 8)
 	sub, _ := h.st.SubscribeLedger(h.ref, HistoryCursor{After: "600-0-0", Epoch: testEpoch}, func(e LedgerEntry) { entries <- e })
 	h.run()
 	conn := h.fw.accept(t)
-	conn.ack(t, conn.subscribes(t, 1)["ledger"], testEpoch)
+	conn.ack(t, conn.subscribes(t, 1)["ledger"], testEpoch, 601)
 	if e := recv(t, entries); e.ID != "601-0-1" {
 		t.Fatalf("补拉 %+v", e)
 	}
 	h.waitState(sub, StateLive)
-	frame := func(id string) map[string]any {
-		return map[string]any{"id": id, "address": testAddr, "subaccount": 0, "kind": "trade", "token": "USDC", "amount": "-1.5",
-			"symbol": "ETH-USD", "orderId": "7", "ts": 1}
+	conn.push(t, "ledger", ledgerFrame(ledgerRow("602-0-3")), 602, testEpoch, false)
+	conn.push(t, "ledger", ledgerFrame(ledgerRow("603-1-2"), ledgerRow("603-1-5")), 603, testEpoch, false)
+	if got := ids(t, entries, 3, func(e LedgerEntry) string { return e.ID }); !reflect.DeepEqual(got, []string{"602-0-3", "603-1-2", "603-1-5"}) {
+		t.Fatalf("WS 流水 %v", got)
 	}
-	conn.push(t, "ledger", frame("602-0-3"), 602, testEpoch, false)
-	conn.push(t, "ledger", frame("603-1-2"), 603, testEpoch, false)
-	if e := recv(t, entries); e.ID != "602-0-3" {
-		t.Fatalf("缺口补拉 %+v", e)
+	if c := sub.Cursor(); c.After != "603-1-5" {
+		t.Fatalf("游标是帧里最后一条: %+v", c)
 	}
-	e := recv(t, entries)
-	if e.ID != "603-1-2" || e.Seq != 603 || e.Sub != 1 || e.Idx != 2 || e.Kind != "trade" || e.Amount != "-1.5" || *e.Symbol != "ETH-USD" {
-		t.Fatalf("WS 流水 %+v", e)
+	// 旧形状(条目平铺在 data 里)解不出 entries:报出原因,不当作空帧吞掉
+	conn.push(t, "ledger", private(ledgerRow("604-0-0")), 604, testEpoch, false)
+	if e := h.waitState(sub, StateSyncing); e.Err == nil || !strings.Contains(e.Err.Error(), "entries") {
+		t.Fatalf("没有 entries 的帧: %v", e.Err)
 	}
 	quiet(t, entries, 30*time.Millisecond)
 }
 
-// lagged:流水按上界补拉(期间到的帧先缓存),快照类等重发的快照,公共成交报缺口。
+// lagged:流水按上界补拉(期间到的帧先缓存),快照类等重发的快照;buffer 时公共成交报缺口,render 时事件没丢、不报。
 func TestStreamLagged(t *testing.T) {
 	h := newWSHarness(t, nil)
-	fh := h.history(200, 201)
+	fh := h.history(201)
 	fh.add("/v1/account/fills", fillRow("201-0-0"), fillRow("201-0-1"), fillRow("202-0-0"))
 	fills := make(chan Fill, 16)
 	books := make(chan *Book, 8)
@@ -770,7 +771,7 @@ func TestStreamLagged(t *testing.T) {
 		t.Fatalf("depth 0 不该发 depth: %v", reqs["book"].Params)
 	}
 	for _, q := range reqs {
-		conn.ack(t, q, testEpoch)
+		conn.ack(t, q, testEpoch, 200)
 	}
 	conn.push(t, "book", jsonObj(t, fixture(t, "book.json"), nil), 200, "", true)
 	for _, s := range []*Subscription{fs, bs, ts} {
@@ -787,9 +788,10 @@ func TestStreamLagged(t *testing.T) {
 	}
 
 	// 丢了 201-0-1、202-0-0;补拉上界 202 还没写进执行历史
-	conn.send(t, map[string]any{"channel": "lagged", "data": map[string]any{"dropped": 5, "epoch": testEpoch, "upper": "202-65535-4294967295"}})
+	conn.send(t, map[string]any{"channel": "lagged", "data": map[string]any{"dropped": 5, "epoch": testEpoch,
+		"upper": "202-65535-4294967295", "reason": "buffer"}})
 	var lag *LaggedError
-	if e := h.waitState(fs, StateSyncing); !errors.As(e.Err, &lag) || lag.Upper != "202-65535-4294967295" || lag.Dropped != 5 {
+	if e := h.waitState(fs, StateSyncing); !errors.As(e.Err, &lag) || lag.Upper != "202-65535-4294967295" || lag.Dropped != 5 || lag.Reason != "buffer" {
 		t.Fatalf("fills lagged 原因 %v", e.Err)
 	}
 	if e := h.waitState(bs, StateSyncing); !errors.As(e.Err, &lag) {
@@ -814,12 +816,30 @@ func TestStreamLagged(t *testing.T) {
 	if f := recv(t, fills); f.ID != "204-0-0" {
 		t.Fatalf("lagged 之后直接交付 %+v", f)
 	}
+
+	// 服务端渲染不出 205 的成交帧:同样按上界补拉;公共成交没丢,不报缺口
+	tradeStates := len(h.trail(ts))
+	fh.add("/v1/account/fills", fillRow("205-0-0"))
+	fh.set(func(fh *fakeHistory) { fh.complete = 205 })
+	conn.send(t, map[string]any{"channel": "lagged", "data": map[string]any{"dropped": 0, "epoch": testEpoch,
+		"upper": "205-0-4294967295", "reason": "render"}})
+	if e := h.waitState(fs, StateSyncing); !errors.As(e.Err, &lag) || lag.Reason != "render" || lag.Dropped != 0 {
+		t.Fatalf("render lagged 原因 %v", e.Err)
+	}
+	if f := recv(t, fills); f.ID != "205-0-0" {
+		t.Fatalf("render 之后补拉 %+v", f)
+	}
+	h.waitState(fs, StateLive)
+	h.waitState(bs, StateSyncing)
+	if got := len(h.trail(ts)); got != tradeStates {
+		t.Fatalf("render 不该让公共成交报缺口: %v", h.trail(ts))
+	}
 }
 
 // 断线:全部回到 Syncing,按退避重连、重订;流水从已交付的位置接着补。
 func TestStreamReconnectResumes(t *testing.T) {
 	h := newWSHarness(t, nil)
-	fh := h.history(300, 302)
+	fh := h.history(302)
 	fh.add("/v1/account/fills", fillRow("301-0-0"), fillRow("302-0-0"))
 	fills := make(chan Fill, 8)
 	fs, _ := h.st.SubscribeFills(h.ref, HistoryCursor{After: "300-65535-4294967295", Epoch: testEpoch}, func(f Fill) { fills <- f })
@@ -828,7 +848,7 @@ func TestStreamReconnectResumes(t *testing.T) {
 	h.run()
 	conn := h.fw.accept(t)
 	for _, q := range conn.subscribes(t, 3) {
-		conn.ack(t, q, testEpoch)
+		conn.ack(t, q, testEpoch, 300)
 	}
 	conn.push(t, "book", jsonObj(t, fixture(t, "book.json"), nil), 300, "", true)
 	conn.push(t, "fills", private(fillRow("301-0-0")), 301, testEpoch, false)
@@ -847,12 +867,11 @@ func TestStreamReconnectResumes(t *testing.T) {
 	if e := h.waitState(ts, StateSyncing); !errors.As(e.Err, &gap) || !errors.Is(e.Err, ErrConnLost) {
 		t.Fatalf("trades 断线要报缺口 %v", e.Err)
 	}
-	// 断线期间 302 发生
-	fh.set(func(fh *fakeHistory) { fh.asOf = 302 })
+	// 断线期间 302 发生:新连接的起点是 302
 	conn = h.fw.accept(t)
 	reqs := conn.subscribes(t, 3)
 	for _, q := range reqs {
-		conn.ack(t, q, testEpoch)
+		conn.ack(t, q, testEpoch, 302)
 	}
 	conn.push(t, "book", jsonObj(t, fixture(t, "book.json"), nil), 302, "", true)
 	if f := recv(t, fills); f.ID != "302-0-0" {
@@ -873,14 +892,14 @@ func TestStreamReconnectResumes(t *testing.T) {
 // 重连后纪元变了:私有订阅进终态并在服务端退订,公共订阅照常;调用方按新纪元重建。
 func TestStreamEpochChangeOnReconnect(t *testing.T) {
 	h := newWSHarness(t, nil)
-	fh := h.history(400, 400)
+	fh := h.history(400)
 	fs, _ := h.st.SubscribeFills(h.ref, HistoryCursor{After: "400-65535-4294967295", Epoch: testEpoch}, func(Fill) {})
 	as, _ := h.st.SubscribeAccount(h.ref, func(*Account) {})
 	bs, _ := h.st.SubscribeBook("ETH-USD", 0, func(*Book) {})
 	h.run()
 	conn := h.fw.accept(t)
 	for _, q := range conn.subscribes(t, 3) {
-		conn.ack(t, q, testEpoch)
+		conn.ack(t, q, testEpoch, 400)
 	}
 	conn.push(t, "account", jsonObj(t, fixture(t, "account.json"), nil), 400, testEpoch, true)
 	for _, s := range []*Subscription{fs, as} {
@@ -892,7 +911,7 @@ func TestStreamEpochChangeOnReconnect(t *testing.T) {
 	reqs := conn.subscribes(t, 3)
 	fh.set(func(fh *fakeHistory) { fh.epoch = "k2-1" })
 	for _, q := range reqs {
-		conn.ack(t, q, "k2-1")
+		conn.ack(t, q, "k2-1", 400)
 	}
 	for _, s := range []*Subscription{fs, as} {
 		if e := h.waitState(s, StateFailed); !errors.Is(e.Err, ErrEpochChanged) {
@@ -933,11 +952,11 @@ func TestStreamEpochChangeOnReconnect(t *testing.T) {
 // 起点游标的纪元与服务端不符:订阅即失败,不拿旧游标续读。
 func TestStreamFillsStaleEpochFails(t *testing.T) {
 	h := newWSHarness(t, nil)
-	h.history(400, 400)
+	h.history(400)
 	fs, _ := h.st.SubscribeFills(h.ref, HistoryCursor{After: "400-0-0", Epoch: "k0-9"}, func(Fill) {})
 	h.run()
 	conn := h.fw.accept(t)
-	conn.ack(t, conn.subscribes(t, 1)["fills"], testEpoch)
+	conn.ack(t, conn.subscribes(t, 1)["fills"], testEpoch, 400)
 	if e := h.waitState(fs, StateFailed); !errors.Is(e.Err, ErrEpochChanged) {
 		t.Fatalf("原因 %v", e.Err)
 	}
@@ -969,7 +988,7 @@ loop:
 				pings++
 				conn.send(t, map[string]any{"channel": "pong", "data": map[string]any{"ts": 1}})
 			case "subscribe":
-				conn.ack(t, q, testEpoch)
+				conn.ack(t, q, testEpoch, 1)
 				conn.push(t, "book", jsonObj(t, fixture(t, "book.json"), nil), 1, "", true)
 			}
 		case <-keep:
@@ -1011,6 +1030,23 @@ func TestStreamSubscribeRejected(t *testing.T) {
 	h.fw.accept(t).silent(t, 50*time.Millisecond)
 }
 
+// 确认帧没有起点 seq:流水接不上续传,按协议错误断开重连并报出。
+func TestStreamAckWithoutSeqIsConnError(t *testing.T) {
+	h := newWSHarness(t, nil)
+	if _, err := h.st.SubscribeBook("ETH-USD", 0, func(*Book) {}); err != nil {
+		t.Fatal(err)
+	}
+	h.run()
+	conn := h.fw.accept(t)
+	q := conn.subscribes(t, 1)["book"]
+	conn.send(t, map[string]any{"channel": "subscribed", "data": q.Params, "epoch": testEpoch, "id": q.ID})
+	conn.gone(t)
+	h.fw.accept(t)
+	if errs := h.connErrors(); len(errs) == 0 || !strings.Contains(errs[0].Error(), "seq") {
+		t.Fatalf("要报出缺起点 seq: %v", errs)
+	}
+}
+
 // 某个订阅取快照失败:置 Syncing 报出原因,稍后退订重订换快照。
 func TestStreamSnapshotErrorResubscribes(t *testing.T) {
 	h := newWSHarness(t, nil)
@@ -1019,7 +1055,7 @@ func TestStreamSnapshotErrorResubscribes(t *testing.T) {
 	h.run()
 	conn := h.fw.accept(t)
 	q := conn.subscribes(t, 1)["positions"]
-	conn.ack(t, q, testEpoch)
+	conn.ack(t, q, testEpoch, 1)
 	conn.send(t, map[string]any{"channel": "error", "data": map[string]any{"code": "GatewayUnavailable",
 		"message": "positions snapshot failed: HTTP 503", "subscription": q.Params}})
 	var we *WSError
@@ -1033,7 +1069,7 @@ func TestStreamSnapshotErrorResubscribes(t *testing.T) {
 	if q.Method != "subscribe" {
 		t.Fatalf("要重订 %+v", q)
 	}
-	conn.ack(t, q, testEpoch)
+	conn.ack(t, q, testEpoch, 1)
 	conn.push(t, "positions", jsonObj(t, fixture(t, "positions.json"), nil), 2, testEpoch, true)
 	h.waitState(ps, StateLive)
 	if p := recv(t, positions); len(p) != 1 {
@@ -1049,7 +1085,7 @@ func TestStreamUnsubscribe(t *testing.T) {
 	h.run()
 	conn := h.fw.accept(t)
 	q := conn.subscribes(t, 1)["book"]
-	conn.ack(t, q, testEpoch)
+	conn.ack(t, q, testEpoch, 1)
 	conn.push(t, "book", jsonObj(t, fixture(t, "book.json"), nil), 1, "", true)
 	recv(t, books)
 	bs.Unsubscribe()
@@ -1063,5 +1099,25 @@ func TestStreamUnsubscribe(t *testing.T) {
 	}
 	if q := conn.next(t); q.Method != "subscribe" {
 		t.Fatalf("重新订阅 %+v", q)
+	}
+}
+
+// orders 帧的 status / remaining 每帧都有(v1.1 §4.9-3):缺了就是服务端没算出来,不猜。
+func TestOrderEventRequiresStatusAndRemaining(t *testing.T) {
+	f, c := newFake(t)
+	cat := catalog(t, f, c)
+	s := func(v string) *string { return &v }
+	ok := wireOrderEvent{OrderID: "7", Symbol: "ETH-USD", Event: "fill", FillID: s("9-0-1"), LastFilled: s("0.1"),
+		Status: s("open"), Remaining: s("0.3")}
+	ev, err := ok.event(cat)
+	if err != nil || ev.Status != "open" || ev.RemainingLots != 30 || *ev.LastFilledLots != 10 {
+		t.Fatalf("成交帧: %+v / %v", ev, err)
+	}
+	noStatus, noRemaining := ok, ok
+	noStatus.Status, noRemaining.Remaining = nil, nil
+	for _, w := range []wireOrderEvent{noStatus, noRemaining} {
+		if _, err := w.event(cat); err == nil || !strings.Contains(err.Error(), "status / remaining") {
+			t.Fatalf("缺字段要报错: %+v / %v", w, err)
+		}
 	}
 }

@@ -30,7 +30,7 @@ func (st *Stream) SubscribePrices(fn func(*Prices)) (*Subscription, error) {
 }
 
 // SubscribeBook 盘口(`book`):每帧都是前 depth 档的整份盘口(块边界合并,变了才推)。depth 0 = 服务端缺省 20,上限 100。
-// 同一个市场只能有一个盘口订阅(帧里不带档数,分不出是哪个订阅的)。
+// 同一个市场只能有一个盘口订阅(帧按符号路由)。
 func (st *Stream) SubscribeBook(symbol string, depth int, fn func(*Book)) (*Subscription, error) {
 	m, err := st.cat.Market(symbol)
 	if err != nil {
@@ -197,11 +197,11 @@ type OrderEvent struct {
 	OrderID       uint64
 	ClientOrderID *string
 	Symbol        string
-	// Status 事件之后这张单的状态:"open" | "filled" | "canceled" | "expired";
-	// nil = 这一帧不改变它在不在挂(例如吃单成交帧先于它的下单结论到达)。
-	Status *string
-	// RemainingLots 剩余手数;nil = 帧里没给。
-	RemainingLots *uint64
+	// Status 本条命令结束时这张单的状态:"open" | "filled" | "canceled" | "expired"(吃单成交帧与它的
+	// accepted 帧相同;协议代下的单 OrderID 为 0、"filled")。
+	Status string
+	// RemainingLots 本条命令结束时挂在簿上的剩余手数(不挂为 0)。
+	RemainingLots uint64
 	// 以下只有 accepted 帧有
 	Side       string
 	Price      uint32
@@ -238,8 +238,8 @@ type wireOrderEvent struct {
 }
 
 // SubscribeOrders 在挂单(`orders`)。订阅即推全市场挂单快照,之后每个下单 / 成交 / 撤单 / 过期一帧;
-// 本包维护在挂单集合:快照整体替换,status 为 open 即在挂、否则移除。帧与本地集合对不上时不猜,
-// 退订重订换一帧新快照(期间 Syncing)。
+// 本包维护在挂单集合:快照整体替换,status 为 open 即在挂、否则移除。帧与本地集合对不上、帧缺 status /
+// remaining 时不猜,退订重订换一帧新快照(期间 Syncing)。服务端自己算不出某帧时会直接重发快照。
 func (st *Stream) SubscribeOrders(ref AccountRef, fn func(OrdersUpdate)) (*Subscription, error) {
 	sub, err := accountSub("orders", ref, true)
 	if err != nil {
@@ -304,7 +304,11 @@ func (w wireOrderEvent) event(cat *Catalog) (*OrderEvent, error) {
 	if err != nil {
 		return nil, err
 	}
-	ev := &OrderEvent{Kind: w.Event, ClientOrderID: w.ClientOrderID, Symbol: w.Symbol, Status: w.Status, TS: w.TS}
+	// status / remaining 每帧都有(v1.1 §4.9-3);缺了就是服务端没算出来,不猜
+	if w.Status == nil || w.Remaining == nil {
+		return nil, fmt.Errorf("dexosv1: orders %s 帧 %s 缺 status / remaining", w.Event, w.OrderID)
+	}
+	ev := &OrderEvent{Kind: w.Event, ClientOrderID: w.ClientOrderID, Symbol: w.Symbol, Status: *w.Status, TS: w.TS}
 	if ev.OrderID, err = strconv.ParseUint(w.OrderID, 10, 64); err != nil {
 		return nil, fmt.Errorf("dexosv1: orders 帧 orderId %q: %w", w.OrderID, err)
 	}
@@ -318,12 +322,12 @@ func (w wireOrderEvent) event(cat *Catalog) (*OrderEvent, error) {
 		}
 		return &v, nil
 	}
-	if ev.RemainingLots, err = lots("remaining", w.Remaining); err != nil {
-		return nil, err
+	if ev.RemainingLots, err = m.Scale.Lots(*w.Remaining); err != nil {
+		return nil, fmt.Errorf("dexosv1: orders 帧 %s remaining: %w", w.OrderID, err)
 	}
 	switch w.Event {
 	case "accepted":
-		if w.Side == nil || w.Price == nil || w.Size == nil || w.Filled == nil || w.Remaining == nil || w.Status == nil {
+		if w.Side == nil || w.Price == nil || w.Size == nil || w.Filled == nil {
 			return nil, fmt.Errorf("dexosv1: orders accepted 帧 %s 缺字段", w.OrderID)
 		}
 		ev.Side = *w.Side
@@ -358,31 +362,21 @@ func (w wireOrderEvent) event(cat *Catalog) (*OrderEvent, error) {
 
 // applyOrderEvent 把一个事件应用到在挂单集合。对不上(说在挂却不在集合里)就报错,由调用方重订换快照。
 func applyOrderEvent(open map[uint64]Order, ev *OrderEvent) error {
-	if ev.Status == nil {
-		if o, ok := open[ev.OrderID]; ok && ev.RemainingLots != nil {
-			o.RemainingLots = *ev.RemainingLots
-			o.FilledLots = o.Lots - o.RemainingLots
-			open[ev.OrderID] = o
-		}
-		return nil
-	}
-	if *ev.Status != "open" {
+	if ev.Status != "open" {
 		delete(open, ev.OrderID)
 		return nil
 	}
 	if ev.Kind == "accepted" {
 		open[ev.OrderID] = Order{OrderID: ev.OrderID, ClientOrderID: ev.ClientOrderID, Symbol: ev.Symbol, Side: ev.Side,
-			Price: ev.Price, Lots: ev.Lots, FilledLots: ev.FilledLots, RemainingLots: *ev.RemainingLots, Status: "open"}
+			Price: ev.Price, Lots: ev.Lots, FilledLots: ev.FilledLots, RemainingLots: ev.RemainingLots, Status: "open"}
 		return nil
 	}
 	o, ok := open[ev.OrderID]
 	if !ok {
 		return fmt.Errorf("dexosv1: orders 帧说订单 %d 在挂,本地集合里没有它", ev.OrderID)
 	}
-	if ev.RemainingLots != nil {
-		o.RemainingLots = *ev.RemainingLots
-		o.FilledLots = o.Lots - o.RemainingLots
-	}
+	o.RemainingLots = ev.RemainingLots
+	o.FilledLots = o.Lots - o.RemainingLots
 	if ev.ClientOrderID != nil {
 		o.ClientOrderID = ev.ClientOrderID
 	}

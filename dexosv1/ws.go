@@ -25,9 +25,9 @@ import (
 // 做市的用法:收到 Syncing 就暂停对应币对,回到 Live 再恢复;Failed 要人或上层逻辑介入。
 // 本包不在失效时悄悄改用 REST 轮询,也不吞错:每次状态变化都经 [StreamOptions.OnState] 报出原因。
 //
-// 成交 / 流水(fills / ledger)是流水类:从调用方给的游标起逐条交付,不缺不重。断线、丢帧之后用 REST 按
-// 游标补拉(`after` + `epoch` + `upper`),与 WS 帧按位置拼接。游标可以持久化([Subscription.Cursor]),
-// 进程重启后从它接着订。
+// 成交 / 流水(fills / ledger)是流水类:从调用方给的游标起逐条交付,不缺不重。订阅确认帧给出起点位号,
+// 起点之内、断线与丢帧(lagged)期间的用 REST 按游标补拉(`after` + `epoch` + `upper`),与 WS 帧按位置拼接。
+// 游标可以持久化([Subscription.Cursor]),进程重启后从它接着订。
 
 // State 订阅的状态。
 type State int32
@@ -69,15 +69,18 @@ func (e *WSError) Error() string {
 	return fmt.Sprintf("dexosv1: WS 错误帧 %s: %s", e.Code, e.Message)
 }
 
-// LaggedError 服务端给这条连接丢了帧(推送跟不上)。快照类订阅随后会收到新快照;流水类本包按 REST 补拉。
+// LaggedError 服务端有一段帧没推给这条连接。快照类订阅随后会收到新快照;流水类本包按 REST 补拉。
 type LaggedError struct {
+	// Reason "buffer" = 推送跟不上、服务端丢了 Dropped 个事件;"render" = 服务端渲染不出流水帧
+	// (执行历史读不出来、市场缺元数据),事件没丢,Dropped 为 0(v1.1 §4.9-1)。
+	Reason  string
 	Dropped uint64
 	// Upper 补拉上界:位置不超过它的流水由 REST 补拉,之后的 WS 帧都在它之后。
 	Upper string
 }
 
 func (e *LaggedError) Error() string {
-	return fmt.Sprintf("dexosv1: 服务端丢了 %d 帧(补拉上界 %s)", e.Dropped, e.Upper)
+	return fmt.Sprintf("dexosv1: 服务端有一段帧没推(%s,丢了 %d 个事件,补拉上界 %s)", e.Reason, e.Dropped, e.Upper)
 }
 
 // TradesGapError 公共成交(trades)在断线 / 丢帧期间缺了帧。公共成交没有续传游标,本包不补;
@@ -110,10 +113,7 @@ type StreamOptions struct {
 	// ReconnectMin / ReconnectMax 重连的指数退避区间,缺省 500ms / 30s。
 	// 快照失败后重订、补拉失败后重试也用同一个区间。
 	ReconnectMin, ReconnectMax time.Duration
-	// SettleDelay 流水订阅建立后、还没收到第一帧时,隔这么久再按当前视图补拉一次,缺省 2s。
-	// 用来尽早交付「订阅那一刻前后」已经发生、还没写进执行历史的成交,不必等下一帧触发。
-	SettleDelay time.Duration
-	// CatchUpWait 补拉的上界还没写进执行历史(400 not yet complete)时最多等多久,缺省 10s;
+	// CatchUpWait 补拉的上界还没写进执行历史(400 GatewayHistoryIncomplete)时最多等多久,缺省 10s;
 	// 等不到就把订阅置为 Syncing、稍后再试。
 	CatchUpWait time.Duration
 	// OnState 订阅状态变化。在 Run 的 goroutine 里调用,不要阻塞。
@@ -146,9 +146,13 @@ type Stream struct {
 	nextID  int64
 	pending map[int64]*Subscription
 	routes  map[string]*Subscription
+	// floor 本连接上 lagged 给过的最大补拉上界;hasFloor = 收到过。服务端此后不再推不超过它的流水帧,
+	// 之后才确认的流水订阅也要补拉到它。
+	floor    cpos
+	hasFloor bool
 }
 
-// NewStream 建一个 WS 客户端。Client 用来补拉成交 / 流水与取账户视图;Catalog 用来把价量换成 tick / lot。
+// NewStream 建一个 WS 客户端。Client 用来补拉成交 / 流水;Catalog 用来把价量换成 tick / lot。
 func NewStream(c *Client, cat *Catalog, opt StreamOptions) (*Stream, error) {
 	if c == nil || cat == nil {
 		return nil, errors.New("dexosv1: NewStream 需要 Client 与 Catalog")
@@ -181,7 +185,6 @@ func NewStream(c *Client, cat *Catalog, opt StreamOptions) (*Stream, error) {
 	def(&opt.ReadTimeout, 50*time.Second)
 	def(&opt.ReconnectMin, 500*time.Millisecond)
 	def(&opt.ReconnectMax, 30*time.Second)
-	def(&opt.SettleDelay, 2*time.Second)
 	def(&opt.CatchUpWait, 10*time.Second)
 	return &Stream{
 		c: c, cat: cat, opt: opt, url: opt.URL,
@@ -435,6 +438,7 @@ func (st *Stream) serve(ctx context.Context, conn *websocket.Conn) (healthy bool
 	st.conn = conn
 	st.pending = map[int64]*Subscription{}
 	st.routes = map[string]*Subscription{}
+	st.hasFloor = false
 	done := make(chan struct{})
 	defer func() {
 		close(done)
@@ -738,6 +742,9 @@ func (st *Stream) onAck(f *wsFrame) error {
 	if f.Epoch == nil || *f.Epoch == "" {
 		return errors.New("dexosv1: subscribed 帧没有 epoch")
 	}
+	if f.Seq == nil {
+		return errors.New("dexosv1: subscribed 帧没有起点 seq")
+	}
 	switch {
 	case st.epoch == "":
 		st.epoch = *f.Epoch
@@ -758,7 +765,7 @@ func (st *Stream) onAck(f *wsFrame) error {
 	sub.acked = true
 	switch {
 	case sub.hist != nil:
-		st.histStart(sub)
+		st.histStart(sub, *f.Seq)
 	case sub.channel == "trades":
 		sub.retries = 0
 		st.setState(sub, StateLive, nil)
@@ -819,6 +826,7 @@ func (st *Stream) onLagged(f *wsFrame) error {
 		Dropped uint64 `json:"dropped"`
 		Epoch   string `json:"epoch"`
 		Upper   string `json:"upper"`
+		Reason  string `json:"reason"`
 	}
 	if err := json.Unmarshal(f.Data, &d); err != nil {
 		return fmt.Errorf("dexosv1: lagged 帧解析失败: %w", err)
@@ -830,7 +838,10 @@ func (st *Stream) onLagged(f *wsFrame) error {
 	if err != nil {
 		return fmt.Errorf("dexosv1: lagged 帧的 upper %q: %w", d.Upper, err)
 	}
-	lag := &LaggedError{Dropped: d.Dropped, Upper: d.Upper}
+	if !st.hasFloor || st.floor.less(upper) {
+		st.floor, st.hasFloor = upper, true
+	}
+	lag := &LaggedError{Reason: d.Reason, Dropped: d.Dropped, Upper: d.Upper}
 	for _, sub := range st.routes {
 		if !sub.acked || sub.State() == StateFailed {
 			continue
@@ -839,8 +850,11 @@ func (st *Stream) onLagged(f *wsFrame) error {
 		case sub.hist != nil:
 			st.histLagged(sub, lag, upper)
 		case sub.channel == "trades":
-			st.setState(sub, StateSyncing, &TradesGapError{Cause: lag})
-			st.setState(sub, StateLive, nil)
+			// render 只是流水帧渲染不出来,事件没丢,公共成交照常推完了
+			if d.Reason != "render" {
+				st.setState(sub, StateSyncing, &TradesGapError{Cause: lag})
+				st.setState(sub, StateLive, nil)
+			}
 		default:
 			// 快照类:服务端紧接着重发一帧 isSnapshot:true
 			st.setState(sub, StateSyncing, lag)

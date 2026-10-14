@@ -240,7 +240,7 @@ type wireAck struct {
 }
 
 // receipt 解析公共部分;已定序但没有结论(202 / status=sequenced)返回 ErrPending。
-// 回执必须带 requestId 且与本地按签名算出的相同(v1.1 §4.2;只有 builder 转发的单没有,本包不发那种单)。
+// 回执必须带 requestId 且与本地按签名算出的相同(v1.1 §4.2;只有 builder 转发的单为 null,本包不发那种单)。
 func receipt(status int, raw []byte, id *RequestIdentity) (Receipt, error) {
 	var a wireAck
 	if err := json.Unmarshal(raw, &a); err != nil {

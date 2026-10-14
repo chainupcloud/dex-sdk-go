@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/chainupcloud/dex-sdk-go/dexos"
@@ -204,6 +205,15 @@ func TestExchangeVersionSubaccountsAndMarketFees(t *testing.T) {
 	ex, err := c.Exchange(context.Background())
 	if err != nil || ex.Version.CodecVer != dexos.CodecVersion {
 		t.Fatalf("网关的编码版本应为 %d: %+v / %v", dexos.CodecVersion, ex, err)
+	}
+	if ex.FundingTickSec == nil || *ex.FundingTickSec != 3600 {
+		t.Fatalf("资金费结算周期: %v", ex.FundingTickSec)
+	}
+	// 读模型还没就绪:null 原样给出,不拿缺省值顶
+	starting := strings.Replace(string(fixture(t, "exchange.json")), `"fundingTickSec":3600`, `"fundingTickSec":null`, 1)
+	f.routes["/v1/exchange"] = func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(starting)) }
+	if ex, err = c.Exchange(context.Background()); err != nil || ex.FundingTickSec != nil {
+		t.Fatalf("fundingTickSec null: %v / %v", ex, err)
 	}
 	cat, err := c.Catalog(context.Background())
 	if err != nil {

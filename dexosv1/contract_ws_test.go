@@ -105,7 +105,7 @@ func TestContractStream(t *testing.T) {
 	prices, accounts, positions := make(chan *Prices, 256), make(chan *Account, 256), make(chan []Position, 256)
 	makerOrders, takerOrders := make(chan OrdersUpdate, 256), make(chan OrdersUpdate, 256)
 	makerFills, takerFills := make(chan Fill, 256), make(chan Fill, 256)
-	ledger := make(chan LedgerEntry, 256)
+	ledger, takerLedger := make(chan LedgerEntry, 256), make(chan LedgerEntry, 256)
 	var subs []*Subscription
 	must := func(s *Subscription, err error) {
 		t.Helper()
@@ -126,6 +126,7 @@ func TestContractStream(t *testing.T) {
 	must(mf, err)
 	must(st.SubscribeFills(tw.Account, takerHead, func(f Fill) { put(takerFills, f) }))
 	must(st.SubscribeLedger(mw.Account, makerHead, func(e LedgerEntry) { put(ledger, e) }))
+	must(st.SubscribeLedger(tw.Account, takerHead, func(e LedgerEntry) { put(takerLedger, e) }))
 	runCtx, stop := context.WithCancel(ctx)
 	done := make(chan error, 1)
 	go func() { done <- st.Run(runCtx) }()
@@ -232,8 +233,20 @@ func TestContractStream(t *testing.T) {
 	}
 	// taker:orders 帧里有这张单的事件,fills 帧是吃单方
 	wait(t, takerOrders, "taker 订单事件", func(u OrdersUpdate) bool { return u.Event != nil && u.Event.OrderID == took.OrderID })
-	if tf := wait(t, takerFills, "taker 成交", func(f Fill) bool { return f.OrderID != nil && *f.OrderID == took.OrderID }); tf.Role != "taker" || tf.Side != "sell" {
+	tf := wait(t, takerFills, "taker 成交", func(f Fill) bool { return f.OrderID != nil && *f.OrderID == took.OrderID })
+	if tf.Role != "taker" || tf.Side != "sell" {
 		t.Errorf("taker 成交帧: %+v", tf)
+	}
+	// taker 付了费就有这条命令的 taker_fee 流水,经 WS ledger 帧(entries[])推来
+	if fee, err := ParseFixed(tf.Fee, 18); err != nil {
+		t.Errorf("taker 成交费 %q: %v", tf.Fee, err)
+	} else if fee.Sign() != 0 {
+		e := wait(t, takerLedger, "taker 手续费流水", func(e LedgerEntry) bool { return e.Seq == tf.Seq && e.Kind == "taker_fee" })
+		if e.Symbol == nil || *e.Symbol != m.Symbol || e.Token != tf.FeeToken {
+			t.Errorf("taker 手续费流水: %+v", e)
+		}
+	} else {
+		t.Log("taker 费率为 0,没有手续费流水可核对")
 	}
 	// 公共成交与 maker 的仓位 / 账户在块边界推出
 	wait(t, trades, "公共成交", func(tr Trade) bool { return tr.Price == price && tr.Symbol == m.Symbol })

@@ -255,10 +255,13 @@ var fixtureSchemas = []struct {
 	{"account_vault.json", "/v1/account", "200", ""},
 	{"ledger_vault.json", "/v1/account/ledger", "200", ""},
 	{"w_nonce_vault.json", "/v1/account/nonce", "200", ""},
+	{"tickers.json", "/v1/tickers", "200", ""},
+	{"err400_incomplete.json", "", "", "Error"},
+	{"w_sequenced_202.json", "", "", "Sequenced"},
 }
 
-// postFixtureSchemas 写接口回执的 fixture(形状照原生 v1 的 v1_write.rs 整理)。
-// status 为空表示规格没给这个响应的 body schema(目前只有 202),没有可校验的对象。
+// postFixtureSchemas 写接口回执的 fixture(形状照原生 v1 的 v1_write.rs 整理)。202 的回执按 `Sequenced`
+// 校验,登记在 fixtureSchemas。
 var postFixtureSchemas = []struct {
 	file, path, status string
 }{
@@ -271,7 +274,6 @@ var postFixtureSchemas = []struct {
 	{"w_schedule.json", "/v1/orders/schedule-cancel", "200"},
 	{"w_leverage.json", "/v1/account/leverage", "200"},
 	{"w_approve.json", "/v1/account/agents/approve", "200"},
-	{"w_sequenced_202.json", "/v1/orders", ""},
 }
 
 func TestFixturesConformToPinnedSpec(t *testing.T) {
@@ -291,9 +293,6 @@ func TestFixturesConformToPinnedSpec(t *testing.T) {
 	}
 	for _, f := range postFixtureSchemas {
 		seen[f.file] = true
-		if f.status == "" {
-			continue
-		}
 		if errs := validate(spec, postResponseSchema(t, spec, f.path, f.status), loadJSON(t, filepath.Join("testdata", "fixtures", f.file)), f.file); len(errs) > 0 {
 			t.Errorf("%s 不符合规格:\n  %s", f.file, strings.Join(errs, "\n  "))
 		}
@@ -334,11 +333,13 @@ func TestDecodedFieldsExistInPinnedSpec(t *testing.T) {
 		{"Nonce", reflect.TypeFor[Nonce](), schema("Nonce")},
 		{"Agent", reflect.TypeFor[Agent](), schema("Agent")},
 		{"Exchange", reflect.TypeFor[Exchange](), exchange},
-		{"Exchange.domain", reflect.TypeFor[Exchange]().Field(1).Type, props(obj(exchange["domain"]))},
-		{"Exchange.version", reflect.TypeFor[Exchange]().Field(4).Type, props(obj(exchange["version"]))},
+		{"Exchange.domain", field[Exchange](t, "Domain"), props(obj(exchange["domain"]))},
+		{"Exchange.version", field[Exchange](t, "Version"), props(obj(exchange["version"]))},
 		{"Exchange.deposit.tokens[]", reflect.TypeFor[Token](), props(obj(obj(props(obj(exchange["deposit"]))["tokens"])["items"]))},
 		{"Account.groups[]", reflect.TypeFor[RiskGroup](), props(obj(obj(schema("Account")["groups"])["items"]))},
+		{"Book", reflect.TypeFor[wireBook](), schema("Book")},
 		{"Price", reflect.TypeFor[wirePrice](), schema("Price")},
+		{"Ticker", reflect.TypeFor[wireTicker](), schema("Ticker")},
 		{"prices.window24h", reflect.TypeFor[Window24h](), props(obj(obj(responseSchema(t, spec, "/v1/prices", "200")["properties"])["window24h"]))},
 		{"Candle", reflect.TypeFor[wireCandle](), schema("Candle")},
 		{"Portfolio", reflect.TypeFor[Portfolio](), portfolio},
@@ -347,7 +348,11 @@ func TestDecodedFieldsExistInPinnedSpec(t *testing.T) {
 		{"Portfolio.gaps[]", reflect.TypeFor[PortfolioGap](), props(obj(obj(portfolio["gaps"])["items"]))},
 		{"AgentGrant", reflect.TypeFor[AgentGrant](), schema("AgentGrant")},
 		{"MyVaultPosition", reflect.TypeFor[VaultPosition](), myVault},
-		{"MyVaultPosition.withdrawable", reflect.TypeFor[VaultPosition]().Field(11).Type, props(obj(myVault["withdrawable"]))},
+		{"MyVaultPosition.withdrawable", field[VaultPosition](t, "Withdrawable"), props(obj(myVault["withdrawable"]))},
+		{"Vault", reflect.TypeFor[wireVault](), schema("Vault")},
+		{"VaultMarket", reflect.TypeFor[wireVaultMarket](), schema("VaultMarket")},
+		{"VaultMaxLeverage", reflect.TypeFor[wireVaultLeverage](), schema("VaultMaxLeverage")},
+		{"VaultConfig", reflect.TypeFor[wireVaultConfig](), schema("VaultConfig")},
 		{"Market.fees", reflect.TypeFor[MarketFees](), props(obj(schema("Market")["fees"]))},
 		{"Subaccount", reflect.TypeFor[Subaccount](), schema("Subaccount")},
 	}
@@ -369,6 +374,39 @@ func TestDecodedFieldsExistInPinnedSpec(t *testing.T) {
 		if len(missing) > 0 {
 			t.Errorf("%s 读了规格里没有的字段: %v", c.name, missing)
 		}
+	}
+}
+
+// field 结构体 T 里名为 name 的字段的类型(内嵌的匿名结构体按名字取,不依赖字段顺序)。
+func field[T any](t *testing.T, name string) reflect.Type {
+	t.Helper()
+	f, ok := reflect.TypeFor[T]().FieldByName(name)
+	if !ok {
+		t.Fatalf("%s 没有字段 %s", reflect.TypeFor[T](), name)
+	}
+	return f.Type
+}
+
+// 本包认的 K 线周期与规格的枚举逐一相同:规格加了周期,这里红,提醒补常量。
+func TestIntervalsMatchPinnedSpec(t *testing.T) {
+	spec := loadSpec(t)
+	op := obj(obj(obj(spec["paths"])["/v1/markets/{symbol}/candles"])["get"])
+	var want []string
+	for _, p := range asSlice(op["parameters"]) {
+		if obj(p)["name"] == "interval" {
+			for _, v := range asSlice(obj(obj(p)["schema"])["enum"]) {
+				want = append(want, v.(string))
+			}
+		}
+	}
+	var got []string
+	for iv := range intervals {
+		got = append(got, iv)
+	}
+	sort.Strings(want)
+	sort.Strings(got)
+	if len(want) == 0 || !reflect.DeepEqual(got, want) {
+		t.Fatalf("本包的周期 %v,规格 %v", got, want)
 	}
 }
 

@@ -6,7 +6,8 @@ import (
 	"strconv"
 )
 
-// Vault 一个社区金库(`GET /v1/vaults`、`/v1/vaults/{id}`)里本包用得到的部分。地址是 owner 主钱包地址。
+// Vault 一个社区金库(`GET /v1/vaults`、`/v1/vaults/{id}`)里本包用得到的部分:身份与交易限制。地址是 owner 主钱包地址。
+// 金额、份额、净值与收益指标本包不解码。
 //
 // 以金库身份交易([VaultAccount])时,API 钱包的授权挂在 manager 认领金库所用的那个账户上:
 // AccountRef{Address: Manager, Subaccount: ManagerSubaccount}。
@@ -34,31 +35,39 @@ type Vault struct {
 	ManagerLiqPortionPpm *uint32
 }
 
+// wireVaultMarket 白名单 / 黑名单的一项(`VaultMarket`)。
 type wireVaultMarket struct {
-	Market      uint16  `json:"market"`
-	Symbol      *string `json:"symbol"`
-	MaxLeverage uint32  `json:"maxLeverage"`
+	Symbol string `json:"symbol"`
 }
 
+// wireVaultLeverage 杠杆上限的一项(`VaultMaxLeverage`)。
+type wireVaultLeverage struct {
+	Symbol      string `json:"symbol"`
+	MaxLeverage uint32 `json:"maxLeverage"`
+}
+
+// wireVaultConfig `VaultConfig` 里本包读的部分。
+type wireVaultConfig struct {
+	ManagerLiqPortionPpm *uint32 `json:"managerLiqPortionPpm"`
+}
+
+// wireVault `components.schemas.Vault` 里本包读的部分(详情 `VaultDetail` 是它加上详情字段)。
 type wireVault struct {
-	Vault             uint16             `json:"vault"`
-	Name              string             `json:"name"`
-	Creator           *string            `json:"creator"`
-	CreatorSubaccount *uint32            `json:"creatorSubaccount"`
-	Manager           *string            `json:"manager"`
-	ManagerSubaccount *uint32            `json:"managerSubaccount"`
-	TradingHalt       bool               `json:"tradingHalt"`
-	Whitelist         *[]wireVaultMarket `json:"whitelist"`
-	Blacklist         []wireVaultMarket  `json:"blacklist"`
-	MaxLeverages      []wireVaultMarket  `json:"maxLeverages"`
-	DepositorWL       []string           `json:"depositorWhitelist"`
-	Config            struct {
-		ManagerLiqPortionPpm *uint32 `json:"managerLiqPortionPpm"`
-	} `json:"config"`
+	Vault             uint16              `json:"vault"`
+	Name              string              `json:"name"`
+	Creator           *string             `json:"creator"`
+	CreatorSubaccount *uint32             `json:"creatorSubaccount"`
+	Manager           *string             `json:"manager"`
+	ManagerSubaccount *uint32             `json:"managerSubaccount"`
+	TradingHalt       bool                `json:"tradingHalt"`
+	Whitelist         *[]wireVaultMarket  `json:"whitelist"`
+	Blacklist         []wireVaultMarket   `json:"blacklist"`
+	MaxLeverages      []wireVaultLeverage `json:"maxLeverages"`
+	DepositorWL       []string            `json:"depositorWhitelist"`
+	Config            wireVaultConfig     `json:"config"`
 }
 
-// vault 换成按符号的形状。市场没有符号(元数据缺失)就报错,不拿市场号顶替;manager 与它的子账户序号
-// 必须同时有或同时没有。
+// vault 换成本包的形状。manager 与它的子账户序号必须同时有或同时没有。
 func (w wireVault) vault() (*Vault, error) {
 	if (w.Manager == nil) != (w.ManagerSubaccount == nil) {
 		return nil, fmt.Errorf("dexosv1: 金库 %d 的 manager 与 managerSubaccount 不是同时给出", w.Vault)
@@ -67,31 +76,19 @@ func (w wireVault) vault() (*Vault, error) {
 		Manager: w.Manager, ManagerSubaccount: w.ManagerSubaccount, TradingHalt: w.TradingHalt,
 		HasWhitelist: w.Whitelist != nil, MaxLeverages: map[string]uint32{}, DepositorWhitelist: w.DepositorWL,
 		ManagerLiqPortionPpm: w.Config.ManagerLiqPortionPpm}
-	symbols := func(what string, in []wireVaultMarket) ([]string, error) {
+	symbols := func(in []wireVaultMarket) []string {
 		out := make([]string, 0, len(in))
 		for _, m := range in {
-			if m.Symbol == nil {
-				return nil, fmt.Errorf("dexosv1: 金库 %d 的%s里市场 %d 没有符号", w.Vault, what, m.Market)
-			}
-			out = append(out, *m.Symbol)
+			out = append(out, m.Symbol)
 		}
-		return out, nil
+		return out
 	}
-	var err error
 	if w.Whitelist != nil {
-		if v.Whitelist, err = symbols("白名单", *w.Whitelist); err != nil {
-			return nil, err
-		}
+		v.Whitelist = symbols(*w.Whitelist)
 	}
-	if v.Blacklist, err = symbols("黑名单", w.Blacklist); err != nil {
-		return nil, err
-	}
-	capped, err := symbols("杠杆上限", w.MaxLeverages)
-	if err != nil {
-		return nil, err
-	}
-	for i, s := range capped {
-		v.MaxLeverages[s] = w.MaxLeverages[i].MaxLeverage
+	v.Blacklist = symbols(w.Blacklist)
+	for _, l := range w.MaxLeverages {
+		v.MaxLeverages[l.Symbol] = l.MaxLeverage
 	}
 	return v, nil
 }
