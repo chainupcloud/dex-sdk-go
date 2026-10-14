@@ -171,7 +171,10 @@ type FillHistory struct {
 // Fills 账户成交(`/v1/account/fills`),自动翻页到上界。symbol 为空 = 全市场。
 // 失败时返回已取到的部分与错误。
 func (c *Client) Fills(ctx context.Context, cat *Catalog, ref AccountRef, symbol string, q HistoryQuery) (*FillHistory, error) {
-	params := ref.values()
+	params, err := ref.values()
+	if err != nil {
+		return nil, err
+	}
 	if symbol != "" {
 		params.Set("symbol", symbol)
 	}
@@ -220,6 +223,10 @@ type LedgerEntry struct {
 	Token  string  `json:"token"`
 	Amount string  `json:"amount"`
 	Symbol *string `json:"symbol"`
+	// Vault 只在 `vault_*` 条目上有(v1.1 §4.3):以金库身份查 = 该金库;否则 = 对手账户所属的金库,
+	// 对手不是金库(creator 一侧的 vault_fee)为 nil。WS `ledger` 帧不带对手金库:按钱包订阅时
+	// 推来的 vault_* 条目这里是 nil,要按金库筛请用 [Client.Ledger]。
+	Vault *uint16 `json:"vault"`
 }
 
 // LedgerQuery 流水查询:Kind / Token / External 是可选过滤,其余同 [HistoryQuery]。
@@ -244,7 +251,10 @@ func (c *Client) Ledger(ctx context.Context, ref AccountRef, q LedgerQuery) (*Le
 	if q.External && q.Kind != "" {
 		return nil, errors.New("dexosv1: 流水的 external 与 kind 不能同给")
 	}
-	params := ref.values()
+	params, err := ref.values()
+	if err != nil {
+		return nil, err
+	}
 	if q.Kind != "" {
 		params.Set("kind", q.Kind)
 	}

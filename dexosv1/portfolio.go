@@ -70,7 +70,10 @@ func (c *Client) Portfolio(ctx context.Context, ref AccountRef, period string) (
 	default:
 		return nil, fmt.Errorf("dexosv1: 未知的区间 %q", period)
 	}
-	q := ref.values()
+	q, err := ref.walletValues("portfolio")
+	if err != nil {
+		return nil, err
+	}
 	q.Set("period", period)
 	var p Portfolio
 	if err := c.get(ctx, "/v1/account/portfolio", q, marketRead, &p); err != nil {

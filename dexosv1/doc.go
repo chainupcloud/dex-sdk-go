@@ -1,7 +1,7 @@
 // Package dexosv1 是 DEX-OS 开放 API v1(`/v1/*`)的 Go 客户端。
 //
 // 与 [github.com/chainupcloud/dex-sdk-go/dexos] 的分工:dexos 走旧接口(数字市场号 / 账户号);
-// 本包走 v1 —— 市场按符号(`BTC-USD`)寻址,账户按主钱包地址 + 子账户寻址([AccountRef]),
+// 本包走 v1 —— 市场按符号(`BTC-USD`)寻址,账户按主钱包地址 + 子账户或金库号寻址([AccountRef]),
 // 线上的价量是十进制字符串。
 //
 // # 价量仍是整数
@@ -29,8 +29,11 @@
 //
 // 已有(跟到 v1.1):只读接口 —— 市场目录与盘口、价格与 24h 统计、K 线、账户汇总(含纪元与风险组)/
 // 持仓 / 挂单、成交与资金流水、账户价值与盈亏历史(portfolio)、金库头寸、nonce、API 钱包列表与反查、
-// 请求回执 —— 与上面的写入,以及 WS 客户端([Stream],见下)。金库身份(v1.1 §4.3)在后续阶段补上,
-// 届时私有频道按 vault 订阅一并加上。
+// 请求回执 —— 与上面的写入,以及 WS 客户端([Stream],见下)。
+//
+// 金库身份(v1.1 §4.3):[VaultAccount] 寻址金库主账户,读接口、私有频道订阅都按 `vault` 走;
+// [NewSession] 以金库身份交易时,API 钱包要授权在 manager 认领金库所用的账户上([Vault] 的
+// Manager / ManagerSubaccount),信封带 `vault`、`account` 是 manager 的主钱包。
 //
 // # WebSocket
 //

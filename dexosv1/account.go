@@ -42,6 +42,8 @@ type Account struct {
 	// Nonce 主钱包作用域的下一个 nonce(API 钱包的 nonce 用 [Client.Nonce] 带 signer 取)。
 	Nonce uint64 `json:"nonce"`
 	TS    int64  `json:"ts"`
+	// Vault 以金库身份读([VaultAccount])时的金库号;此时服务端不给 Address / Subaccount。
+	Vault *uint16 `json:"vault"`
 }
 
 // Balance 一种 token 的余额(十进制,token 单位)。
@@ -71,8 +73,12 @@ type MarketLeverage struct {
 
 // Account 账户汇总。响应缺 epoch / asOfSeq 时报错:没有它们就判断不了纪元有没有变、视图新不新。
 func (c *Client) Account(ctx context.Context, ref AccountRef) (*Account, error) {
+	q, err := ref.values()
+	if err != nil {
+		return nil, err
+	}
 	var raw json.RawMessage
-	if err := c.get(ctx, "/v1/account", ref.values(), accountRead, &raw); err != nil {
+	if err := c.get(ctx, "/v1/account", q, accountRead, &raw); err != nil {
 		return nil, err
 	}
 	return decodeAccount(raw, "/v1/account")
@@ -119,10 +125,14 @@ type wirePosition struct {
 }
 
 func (c *Client) Positions(ctx context.Context, cat *Catalog, ref AccountRef) ([]Position, error) {
+	q, err := ref.values()
+	if err != nil {
+		return nil, err
+	}
 	var resp struct {
 		Positions []wirePosition `json:"positions"`
 	}
-	if err := c.get(ctx, "/v1/account/positions", ref.values(), accountRead, &resp); err != nil {
+	if err := c.get(ctx, "/v1/account/positions", q, accountRead, &resp); err != nil {
 		return nil, err
 	}
 	return positionsFrom(cat, resp.Positions)
@@ -181,7 +191,10 @@ type wireOrder struct {
 
 // Orders 账户的在簿挂单;symbol 为空 = 全市场。
 func (c *Client) Orders(ctx context.Context, cat *Catalog, ref AccountRef, symbol string) ([]Order, error) {
-	q := ref.values()
+	q, err := ref.values()
+	if err != nil {
+		return nil, err
+	}
 	if symbol != "" {
 		q.Set("symbol", symbol)
 	}
@@ -236,8 +249,12 @@ type Nonce struct {
 }
 
 // Nonce 取下一个 nonce;signer 非 nil 时取这把 API 钱包在该账户上的 nonce。
+// 金库身份时 SigningAccountID 是金库主账户的。
 func (c *Client) Nonce(ctx context.Context, ref AccountRef, signer *dexos.Address) (*Nonce, error) {
-	q := ref.values()
+	q, err := ref.values()
+	if err != nil {
+		return nil, err
+	}
 	if signer != nil {
 		q.Set("signer", signer.Hex())
 	}
@@ -263,11 +280,17 @@ type Agent struct {
 	Expired    bool   `json:"expired"`
 }
 
+// Agents 账户上授权的 API 钱包。不接受金库身份:代金库交易的 API 钱包授权在 manager 认领金库所用的
+// 账户上([Vault] 的 Manager / ManagerSubaccount)。
 func (c *Client) Agents(ctx context.Context, ref AccountRef) ([]Agent, error) {
+	q, err := ref.walletValues("API 钱包列表")
+	if err != nil {
+		return nil, err
+	}
 	var resp struct {
 		Agents []Agent `json:"agents"`
 	}
-	if err := c.get(ctx, "/v1/account/agents", ref.values(), accountRead, &resp); err != nil {
+	if err := c.get(ctx, "/v1/account/agents", q, accountRead, &resp); err != nil {
 		return nil, err
 	}
 	return resp.Agents, nil

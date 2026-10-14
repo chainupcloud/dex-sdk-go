@@ -206,8 +206,13 @@ func (st *Stream) SubscribeLedger(ref AccountRef, from HistoryCursor, fn func(Le
 		if err != nil {
 			return histItem{}, fmt.Errorf("dexosv1: ledger 帧 id: %w", err)
 		}
-		return item(LedgerEntry{ID: w.ID, Seq: p.seq, Sub: uint16(p.sub), Idx: uint32(p.idx), Kind: w.Kind,
-			Token: w.Token, Amount: w.Amount, Symbol: w.Symbol})
+		e := LedgerEntry{ID: w.ID, Seq: p.seq, Sub: uint16(p.sub), Idx: uint32(p.idx), Kind: w.Kind,
+			Token: w.Token, Amount: w.Amount, Symbol: w.Symbol}
+		// 帧里的 vault 只是订阅身份的回显(按钱包订阅时没有对手金库);按金库订阅时,它正是 REST 给 vault_* 条目的值
+		if ref.Vault != nil && strings.HasPrefix(w.Kind, "vault_") {
+			e.Vault = ref.Vault
+		}
+		return item(e)
 	}
 	return st.add(sub)
 }
@@ -220,9 +225,12 @@ func (st *Stream) histSub(channel string, ref AccountRef, from HistoryCursor) (*
 	if err != nil {
 		return nil, nil, fmt.Errorf("dexosv1: %s 起点: %w", channel, err)
 	}
+	sub, err := accountSub(channel, ref, false)
+	if err != nil {
+		return nil, nil, err
+	}
 	h := &histSync{ref: ref, lastID: from.After, epoch: from.Epoch, last: p}
-	sub := &Subscription{channel: channel, route: accountRoute(channel, ref), private: true,
-		params: accountParams(channel, ref), hist: h}
+	sub.hist = h
 	return sub, h, nil
 }
 

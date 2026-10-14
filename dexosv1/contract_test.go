@@ -88,7 +88,10 @@ func TestContractReadOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 	ref := AccountRef{Address: a}
-	q := ref.values()
+	q, err := ref.values()
+	if err != nil {
+		t.Fatal(err)
+	}
 	if acc, err := c.Account(ctx, ref); err != nil {
 		t.Fatalf("Account: %v", err)
 	} else if acc.Epoch == "" || acc.AsOfSeq == 0 {

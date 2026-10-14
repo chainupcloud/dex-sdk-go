@@ -4,7 +4,7 @@
     "title": "DEXOS Open API v1",
     "version": "0.1.0",
     "summary": "The standard public interface (REST + WebSocket) for builders, developers and liquidity providers",
-    "description": "The DEXOS public API for third-party developers, builders and liquidity providers. The specification\nlives in `docs/specs/public-api-v1.md`; `docs/research/api-landscape-2026-09.md` compares it with\nHyperliquid, Lighter, Aster and Pacifica. **This document mirrors the gateway's v1 route table**\n(`crates/gateway/src/api/v1.rs`, pinned by `scripts/check-openapi.mjs`, INV-API-V1-SPEC-MIRROR).\n**Every read endpoint, write endpoint, vault endpoint and WebSocket channel listed here is implemented.**\nThe only planned items are the timestamp-window nonce (v1.1, an execution-layer change) and the\nbuilder volume projection (§6 of the specification).\nThe legacy endpoints (`/order`, `/markets`, `/ws`, …, documented at `/docs`) remain available; v1 is a\ntranslation layer on top of them and returns bit-identical data.\n\n## Quick start\n\n1. `GET /v1/exchange` → the EIP-712 domain (`domain` / `chainId`) and the token table (with the numeric\n   `token` ids the `Withdrawal` / `Transfer` structs carry); `GET /v1/markets/BTC-USD` → `priceDecimals` /\n   `sizeDecimals` and `signingMarketId` (the `market` field of the signed structs).\n2. `GET /v1/account/nonce?address=<your address>` → the next `nonce` and `signingAccountId` (the value for the\n   `accountId` field of the signed struct; signing is the only thing it is for).\n3. Scale `price` and `size` to integers locally (`ticks = price × 10^priceDecimals`,\n   `lots = size × 10^sizeDecimals`), sign the `Order(...)` struct (each write endpoint states its\n   `x-eip712.typeString`) and `POST /v1/orders`\n   `{account, nonce, signature, symbol, side, type: \"limit\", price, size, clientOrderId?}` →\n   `200 {orderId, status: resting|filled|…}` or `422 {error}`.\n4. Programmatic trading: approve an API wallet once from the main wallet with\n   `POST /v1/account/agents/approve`, then sign with it and pass its address as `signer`\n   (the `AgentExec` signature covers the canonical-bytes hash of the inner command). Batch orders,\n   cancels, replaces and the dead man's switch all go through the API wallet; **an API wallet cannot\n   move funds**.\n5. Subscriptions: `GET /v1/ws` → `{\"method\":\"subscribe\",\"params\":{\"channel\":\"book\",\"symbol\":\"BTC-USD\"}}`.\n   After a disconnect, resume from the last `id` you saw with `/v1/account/fills?after=` or\n   `/v1/events?after=`.\n\n## Conventions\n\n- Path prefix `/v1`; JSON; camelCase field names; timestamps in Unix milliseconds; lower-case enums.\n- **Prices, sizes and amounts are decimal strings**: `ticks = price × 10^priceDecimals`,\n  `lots = size × 10^sizeDecimals` (both must divide exactly); USDC amounts are scaled by `10^6`.\n  `priceDecimals` / `sizeDecimals` come from `GET /v1/markets`.\n- Markets are addressed by **`symbol`** (`BTC-USD` / `BTC-USDC`), accounts by **`address`**\n  (+ `subaccount`, 0 = main account). **No v1 response addresses anything by a numeric id.** The numeric ids v1\n  does return (`signingAccountId` on `/v1/account/nonce` and `/v1/account/subaccounts`, `signingMarketId` on\n  `/v1/markets`, `token` on `/v1/exchange`) exist only because the EIP-712 structs carry them; they are inputs to\n  signing, never addresses.\n- Every error has the shape `{error:{code, num, message, details?}}`: `code` is a stable string\n  (`Gateway*` for the gateway, the `CoreError` variant name for the execution layer), `num` a stable\n  number (1xxxx gateway / 2xxxx execution layer). HTTP status: 400 malformed request · 401 bad\n  signature · 403 ownership / scope · 404 · 409 · 412 replica behind · 421 wrong node · 422 business\n  rejection · 429 rate limited · 5xx.\n- Pagination: `?limit=&after=<cursor>` → `{…, next, hasMore}`; execution-history endpoints also\n  return a fixed upper bound `upper`, which you pass back unchanged on the following pages.\n- Read consistency: write receipts carry `x-dexos-seq`; a **read after a write** sends\n  `x-dexos-min-seq` and gets 412 when the replica is behind (same semantics as the legacy API).\n\n## Signing (write endpoints)\n\nAll write endpoints share one envelope: `{account, subaccount?, signer?, nonce, expiresAt?, signature,\n…business fields}`. The signature is over the existing EIP-712 typed structs (each endpoint states its\n`x-eip712.typeString`), with the domain from `GET /v1/exchange`. Prices and sizes inside the struct are\nthe **scaled integers**: the SDK scales locally and signs, the gateway performs the same scaling for its\npre-check, and the execution layer verifies the signature authoritatively. When `signer` is present the\nrequest is signed by an API wallet (its nonce lives in the agent scope:\n`GET /v1/account/nonce?address=&signer=`). API wallets can only trade; every fund-moving endpoint\nanswers `403 AgentScopeViolation`.\n\n## Write receipts\n\nBy default (`ack=result`) the request waits for the fold (at most one epoch) and returns the business\noutcome: a single order gets `200` with the order object or `422` with the rejection reason; a batch\nalways gets `200` with per-item `items[]`. `ack=sequenced` returns only `{seq, sub}` (for\nhigh-frequency clients). If the outcome does not arrive within the budget the response is `202`:\n**do not resend**; look it up with `GET /v1/requests/{requestId}`.\n\n## Rate limiting\n\nTwo budgets, each a fixed 60-second window counted in request weights:\n\n- **Per IP** — every `/v1/*` request. The IP is the TCP peer of the gateway; behind the deployment's own\n  reverse proxy it is the `x-real-ip` that proxy writes. `x-forwarded-for`, and an `x-real-ip` sent by\n  anyone other than a trusted proxy, are ignored.\n- **Per account** — writes only, charged **after** the signature pre-check passes, keyed by the main wallet\n  of the account being acted on (subaccounts share their main wallet's budget). A request that names\n  someone else's address cannot pass the pre-check, so it never touches that account's budget.\n\nWeights: reads 1, order book and prices 2, history endpoints 5, writes `1 + floor(n / 40)` where `n` is\nthe number of orders plus cancels in the request (a replace counts both). Both budgets default to 1200\nper minute; the operator can raise either for a given IP or main wallet (market-maker tiers). Every\n`/v1/*` response carries `ratelimit: limit=…, remaining=…, reset=…` and `ratelimit-policy: <limit>;w=60`\nfor the IP budget; a write that reached the account budget also carries\n`x-ratelimit-account: limit=…, remaining=…, reset=…`. Exceeding either budget returns\n`429 GatewayRateLimited` with `retry-after` and `details.bucket` = `ip` | `account`. API-wallet writes are\npre-checked at the gateway too: a signature that does not recover to `signer` is `401\nGatewayBadSignature`; a `signer` with no grant on the account is `403 UnknownAgent`, an expired one\n`403 AgentExpired` — none of them is sequenced. Right after approving an API wallet, send\n`x-dexos-min-seq` = the approval receipt's `seq` with the first write. The legacy endpoints are not rate\nlimited (except `POST /subaccount`, which shares the IP budget).\n"
+    "description": "The DEXOS public API for third-party developers, builders and liquidity providers. The specification\nlives in `docs/specs/public-api-v1.md`; `docs/research/api-landscape-2026-09.md` compares it with\nHyperliquid, Lighter, Aster and Pacifica. **This document mirrors the gateway's v1 route table**\n(`crates/gateway/src/api/v1.rs`, pinned by `scripts/check-openapi.mjs`, INV-API-V1-SPEC-MIRROR).\n**Every read endpoint, write endpoint, vault endpoint and WebSocket channel listed here is implemented.**\nThe only planned items are the timestamp-window nonce (v1.1, an execution-layer change) and the\nbuilder volume projection (§6 of the specification).\nThe legacy endpoints (`/order`, `/markets`, `/ws`, …, documented at `/docs`) remain available; v1 is a\ntranslation layer on top of them and returns bit-identical data.\n\n## Quick start\n\n1. `GET /v1/exchange` → the EIP-712 domain (`domain` / `chainId`) and the token table (with the numeric\n   `token` ids the `Withdrawal` / `Transfer` structs carry); `GET /v1/markets/BTC-USD` → `priceDecimals` /\n   `sizeDecimals` and `signingMarketId` (the `market` field of the signed structs).\n2. `GET /v1/account/nonce?address=<your address>` → the next `nonce` and `signingAccountId` (the value for the\n   `accountId` field of the signed struct; signing is the only thing it is for).\n3. Scale `price` and `size` to integers locally (`ticks = price × 10^priceDecimals`,\n   `lots = size × 10^sizeDecimals`), sign the `Order(...)` struct (each write endpoint states its\n   `x-eip712.typeString`) and `POST /v1/orders`\n   `{account, nonce, signature, symbol, side, type: \"limit\", price, size, clientOrderId?}` →\n   `200 {orderId, status: resting|filled|…}` or `422 {error}`.\n4. Programmatic trading: approve an API wallet once from the main wallet with\n   `POST /v1/account/agents/approve`, then sign with it and pass its address as `signer`\n   (the `AgentExec` signature covers the canonical-bytes hash of the inner command). Batch orders,\n   cancels, replaces and the dead man's switch all go through the API wallet; **an API wallet cannot\n   move funds**.\n5. Subscriptions: `GET /v1/ws` → `{\"method\":\"subscribe\",\"params\":{\"channel\":\"book\",\"symbol\":\"BTC-USD\"}}`.\n   After a disconnect, resume from the last `id` you saw with `/v1/account/fills?after=` or\n   `/v1/events?after=`.\n\n## Conventions\n\n- Path prefix `/v1`; JSON; camelCase field names; timestamps in Unix milliseconds; lower-case enums.\n- **Prices, sizes and amounts are decimal strings**: `ticks = price × 10^priceDecimals`,\n  `lots = size × 10^sizeDecimals` (both must divide exactly); USDC amounts are scaled by `10^6`.\n  `priceDecimals` / `sizeDecimals` come from `GET /v1/markets`.\n- Markets are addressed by **`symbol`** (`BTC-USD` / `BTC-USDC`), accounts by **`address`**\n  (+ `subaccount`, 0 = main account), vaults by **`vault`** (the vault id; v1.1 §4.3). **No v1 response addresses anything by a numeric id.** The numeric ids v1\n  does return (`signingAccountId` on `/v1/account/nonce` and `/v1/account/subaccounts`, `signingMarketId` on\n  `/v1/markets`, `token` on `/v1/exchange`) exist only because the EIP-712 structs carry them; they are inputs to\n  signing, never addresses.\n- Every error has the shape `{error:{code, num, message, details?}}`: `code` is a stable string\n  (`Gateway*` for the gateway, the `CoreError` variant name for the execution layer), `num` a stable\n  number (1xxxx gateway / 2xxxx execution layer). HTTP status: 400 malformed request · 401 bad\n  signature · 403 ownership / scope · 404 · 409 · 412 replica behind · 421 wrong node · 422 business\n  rejection · 429 rate limited · 5xx.\n- Pagination: `?limit=&after=<cursor>` → `{…, next, hasMore}`; execution-history endpoints also\n  return a fixed upper bound `upper`, which you pass back unchanged on the following pages.\n- Read consistency: write receipts carry `x-dexos-seq`; a **read after a write** sends\n  `x-dexos-min-seq` and gets 412 when the replica is behind (same semantics as the legacy API).\n\n## Signing (write endpoints)\n\nAll write endpoints share one envelope: `{account, subaccount?, signer?, nonce, expiresAt?, signature,\n…business fields}`. The signature is over the existing EIP-712 typed structs (each endpoint states its\n`x-eip712.typeString`), with the domain from `GET /v1/exchange`. Prices and sizes inside the struct are\nthe **scaled integers**: the SDK scales locally and signs, the gateway performs the same scaling for its\npre-check, and the execution layer verifies the signature authoritatively. When `signer` is present the\nrequest is signed by an API wallet (its nonce lives in the agent scope:\n`GET /v1/account/nonce?address=&signer=`). API wallets can only trade; every fund-moving endpoint\nanswers `403 AgentScopeViolation`.\n\n## Write receipts\n\nBy default (`ack=result`) the request waits for the fold (at most one epoch) and returns the business\noutcome: a single order gets `200` with the order object or `422` with the rejection reason; a batch\nalways gets `200` with per-item `items[]`. `ack=sequenced` returns only `{seq, sub}` (for\nhigh-frequency clients). If the outcome does not arrive within the budget the response is `202`:\n**do not resend**; look it up with `GET /v1/requests/{requestId}`.\n\n## Rate limiting\n\nTwo budgets, each a fixed 60-second window counted in request weights:\n\n- **Per IP** — every `/v1/*` request. The IP is the TCP peer of the gateway; behind the deployment's own\n  reverse proxy it is the `x-real-ip` that proxy writes. `x-forwarded-for`, and an `x-real-ip` sent by\n  anyone other than a trusted proxy, are ignored.\n- **Per account** — writes only, charged **after** the signature pre-check passes, keyed by the main wallet\n  of the account being acted on (subaccounts share their main wallet's budget). A request that names\n  someone else's address cannot pass the pre-check, so it never touches that account's budget.\n\nWeights: reads 1, order book and prices 2, history endpoints 5, writes `1 + floor(n / 40)` where `n` is\nthe number of orders plus cancels in the request (a replace counts both). Both budgets default to 1200\nper minute; the operator can raise either for a given IP or main wallet (market-maker tiers). Every\n`/v1/*` response carries `ratelimit: limit=…, remaining=…, reset=…` and `ratelimit-policy: <limit>;w=60`\nfor the IP budget; a write that reached the account budget also carries\n`x-ratelimit-account: limit=…, remaining=…, reset=…`. Exceeding either budget returns\n`429 GatewayRateLimited` with `retry-after` and `details.bucket` = `ip` | `account`. API-wallet writes are\npre-checked at the gateway too: a signature that does not recover to `signer` is `401\nGatewayBadSignature`; a `signer` with no grant on the account is `403 UnknownAgent`, an expired one\n`403 AgentExpired` — none of them is sequenced. Right after approving an API wallet, send\n`x-dexos-min-seq` = the approval receipt's `seq` with the first write. The legacy endpoints are not rate\nlimited (except `POST /subaccount`, which shares the IP budget).\n"
   },
   "servers": [
     {
@@ -686,13 +686,13 @@
           {
             "name": "address",
             "in": "query",
-            "required": true,
+            "required": false,
             "schema": {
               "type": "string",
               "pattern": "^0x[0-9a-f]{40}$",
               "description": "EVM address (always lower-case in responses; case-insensitive in requests)"
             },
-            "description": "Main wallet address"
+            "description": "Main wallet address (required unless `vault` is given)"
           },
           {
             "name": "subaccount",
@@ -704,6 +704,16 @@
               "default": 0
             },
             "description": "Subaccount index (0 = main account; in creation order)"
+          },
+          {
+            "name": "vault",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "description": "Vault id: read the vault's own account instead of a wallet's (specification v1.1 §4.3). Mutually exclusive with `address` / `subaccount` (400); an unknown vault is 404. The response then shows `vault` instead of `address` / `subaccount`."
           },
           {
             "$ref": "#/components/parameters/MinSeq"
@@ -744,13 +754,13 @@
           {
             "name": "address",
             "in": "query",
-            "required": true,
+            "required": false,
             "schema": {
               "type": "string",
               "pattern": "^0x[0-9a-f]{40}$",
               "description": "EVM address (always lower-case in responses; case-insensitive in requests)"
             },
-            "description": "Main wallet address"
+            "description": "Main wallet address (required unless `vault` is given)"
           },
           {
             "name": "subaccount",
@@ -762,6 +772,16 @@
               "default": 0
             },
             "description": "Subaccount index (0 = main account; in creation order)"
+          },
+          {
+            "name": "vault",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "description": "Vault id: read the vault's own account instead of a wallet's (specification v1.1 §4.3). Mutually exclusive with `address` / `subaccount` (400); an unknown vault is 404. The response then shows `vault` instead of `address` / `subaccount`."
           },
           {
             "$ref": "#/components/parameters/MinSeq"
@@ -782,6 +802,10 @@
                     },
                     "subaccount": {
                       "type": "integer"
+                    },
+                    "vault": {
+                      "type": "integer",
+                      "description": "Present instead of `address` / `subaccount` when the request addressed a vault (`vault=<id>`, specification v1.1 §4.3)"
                     },
                     "positions": {
                       "type": "array",
@@ -812,19 +836,19 @@
           "Account"
         ],
         "summary": "Open orders",
-        "description": "All markets; `symbol` filters. The read model is indexed by (account, market). `clientOrderId` is resolved from the execution history when only the sequence position was recorded (`ack=sequenced`); if that history is missing the whole request answers 503 instead of silently dropping the id.",
+        "description": "All markets in one read-model query (one consistent view); `symbol` filters. `clientOrderId` is resolved from the execution history when only the sequence position was recorded (`ack=sequenced`); if that history is missing the whole request answers 503 instead of silently dropping the id.",
         "operationId": "v1_open_orders",
         "parameters": [
           {
             "name": "address",
             "in": "query",
-            "required": true,
+            "required": false,
             "schema": {
               "type": "string",
               "pattern": "^0x[0-9a-f]{40}$",
               "description": "EVM address (always lower-case in responses; case-insensitive in requests)"
             },
-            "description": "Main wallet address"
+            "description": "Main wallet address (required unless `vault` is given)"
           },
           {
             "name": "subaccount",
@@ -836,6 +860,16 @@
               "default": 0
             },
             "description": "Subaccount index (0 = main account; in creation order)"
+          },
+          {
+            "name": "vault",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "description": "Vault id: read the vault's own account instead of a wallet's (specification v1.1 §4.3). Mutually exclusive with `address` / `subaccount` (400); an unknown vault is 404. The response then shows `vault` instead of `address` / `subaccount`."
           },
           {
             "name": "symbol",
@@ -870,6 +904,10 @@
                     "subaccount": {
                       "type": "integer"
                     },
+                    "vault": {
+                      "type": "integer",
+                      "description": "Present instead of `address` / `subaccount` when the request addressed a vault (`vault=<id>`, specification v1.1 §4.3)"
+                    },
                     "orders": {
                       "type": "array",
                       "items": {
@@ -902,19 +940,19 @@
           "Account"
         ],
         "summary": "Order history",
-        "description": "This account's order events from the execution history (accepted / fill / canceled / expired, and placed / triggered / rejected / autocanceled for conditional orders), **one event per row**, with the same cursor as `/v1/events` (`after` / `upper` / `hasMore`). Fold by `orderId` if you want one row per order.",
+        "description": "This account's order events from the execution history (accepted / fill / canceled / expired, and placed / triggered / rejected / autocanceled for conditional orders), **one event per row**, paged over the per-account index (dense pages) with the same cursor as `/v1/events` (`after` / `upper` / `hasMore`); `order=desc` walks newest first. Fold by `orderId` if you want one row per order.",
         "operationId": "v1_order_history",
         "parameters": [
           {
             "name": "address",
             "in": "query",
-            "required": true,
+            "required": false,
             "schema": {
               "type": "string",
               "pattern": "^0x[0-9a-f]{40}$",
               "description": "EVM address (always lower-case in responses; case-insensitive in requests)"
             },
-            "description": "Main wallet address"
+            "description": "Main wallet address (required unless `vault` is given)"
           },
           {
             "name": "subaccount",
@@ -926,6 +964,16 @@
               "default": 0
             },
             "description": "Subaccount index (0 = main account; in creation order)"
+          },
+          {
+            "name": "vault",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "description": "Vault id: read the vault's own account instead of a wallet's (specification v1.1 §4.3). Mutually exclusive with `address` / `subaccount` (400); an unknown vault is 404. The response then shows `vault` instead of `address` / `subaccount`."
           },
           {
             "name": "symbol",
@@ -983,6 +1031,20 @@
             "description": "Page size"
           },
           {
+            "name": "order",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "asc",
+                "desc"
+              ],
+              "default": "asc"
+            },
+            "description": "`desc` = newest first: the first page holds the newest rows (up to `upper`) and `next` pages toward older ones; `epoch` / `upper` / `hasMore` mean the same as in `asc`. Keep the same `order` on every page of one walk"
+          },
+          {
             "$ref": "#/components/parameters/MinSeq"
           }
         ],
@@ -1001,6 +1063,10 @@
                     },
                     "subaccount": {
                       "type": "integer"
+                    },
+                    "vault": {
+                      "type": "integer",
+                      "description": "Present instead of `address` / `subaccount` when the request addressed a vault (`vault=<id>`, specification v1.1 §4.3)"
                     },
                     "epoch": {
                       "type": "string"
@@ -1060,13 +1126,13 @@
           {
             "name": "address",
             "in": "query",
-            "required": true,
+            "required": false,
             "schema": {
               "type": "string",
               "pattern": "^0x[0-9a-f]{40}$",
               "description": "EVM address (always lower-case in responses; case-insensitive in requests)"
             },
-            "description": "Main wallet address"
+            "description": "Main wallet address (required unless `vault` is given)"
           },
           {
             "name": "subaccount",
@@ -1078,6 +1144,16 @@
               "default": 0
             },
             "description": "Subaccount index (0 = main account; in creation order)"
+          },
+          {
+            "name": "vault",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "description": "Vault id: read the vault's own account instead of a wallet's (specification v1.1 §4.3). Mutually exclusive with `address` / `subaccount` (400); an unknown vault is 404. The response then shows `vault` instead of `address` / `subaccount`."
           }
         ],
         "responses": {
@@ -1128,13 +1204,13 @@
           {
             "name": "address",
             "in": "query",
-            "required": true,
+            "required": false,
             "schema": {
               "type": "string",
               "pattern": "^0x[0-9a-f]{40}$",
               "description": "EVM address (always lower-case in responses; case-insensitive in requests)"
             },
-            "description": "Main wallet address"
+            "description": "Main wallet address (required unless `vault` is given)"
           },
           {
             "name": "subaccount",
@@ -1146,6 +1222,16 @@
               "default": 0
             },
             "description": "Subaccount index (0 = main account; in creation order)"
+          },
+          {
+            "name": "vault",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "description": "Vault id: read the vault's own account instead of a wallet's (specification v1.1 §4.3). Mutually exclusive with `address` / `subaccount` (400); an unknown vault is 404. The response then shows `vault` instead of `address` / `subaccount`."
           }
         ],
         "responses": {
@@ -1185,13 +1271,13 @@
           {
             "name": "address",
             "in": "query",
-            "required": true,
+            "required": false,
             "schema": {
               "type": "string",
               "pattern": "^0x[0-9a-f]{40}$",
               "description": "EVM address (always lower-case in responses; case-insensitive in requests)"
             },
-            "description": "Main wallet address"
+            "description": "Main wallet address (required unless `vault` is given)"
           },
           {
             "name": "subaccount",
@@ -1203,6 +1289,16 @@
               "default": 0
             },
             "description": "Subaccount index (0 = main account; in creation order)"
+          },
+          {
+            "name": "vault",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "description": "Vault id: read the vault's own account instead of a wallet's (specification v1.1 §4.3). Mutually exclusive with `address` / `subaccount` (400); an unknown vault is 404. The response then shows `vault` instead of `address` / `subaccount`."
           },
           {
             "name": "symbol",
@@ -1260,6 +1356,20 @@
             "description": "Page size"
           },
           {
+            "name": "order",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "asc",
+                "desc"
+              ],
+              "default": "asc"
+            },
+            "description": "`desc` = newest first: the first page holds the newest rows (up to `upper`) and `next` pages toward older ones; `epoch` / `upper` / `hasMore` mean the same as in `asc`. Keep the same `order` on every page of one walk"
+          },
+          {
             "$ref": "#/components/parameters/MinSeq"
           }
         ],
@@ -1298,13 +1408,13 @@
           {
             "name": "address",
             "in": "query",
-            "required": true,
+            "required": false,
             "schema": {
               "type": "string",
               "pattern": "^0x[0-9a-f]{40}$",
               "description": "EVM address (always lower-case in responses; case-insensitive in requests)"
             },
-            "description": "Main wallet address"
+            "description": "Main wallet address (required unless `vault` is given)"
           },
           {
             "name": "subaccount",
@@ -1316,6 +1426,16 @@
               "default": 0
             },
             "description": "Subaccount index (0 = main account; in creation order)"
+          },
+          {
+            "name": "vault",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "description": "Vault id: read the vault's own account instead of a wallet's (specification v1.1 §4.3). Mutually exclusive with `address` / `subaccount` (400); an unknown vault is 404. The response then shows `vault` instead of `address` / `subaccount`."
           },
           {
             "name": "kind",
@@ -1388,6 +1508,20 @@
             "description": "Page size"
           },
           {
+            "name": "order",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "asc",
+                "desc"
+              ],
+              "default": "asc"
+            },
+            "description": "`desc` = newest first: the first page holds the newest rows (up to `upper`) and `next` pages toward older ones; `epoch` / `upper` / `hasMore` mean the same as in `asc`. Keep the same `order` on every page of one walk"
+          },
+          {
             "$ref": "#/components/parameters/MinSeq"
           }
         ],
@@ -1426,13 +1560,13 @@
           {
             "name": "address",
             "in": "query",
-            "required": true,
+            "required": false,
             "schema": {
               "type": "string",
               "pattern": "^0x[0-9a-f]{40}$",
               "description": "EVM address (always lower-case in responses; case-insensitive in requests)"
             },
-            "description": "Main wallet address"
+            "description": "Main wallet address (required unless `vault` is given)"
           },
           {
             "name": "subaccount",
@@ -1444,6 +1578,16 @@
               "default": 0
             },
             "description": "Subaccount index (0 = main account; in creation order)"
+          },
+          {
+            "name": "vault",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "description": "Vault id: read the vault's own account instead of a wallet's (specification v1.1 §4.3). Mutually exclusive with `address` / `subaccount` (400); an unknown vault is 404. The response then shows `vault` instead of `address` / `subaccount`."
           },
           {
             "name": "after",
@@ -1486,6 +1630,20 @@
               "default": 200
             },
             "description": "Page size"
+          },
+          {
+            "name": "order",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "asc",
+                "desc"
+              ],
+              "default": "asc"
+            },
+            "description": "`desc` = newest first: the first page holds the newest rows (up to `upper`) and `next` pages toward older ones; `epoch` / `upper` / `hasMore` mean the same as in `asc`. Keep the same `order` on every page of one walk"
           },
           {
             "$ref": "#/components/parameters/MinSeq"
@@ -1873,13 +2031,13 @@
           {
             "name": "address",
             "in": "query",
-            "required": true,
+            "required": false,
             "schema": {
               "type": "string",
               "pattern": "^0x[0-9a-f]{40}$",
               "description": "EVM address (always lower-case in responses; case-insensitive in requests)"
             },
-            "description": "Main wallet address"
+            "description": "Main wallet address (required unless `vault` is given)"
           },
           {
             "name": "subaccount",
@@ -1891,6 +2049,16 @@
               "default": 0
             },
             "description": "Subaccount index (0 = main account; in creation order)"
+          },
+          {
+            "name": "vault",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "description": "Vault id: read the vault's own account instead of a wallet's (specification v1.1 §4.3). Mutually exclusive with `address` / `subaccount` (400); an unknown vault is 404. The response then shows `vault` instead of `address` / `subaccount`."
           },
           {
             "name": "signer",
@@ -2201,7 +2369,7 @@
           "Account"
         ],
         "summary": "Event backfill",
-        "description": "The raw execution-layer event stream (same shape as the WebSocket `events` channel), filtered by `symbol` / `address`.",
+        "description": "The raw execution-layer event stream (same shape as the WebSocket `events` channel). With `address`: this account's own events from the per-account index, dense pages; adding `symbol` keeps only this account's events in that market. Without `address`: the whole log page by page, `symbol` filtering inside each page — a page may be sparse or empty, follow `next` until `hasMore=false`. Ascending only: `order=desc` answers 400 (the account history endpoints have it).",
         "operationId": "v1_events",
         "parameters": [
           {
@@ -2371,7 +2539,7 @@
           "Vaults"
         ],
         "summary": "Vault list",
-        "description": "Community vaults; the fields match `/vaults*`.",
+        "description": "Community vaults; the fields match `/vaults*`. v1 also gives `managerSubaccount` / `creatorSubaccount`: the subaccount index of the manager's / creator's account under its owner wallet (the same numbering as `?subaccount=`; `managerSubaccount` is `null` while the vault is unclaimed).",
         "operationId": "v1_vaults",
         "parameters": [],
         "responses": {
@@ -2572,7 +2740,7 @@
           "Vaults"
         ],
         "summary": "Vault details",
-        "description": "Community vaults; the fields match `/vaults*`.",
+        "description": "Community vaults; the fields match `/vaults*`. v1 also gives `managerSubaccount` / `creatorSubaccount`: the subaccount index of the manager's / creator's account under its owner wallet (the same numbering as `?subaccount=`; `managerSubaccount` is `null` while the vault is unclaimed).",
         "operationId": "v1_vault",
         "parameters": [
           {
@@ -5502,6 +5670,10 @@
       "Trade": {
         "type": "object",
         "properties": {
+          "id": {
+            "type": "string",
+            "description": "Trade id `<seq>-<sub>-<idx>`; the same id as the WebSocket `trades` frame"
+          },
           "price": {
             "type": "string",
             "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
@@ -5622,8 +5794,6 @@
       "Account": {
         "type": "object",
         "required": [
-          "address",
-          "subaccount",
           "collateral",
           "equity"
         ],
@@ -5635,6 +5805,10 @@
           },
           "subaccount": {
             "type": "integer"
+          },
+          "vault": {
+            "type": "integer",
+            "description": "Present instead of `address` / `subaccount` when the request addressed a vault (`vault=<id>`, specification v1.1 §4.3)"
           },
           "collateral": {
             "type": "string",
@@ -5989,6 +6163,10 @@
           "subaccount": {
             "type": "integer"
           },
+          "vault": {
+            "type": "integer",
+            "description": "Present instead of `address` / `subaccount` when the request addressed a vault (`vault=<id>`, specification v1.1 §4.3)"
+          },
           "epoch": {
             "type": "string"
           },
@@ -6096,6 +6274,13 @@
           "ackedAt": {
             "type": "string",
             "description": "`send_asset` only: event identity of the acknowledgement"
+          },
+          "vault": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "`vault_*` entries only (specification v1.1 §4.3): the vault this entry moves money with — the addressed vault when reading with `vault=`, otherwise the vault whose main account is the counterparty; `null` when the counterparty is not a vault (the creator's `vault_fee`, paid to the fee account). Absent on other kinds"
           }
         }
       },
@@ -6109,6 +6294,10 @@
           },
           "subaccount": {
             "type": "integer"
+          },
+          "vault": {
+            "type": "integer",
+            "description": "Present instead of `address` / `subaccount` when the request addressed a vault (`vault=<id>`, specification v1.1 §4.3)"
           },
           "epoch": {
             "type": "string"
@@ -6178,6 +6367,10 @@
           },
           "subaccount": {
             "type": "integer"
+          },
+          "vault": {
+            "type": "integer",
+            "description": "Present instead of `address` / `subaccount` when the request addressed a vault (`vault=<id>`, specification v1.1 §4.3)"
           },
           "signer": {
             "type": "string",
@@ -6280,11 +6473,15 @@
           "account": {
             "type": "string",
             "pattern": "^0x[0-9a-f]{40}$",
-            "description": "Main wallet address of the account being acted on"
+            "description": "Main wallet address of the account being acted on; with `vault`, the vault manager's main wallet"
           },
           "subaccount": {
             "type": "integer",
             "default": 0
+          },
+          "vault": {
+            "type": "integer",
+            "description": "Optional (specification v1.1 §4.3): act as this vault — the vault's main account is the account acted on and `account` must be the manager's main wallet (else 403 `GatewayForbidden`; an unclaimed vault is 403 `VaultNoManager`). Mutually exclusive with `subaccount`. The main wallet signs with the vault's own nonce (`GET /v1/account/nonce?vault=`, `signingAccountId` = the vault main account); an API wallet must be approved on the account the manager claimed with. Allowed: place (single / batch), cancel, cancel-all, replace, schedule-cancel, leverage; every other write is 403 as a vault. The account rate-limit bucket is `vault:<id>`"
           },
           "signer": {
             "type": "string",
@@ -7159,7 +7356,8 @@
         "method": "subscribe",
         "params": {
           "channel": "book",
-          "symbol": "BTC-USD"
+          "symbol": "BTC-USD",
+          "depth": 50
         },
         "id": 1
       },
@@ -7167,15 +7365,18 @@
         "channel": "subscribed",
         "data": {
           "channel": "book",
-          "symbol": "BTC-USD"
+          "symbol": "BTC-USD",
+          "depth": 50
         },
+        "epoch": "<ledger epoch>",
         "id": 1
       },
       "unsubscribe": {
         "method": "unsubscribe",
         "params": {
           "channel": "book",
-          "symbol": "BTC-USD"
+          "symbol": "BTC-USD",
+          "depth": 50
         },
         "id": 2
       },
@@ -7199,24 +7400,29 @@
       "lagged": {
         "channel": "lagged",
         "data": {
-          "dropped": 128
+          "dropped": 128,
+          "epoch": "<ledger epoch>",
+          "upper": "<seq>-<sub>-4294967295"
         }
       },
       "frame": {
         "channel": "<channel>",
         "data": {},
         "seq": 0,
-        "isSnapshot": false
+        "isSnapshot": false,
+        "epoch": "<private channels only>"
       }
     },
     "rules": [
-      "Snapshot channels (book / bbo / prices / account / positions / orders) send one frame with `isSnapshot:true` on subscribe, then one frame per change (multiple events from the same log entry are merged into one frame).",
+      "Snapshot channels (book / bbo / prices / account / positions / orders) send one frame with `isSnapshot:true` on subscribe. book / bbo / prices / account / positions are then coalesced per block: events only mark them, and at each block boundary (`BlockBegun`, about once a second) each is read once and pushed only if its data changed (`isSnapshot:false`). account / positions of an account that holds positions are also re-read when marks or funding move.",
+      "orders: the snapshot is all open orders across markets; after it every accept / fill / cancel / expiry is one frame with `clientOrderId` (if any) and `status` (open / filled / canceled / expired). Apply frames idempotently by `orderId`: a snapshot replaces the set, any other frame keeps the order if `status` is `open` and removes it otherwise. Order events already covered by the snapshot's view are not sent.",
       "The candles channel sends one frame per fill with **the latest state of the current bar** (o/h/l/c/v accumulated; clients keep the last frame); a new bar starts automatically when the interval rolls over.",
-      "Time-series channels (trades / fills / events) send one frame per event, carrying `seq` and `data.id` (`<seq>-<sub>-<idx>`); after a disconnect, pass the last id seen as `after` to `/v1/account/fills` or `/v1/events` to backfill.",
-      "`lagged` means the server-side broadcast fell behind and frames were dropped; **dropped frames are never resent**. On receiving it, stop and backfill.",
+      "Time-series channels (trades / fills / ledger / events) send one frame per event, carrying `seq` and `data.id`; for fills and ledger `data.id` is the `after` cursor of `/v1/account/fills` and `/v1/account/ledger`.",
+      "Resume: the subscribe ack carries the ledger `epoch`; private frames carry `epoch` and `seq`, public book / bbo frames carry `seq`. `lagged{dropped, epoch, upper}` means the server-side broadcast fell behind and frames were dropped; **dropped frames are never resent**. Right after it every snapshot subscription receives one `isSnapshot:true` frame, and fills / ledger frames at or before `upper` are no longer sent: backfill them with `after=<last data.id received>&epoch=<epoch>&upper=<upper>` (retry later on 400 `not yet complete`); the two parts join without gaps or duplicates. If `epoch` changed after a reconnect, rebuild state instead of resuming old cursors.",
       "At most 200 subscriptions per connection; the server closes a connection that has sent no frame (pings count) for 60 s.",
       "Rate limiting: REST uses fixed 60-second windows per IP and, for writes, per main wallet (weights: reads 1, order book / prices 2, history 5, writes 1 + floor(n / 40); default 1200 per minute each); every response carries `ratelimit` / `ratelimit-policy`, writes also `x-ratelimit-account`, and exceeding a budget yields 429 with `retry-after`. The WebSocket connection itself carries no weight.",
-      "Private channels are subscribed by address without authentication (the same data is publicly readable over REST; identical to Hyperliquid / Pacifica)."
+      "Private channels are subscribed by `address` (+ optional `subaccount`, default 0) without authentication (the same data is publicly readable over REST; identical to Hyperliquid / Pacifica). Subscribing by `vault` is not supported yet.",
+      "Private channels (orders / fills / account / positions / ledger) accept `vault` instead of `address` / `subaccount` (specification v1.1 §4.3; giving both is an error frame); their frames then show `vault` in place of `address` / `subaccount`."
     ],
     "channels": {
       "prices": {
@@ -7225,9 +7431,10 @@
       },
       "book": {
         "params": [
-          "symbol"
+          "symbol",
+          "depth?"
         ],
-        "data": "Book (20 levels)"
+        "data": "Book (`depth` levels per side, 1..=100, default 20; out of range is an error frame)"
       },
       "bbo": {
         "params": [
@@ -7243,27 +7450,35 @@
       },
       "orders": {
         "params": [
-          "address"
+          "address",
+          "subaccount?",
+          "vault?"
         ],
-        "data": "`{address, orderId, symbol, event: accepted|fill|canceled|expired, status, side?, price?, size?, filled?, remaining?, lastFilled?, fillId?, ts}`"
+        "data": "Snapshot: `{address, subaccount, orders:[OpenOrder]}`. Update: `{address, subaccount, orderId, clientOrderId, symbol, event: accepted|fill|canceled|expired, status: open|filled|canceled|expired, side?, price?, size?, filled?, remaining?, lastFilled?, fillId?, ts}`"
       },
       "fills": {
         "params": [
-          "address"
+          "address",
+          "subaccount?",
+          "vault?"
         ],
-        "data": "Fill + `address`"
+        "data": "Fill (the `GET /v1/account/fills` row) + `address`, `subaccount`"
       },
       "account": {
         "params": [
-          "address"
+          "address",
+          "subaccount?",
+          "vault?"
         ],
-        "data": "The margin summary subset of Account"
+        "data": "Account (the `GET /v1/account` body, same view)"
       },
       "positions": {
         "params": [
-          "address"
+          "address",
+          "subaccount?",
+          "vault?"
         ],
-        "data": "`{address, positions:[Position], ts}`"
+        "data": "`{address, subaccount, positions:[Position]}` (the `GET /v1/account/positions` body)"
       },
       "candles": {
         "params": [
@@ -7280,9 +7495,11 @@
       },
       "ledger": {
         "params": [
-          "address"
+          "address",
+          "subaccount?",
+          "vault?"
         ],
-        "data": "LedgerEntry + `address` (deposits / withdrawals / fees / funding / transfers …); one frame per ledger leg caused by a command"
+        "data": "LedgerEntry + `address`, `subaccount` (deposits / withdrawals / fees / funding / transfers …); one frame per ledger leg caused by a command"
       },
       "events": {
         "params": [
