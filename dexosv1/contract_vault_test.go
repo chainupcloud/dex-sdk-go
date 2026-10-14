@@ -4,12 +4,14 @@ package dexosv1
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
+	"math/big"
 	"net/http"
 	"net/url"
 	"os"
+	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -24,7 +26,9 @@ import (
 //   - 读:金库详情 / 列表的 managerSubaccount、creatorSubaccount;按 `vault=` 读汇总、持仓、挂单、成交、流水、nonce,
 //     原始响应对钉住的规格做 schema 校验;vault_* 流水带 vault;不支持金库身份的端点回 400。
 //   - 写:manager 给一把新生成的 API 钱包授权(挂在 manager 认领金库所用的账户上),会话以金库身份挂远离市价的
-//     只挂单再换单、撤单、断线保护、撤全部;没授权的钥匙建不了会话;最后核对本地 nonce 与服务端一致。
+//     只挂单再换单、撤单、断线保护、撤全部;没授权的钥匙建不了会话;最后核对本地 nonce 与服务端一致,并撤销这把 API 钱包。
+//   - 金库管理(新建的金库才做):manager 主钱包建库、存入并按新得的份额赎回、加删一个黑名单市场;
+//     每个写的原始回执对钉住的规格做 schema 校验。
 //   - WS:按金库订阅 orders / account / positions / fills / ledger,帧按金库路由;taker 吃掉金库一张最优价只挂单,
 //     核对金库的订单事件、成交帧与仓位帧,之后用一笔反向成交平掉。
 //
@@ -208,6 +212,25 @@ func TestContractVault(t *testing.T) {
 	if _, err := gw.ApproveAgent(ctx, agent.Address(), time.Now().Add(time.Hour), "sdk-vault-ct"); err != nil {
 		t.Fatalf("ApproveAgent: %v", err)
 	}
+	// 最后(撤单、平仓之后)撤销这把 API 钱包,manager 账户回到测试前的样子
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+		defer cancel()
+		if _, err := gw.RevokeAgent(ctx, agent.Address()); err != nil {
+			t.Errorf("RevokeAgent: %v", err)
+			return
+		}
+		grant := AccountRef{Address: manager.Address(), Subaccount: *v.ManagerSubaccount}
+		agents, err := c.Agents(ctx, grant)
+		if err != nil {
+			t.Errorf("撤销后读授权列表: %v", err)
+		}
+		for _, a := range agents {
+			if a.Address == agent.Address().Hex() {
+				t.Errorf("撤销后 %s 仍在授权列表里", a.Address)
+			}
+		}
+	}()
 	s, err := NewSession(ctx, c, agent, ref)
 	if err != nil {
 		t.Fatalf("NewSession(vault): %v", err)
@@ -366,6 +389,34 @@ func TestContractVault(t *testing.T) {
 		}
 	}
 
+	// 金库资金与配置(只对本测试新建的金库:manager 就是 creator,没有锁定期与赎回窗口):manager 存入、按新得的份额赎回,
+	// 加一个与做市无关的黑名单市场再删掉
+	if created {
+		contractVaultMoney(t, ctx, c, gw, manager.Address(), id)
+		var other *Market
+		for i := range cat.Markets() {
+			if mk := &cat.Markets()[i]; mk.Symbol != m.Symbol {
+				other = mk
+				break
+			}
+		}
+		if other != nil {
+			for _, kind := range []string{VaultConfigAddBlacklist, VaultConfigRemoveBlacklist} {
+				if _, err := gw.ChangeVaultConfig(ctx, id, VaultConfigChange{Kind: kind, Markets: []*Market{other}}); err != nil {
+					t.Fatalf("ChangeVaultConfig %s %s: %v", kind, other.Symbol, err)
+				}
+				v, err := c.Vault(ctx, id)
+				if err != nil {
+					t.Fatal(err)
+				}
+				listed := slices.ContainsFunc(v.Blacklist, func(s string) bool { return strings.EqualFold(s, other.Symbol) })
+				if listed != (kind == VaultConfigAddBlacklist) {
+					t.Errorf("%s %s 之后黑名单是 %v", kind, other.Symbol, v.Blacklist)
+				}
+			}
+		}
+	}
+
 	// 本地 nonce 与服务端一致
 	addr := agent.Address()
 	if n, err := c.Nonce(ctx, ref, &addr); err != nil || n.Nonce != s.Nonce() {
@@ -387,66 +438,33 @@ func TestContractVault(t *testing.T) {
 			t.Errorf("POST %s 回 %d: %s", r.path, r.status, r.body)
 			continue
 		}
-		if errs := validate(spec, postResponseSchema(t, spec, r.path, "200"), decodeJSON(t, r.body), r.path); len(errs) > 0 {
+		// 金库写的路径带金库号,规格里是 /v1/vaults/{id}/…
+		path := vaultIDPath.ReplaceAllString(r.path, "/v1/vaults/{id}/")
+		if errs := validate(spec, postResponseSchema(t, spec, path, "200"), decodeJSON(t, r.body), r.path); len(errs) > 0 {
 			t.Errorf("POST %s 的响应不符合钉住的规格:\n  %s\n  原文 %s", r.path, strings.Join(errs, "\n  "), r.body)
 		}
 	}
 }
 
-// createManagedVaultType 与 dex-os crates/auth/src/lib.rs CREATE_MANAGED_VAULT_TYPE 逐字一致。
-const createManagedVaultType = "CreateManagedVault(address owner,uint32 accountId,address manager,uint32 profitSharePpm,uint64 depositMinDurationMs,uint32 managerMinPortionPpm,uint32 managerLiqPortionPpm,uint32 withdrawWindowS,uint32 withdrawDurationS,uint128 depositCap,uint128 seedAmount,bytes32 depositorWhitelistHash,uint64 nonce)"
+var vaultIDPath = regexp.MustCompile(`^/v1/vaults/[0-9]+/`)
 
-// contractCreateVault owner 主钱包按 `POST /v1/vaults` 新建金库:manager 是自己(认领在主账户上)、出资人白名单
+// contractCreateVault owner 主钱包([Wallet.CreateVault])新建金库:manager 是自己(认领在主账户上)、出资人白名单
 // 只有自己、不设熔断线与存取期限,种子 seed USDC 从主账户扣。返回新金库号。
 func contractCreateVault(t *testing.T, ctx context.Context, c *Client, owner *dexos.Signer, seed string) uint16 {
 	t.Helper()
-	ex, err := c.Exchange(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	d, err := ex.SigningDomain()
+	w, err := NewWallet(ctx, c, owner, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
 	me := owner.Address()
-	n, err := c.Nonce(ctx, AccountRef{Address: me}, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	atoms, err := ParseFixed(seed, 6)
-	if err != nil {
-		t.Fatal(err)
-	}
-	digest := signingHash(d, dexos.Keccak256(
-		dexos.Keccak256([]byte(createManagedVaultType)),
-		wordAddr(me), word(uint64(n.SigningAccountID)), wordAddr(me),
-		word(0), word(0), word(0), word(0), word(0), word(0), word(0), // 分成、最短存期、两条比例线、存取窗口、上限
-		word(atoms.Uint64()),
-		dexos.Keccak256(me[:]), // 出资人白名单只有自己:keccak(升序去重后的地址拼接)
-		word(n.Nonce),
-	))
-	sig, err := owner.SignHashHex(digest)
-	if err != nil {
-		t.Fatal(err)
-	}
 	name := fmt.Sprintf("sdk-ct-%d", time.Now().UnixMilli())
-	status, raw, err := c.post(ctx, "/v1/vaults", map[string]any{
-		"account": me.Hex(), "subaccount": 0, "nonce": n.Nonce, "signature": sig,
-		"name": name, "description": "dex-sdk-go dexosv1 金库身份契约测试", "manager": me.Hex(),
-		"seedAmount": seed, "depositorWhitelist": []string{me.Hex()},
-	})
-	if err != nil || status != http.StatusOK {
-		t.Fatalf("建金库: HTTP %d %v: %s", status, err, raw)
+	r, err := w.CreateVault(ctx, VaultCreate{Name: name, Description: "dex-sdk-go dexosv1 金库身份契约测试", Manager: &me,
+		SeedAmount: seed, DepositorWhitelist: []dexos.Address{me}})
+	if err != nil {
+		t.Fatalf("建金库: %v", err)
 	}
-	var r struct {
-		Status string  `json:"status"`
-		Vault  *uint16 `json:"vault"`
-	}
-	if err := json.Unmarshal(raw, &r); err != nil || r.Status != "ok" || r.Vault == nil {
-		t.Fatalf("建金库回执: %s", raw)
-	}
-	t.Logf("新建金库 %d(%s),种子 %s USDC", *r.Vault, name, seed)
-	return *r.Vault
+	t.Logf("新建金库 %d(%s),种子 %s USDC", r.Vault, name, seed)
+	return r.Vault
 }
 
 // contractMarket DEXOS_V1_WRITE_SYMBOL 或目录里第一个有标记价的永续。
@@ -530,4 +548,41 @@ func contractUnwind(t *testing.T, c *Client, m *Market, s *Session, tw *Wallet, 
 		return
 	}
 	t.Logf("已平仓:%s × %s", m.Scale.Price(price), m.Scale.Size(lots))
+}
+
+// contractVaultMoney manager 主钱包向金库存入 10 USDC,等份额铸出(下一次折叠)后按新得的份额赎回。
+func contractVaultMoney(t *testing.T, ctx context.Context, c *Client, w *Wallet, owner dexos.Address, id uint16) {
+	t.Helper()
+	shares := func() *big.Int {
+		ps, err := c.MyVaults(ctx, owner)
+		if err != nil {
+			t.Fatalf("MyVaults: %v", err)
+		}
+		total := new(big.Int)
+		for _, p := range ps {
+			if p.Vault == id {
+				n, ok := new(big.Int).SetString(p.Shares, 10)
+				if !ok {
+					t.Fatalf("金库 %d 的份额 %q 不是整数", id, p.Shares)
+				}
+				total.Add(total, n)
+			}
+		}
+		return total
+	}
+	before := shares()
+	if _, err := w.DepositToVault(ctx, id, "10"); err != nil {
+		t.Fatalf("DepositToVault: %v", err)
+	}
+	minted := new(big.Int)
+	for deadline := time.Now().Add(20 * time.Second); minted.Sign() <= 0; time.Sleep(500 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatalf("存入 20s 后份额没有增加(之前 %s)", before)
+		}
+		minted.Sub(shares(), before)
+	}
+	if _, err := w.RedeemFromVault(ctx, id, minted.String()); err != nil {
+		t.Fatalf("RedeemFromVault %s: %v", minted, err)
+	}
+	t.Logf("manager 向金库 %d 存入 10 USDC、赎回新得的 %s 份额", id, minted)
 }

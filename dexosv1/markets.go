@@ -8,7 +8,7 @@ import (
 	"strings"
 )
 
-// Exchange 连接参数(`GET /v1/exchange`)里本包用得到的部分:EIP-712 域与 token 表。
+// Exchange 连接参数(`GET /v1/exchange`)里本包用得到的部分:EIP-712 域、token 表与资金费结算周期。
 type Exchange struct {
 	ChainID uint64 `json:"chainId"`
 	Domain  struct {
@@ -20,6 +20,9 @@ type Exchange struct {
 		Tokens []Token `json:"tokens"`
 	} `json:"deposit"`
 	ServerTime int64 `json:"serverTime"`
+	// FundingTickSec 资金费结算周期(秒,≥ 1)。全局:所有永续市场同一个周期(v1.1 §4.9-12)。
+	// 节点刚启动、还不知道它时整个响应是 503 GatewayUnavailable,稍后重读。
+	FundingTickSec uint64 `json:"fundingTickSec"`
 	// Version 网关的版本指纹。CodecVer 是它认的规范命令编码版本,与 dexos.CodecVersion 不同就签不出它认的命令。
 	Version struct {
 		CodecVer uint32 `json:"codecVer"`
@@ -56,7 +59,17 @@ type Market struct {
 	Status string
 	// MarginMode "cross" | "isolated"。
 	MarginMode string
-	Scale      Scale
+	// StrictIsolated 部署方模式是 strictIsolated:逐仓,且持仓期间不能改杠杆。与 MarginMode 合起来还原部署方模式:
+	// cross = normal,isolated + false = noCross,isolated + true = strictIsolated。
+	StrictIsolated bool
+	Scale          Scale
+	// QuotePerTickLot 每 tick × lot 折多少计价币原子单位:名义额(原子单位)= ticks × lots × QuotePerTickLot。
+	QuotePerTickLot uint64
+	// BaseToken / QuoteToken 现货的 base / quote token 号(与 [Token] 的 Token 同一编号),
+	// BasePerLot 现货每手折多少 base 原子单位;永续三项都是 nil。
+	BaseToken  *uint32
+	QuoteToken *uint32
+	BasePerLot *uint64
 	// MinNotional 最小名义额(USDC 十进制);"0" = 不限。
 	MinNotional string
 	// MaxLeverage nil = 现货。
@@ -90,8 +103,13 @@ type wireMarket struct {
 	Kind            string      `json:"kind"`
 	Status          string      `json:"status"`
 	MarginMode      string      `json:"marginMode"`
+	StrictIsolated  bool        `json:"strictIsolated"`
 	PriceDecimals   uint8       `json:"priceDecimals"`
 	SizeDecimals    uint8       `json:"sizeDecimals"`
+	QuotePerTickLot string      `json:"quotePerTickLot"`
+	BaseToken       *uint32     `json:"baseToken"`
+	QuoteToken      *uint32     `json:"quoteToken"`
+	BasePerLot      *string     `json:"basePerLot"`
 	MinNotional     string      `json:"minNotional"`
 	MaxLeverage     *uint32     `json:"maxLeverage"`
 	LastPrice       string      `json:"lastPrice"`
@@ -111,7 +129,10 @@ func (w wireMarket) market() (Market, error) {
 		Kind:            w.Kind,
 		Status:          w.Status,
 		MarginMode:      w.MarginMode,
+		StrictIsolated:  w.StrictIsolated,
 		Scale:           Scale{PriceDecimals: w.PriceDecimals, SizeDecimals: w.SizeDecimals},
+		BaseToken:       w.BaseToken,
+		QuoteToken:      w.QuoteToken,
 		MinNotional:     w.MinNotional,
 		MaxLeverage:     w.MaxLeverage,
 		FundingRate:     w.FundingRate,
@@ -121,6 +142,16 @@ func (w wireMarket) market() (Market, error) {
 		return Market{}, fmt.Errorf("dexosv1: 市场缺 symbol")
 	}
 	var err error
+	if m.QuotePerTickLot, err = strconv.ParseUint(w.QuotePerTickLot, 10, 64); err != nil {
+		return Market{}, fmt.Errorf("dexosv1: %s quotePerTickLot: %w", w.Symbol, err)
+	}
+	if w.BasePerLot != nil {
+		n, err := strconv.ParseUint(*w.BasePerLot, 10, 64)
+		if err != nil {
+			return Market{}, fmt.Errorf("dexosv1: %s basePerLot: %w", w.Symbol, err)
+		}
+		m.BasePerLot = &n
+	}
 	if m.LastPrice, err = m.Scale.Ticks(w.LastPrice); err != nil {
 		return Market{}, fmt.Errorf("dexosv1: %s lastPrice: %w", w.Symbol, err)
 	}
@@ -224,10 +255,12 @@ type Level struct {
 // Book 盘口快照。Seq 是这份快照所在的状态点(与写回执的 seq 同一条轴)。
 type Book struct {
 	Symbol string
-	Bids   []Level // 价格降序
-	Asks   []Level // 价格升序
-	Seq    uint64
-	TS     int64
+	// Depth 这份快照按多少档取的(REST 的 depth 或 WS 订阅的 depth;没给时是服务端缺省)。
+	Depth int
+	Bids  []Level // 价格降序
+	Asks  []Level // 价格升序
+	Seq   uint64
+	TS    int64
 }
 
 // Book 盘口(`/v1/markets/{symbol}/book`)。depth 0 = 服务端缺省(20),上限 200。
@@ -246,6 +279,7 @@ func (c *Client) Book(ctx context.Context, m *Market, depth int) (*Book, error) 
 // wireBook 盘口的线上形状(REST 响应与 WS `book` 帧同形)。
 type wireBook struct {
 	Symbol string      `json:"symbol"`
+	Depth  int         `json:"depth"`
 	Bids   [][2]string `json:"bids"`
 	Asks   [][2]string `json:"asks"`
 	Seq    uint64      `json:"seq"`
@@ -256,7 +290,7 @@ func (w wireBook) book(m *Market) (*Book, error) {
 	if !strings.EqualFold(w.Symbol, m.Symbol) {
 		return nil, fmt.Errorf("dexosv1: 问 %s 的盘口,答的是 %q", m.Symbol, w.Symbol)
 	}
-	b := &Book{Symbol: w.Symbol, Seq: w.Seq, TS: w.TS}
+	b := &Book{Symbol: w.Symbol, Depth: w.Depth, Seq: w.Seq, TS: w.TS}
 	var err error
 	if b.Bids, err = levels(m.Scale, w.Bids); err != nil {
 		return nil, fmt.Errorf("dexosv1: %s bids: %w", m.Symbol, err)
@@ -294,6 +328,13 @@ type Price struct {
 	BestAsk      *uint32
 	FundingRate  *string
 	OpenInterest *uint64
+	// FundingIndex 最近一次结算后的累计资金费指数(整数串,与 `/v1/markets` 的 fundingIndex 同值);nil = 现货。
+	FundingIndex *string
+	// LastFundingMs 最近一次资金费结算的区块时间(Unix 毫秒);NextFundingMs 下一次应结的时刻
+	// (LastFundingMs + Exchange.FundingTickSec×1000,在第一个时间到点的区块结,实际可能晚一个块)。
+	// nil = 现货或还没结算过。
+	LastFundingMs *int64
+	NextFundingMs *int64
 	// PrevDayPrice / High24h / Low24h 滚动 24h 窗口的起点价、最高、最低。
 	PrevDayPrice *uint32
 	High24h      *uint32
@@ -313,6 +354,9 @@ type wirePrice struct {
 	BestBid        *string `json:"bestBid"`
 	BestAsk        *string `json:"bestAsk"`
 	FundingRate    *string `json:"fundingRate"`
+	FundingIndex   *string `json:"fundingIndex"`
+	LastFundingMs  *int64  `json:"lastFundingMs"`
+	NextFundingMs  *int64  `json:"nextFundingMs"`
 	OpenInterest   *string `json:"openInterest"`
 	PrevDayPrice   *string `json:"prevDayPrice"`
 	Change24h      *string `json:"change24h"`
@@ -358,7 +402,8 @@ func (w wirePrices) prices(cat *Catalog) (*Prices, error) {
 		if err != nil {
 			return nil, err
 		}
-		p := Price{Symbol: wp.Symbol, FundingRate: wp.FundingRate, Change24h: wp.Change24h, QuoteVolume24h: wp.QuoteVolume24h}
+		p := Price{Symbol: wp.Symbol, FundingRate: wp.FundingRate, FundingIndex: wp.FundingIndex, LastFundingMs: wp.LastFundingMs,
+			NextFundingMs: wp.NextFundingMs, Change24h: wp.Change24h, QuoteVolume24h: wp.QuoteVolume24h}
 		if p.Last, err = m.Scale.Ticks(wp.Last); err != nil {
 			return nil, fmt.Errorf("dexosv1: %s last: %w", wp.Symbol, err)
 		}
@@ -399,14 +444,86 @@ func (w wirePrices) prices(cat *Catalog) (*Prices, error) {
 	return out, nil
 }
 
-// K 线周期(v1.1 §4.6)。1M / 1Y 按 UTC 自然月、自然年分桶。
+// Ticker 一个市场最近 24 小时的成交统计(`GET /v1/tickers`)。价格是 tick、数量是 lot;
+// 窗口里没有成交时 Trades 为 0、量为 0、四个价格都是 nil。
+type Ticker struct {
+	Symbol                string
+	Open, High, Low, Last *uint32
+	// Volume 基础币成交量;QuoteVolume 计价币成交额(十进制)。
+	Volume      uint64
+	QuoteVolume string
+	Trades      int
+}
+
+type wireTicker struct {
+	Symbol      string  `json:"symbol"`
+	Open        *string `json:"open"`
+	High        *string `json:"high"`
+	Low         *string `json:"low"`
+	Last        *string `json:"last"`
+	Volume      string  `json:"volume"`
+	QuoteVolume string  `json:"quoteVolume"`
+	Trades      int     `json:"trades"`
+}
+
+// Tickers `GET /v1/tickers` 的结果。窗口是 [WindowStart, WindowEnd)(毫秒),WindowEnd = 服务端当前时刻;
+// 按成交表算,与 [Prices] 的 24h 字段口径不同(那边锚在最近一个区块、按 1m 桶对齐)。
+type Tickers struct {
+	Tickers     []Ticker
+	WindowStart int64
+	WindowEnd   int64
+}
+
+// Tickers 全部市场最近 24 小时的成交统计。响应里出现目录外的符号时报错(不猜精度)。
+func (c *Client) Tickers(ctx context.Context, cat *Catalog) (*Tickers, error) {
+	var w struct {
+		Tickers     []wireTicker `json:"tickers"`
+		WindowStart int64        `json:"windowStart"`
+		WindowEnd   int64        `json:"windowEnd"`
+	}
+	if err := c.get(ctx, "/v1/tickers", nil, marketRead, &w); err != nil {
+		return nil, err
+	}
+	out := &Tickers{WindowStart: w.WindowStart, WindowEnd: w.WindowEnd, Tickers: make([]Ticker, 0, len(w.Tickers))}
+	for _, wt := range w.Tickers {
+		m, err := cat.Market(wt.Symbol)
+		if err != nil {
+			return nil, err
+		}
+		t := Ticker{Symbol: wt.Symbol, QuoteVolume: wt.QuoteVolume, Trades: wt.Trades}
+		for _, f := range []struct {
+			name string
+			in   *string
+			out  **uint32
+		}{{"open", wt.Open, &t.Open}, {"high", wt.High, &t.High}, {"low", wt.Low, &t.Low}, {"last", wt.Last, &t.Last}} {
+			if f.in == nil {
+				continue
+			}
+			p, err := m.Scale.Ticks(*f.in)
+			if err != nil {
+				return nil, fmt.Errorf("dexosv1: %s ticker %s: %w", wt.Symbol, f.name, err)
+			}
+			*f.out = &p
+		}
+		if t.Volume, err = m.Scale.Lots(wt.Volume); err != nil {
+			return nil, fmt.Errorf("dexosv1: %s ticker volume: %w", wt.Symbol, err)
+		}
+		out.Tickers = append(out.Tickers, t)
+	}
+	return out, nil
+}
+
+// K 线周期(v1.1 §4.6)。1w 起于周一,1M / 1Y 按 UTC 自然月、自然年分桶。
 const (
 	Interval1m  = "1m"
 	Interval5m  = "5m"
 	Interval15m = "15m"
 	Interval30m = "30m"
 	Interval1h  = "1h"
+	Interval2h  = "2h"
 	Interval4h  = "4h"
+	Interval8h  = "8h"
+	Interval12h = "12h"
 	Interval1d  = "1d"
 	Interval1w  = "1w"
 	Interval1M  = "1M"
@@ -414,8 +531,8 @@ const (
 )
 
 var intervals = map[string]bool{
-	Interval1m: true, Interval5m: true, Interval15m: true, Interval30m: true, Interval1h: true,
-	Interval4h: true, Interval1d: true, Interval1w: true, Interval1M: true, Interval1Y: true,
+	Interval1m: true, Interval5m: true, Interval15m: true, Interval30m: true, Interval1h: true, Interval2h: true,
+	Interval4h: true, Interval8h: true, Interval12h: true, Interval1d: true, Interval1w: true, Interval1M: true, Interval1Y: true,
 }
 
 // Candle 一根 K 线。Open 含、Close 不含(= 下一根的起点;1M / 1Y 是那个自然月 / 年的长度)。

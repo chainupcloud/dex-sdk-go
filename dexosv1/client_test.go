@@ -102,12 +102,20 @@ func TestCatalogAndBookScaleToTicksAndLots(t *testing.T) {
 		t.Fatal(err)
 	}
 	if btc.Scale != (Scale{PriceDecimals: 0, SizeDecimals: 3}) || btc.LastPrice != 83952 || *btc.MarkPrice != 82680 ||
-		btc.BestBid != nil || *btc.OpenInterest != 184 || *btc.MaxLeverage != 20 || btc.SigningMarketID != 0 {
+		btc.BestBid != nil || *btc.OpenInterest != 184 || *btc.MaxLeverage != 20 || btc.SigningMarketID != 0 ||
+		btc.QuotePerTickLot != 1000 || btc.StrictIsolated || btc.BaseToken != nil || btc.QuoteToken != nil || btc.BasePerLot != nil {
 		t.Fatalf("BTC-USD 换算不对: %+v", btc)
 	}
 	eth, _ := cat.Market("ETH-USD")
-	if *eth.BestBid != 24926 || *eth.BestAsk != 24934 || *eth.MarkPrice != 24931 || *eth.OpenInterest != 1250 || eth.MinNotional != "10" {
+	if *eth.BestBid != 24926 || *eth.BestAsk != 24934 || *eth.MarkPrice != 24931 || *eth.OpenInterest != 1250 || eth.MinNotional != "10" ||
+		eth.MarginMode != "isolated" || !eth.StrictIsolated {
 		t.Fatalf("ETH-USD 换算不对: %+v", eth)
+	}
+	// 现货:base / quote 的 token 号与每手的 base 原子单位;没有杠杆、标记价、持仓量
+	spot, _ := cat.Market("BTC-USDC")
+	if spot.Kind != "spot" || *spot.BaseToken != 1 || *spot.QuoteToken != 0 || *spot.BasePerLot != 100000 || spot.QuotePerTickLot != 1000 ||
+		spot.MaxLeverage != nil || spot.MarkPrice != nil || spot.OpenInterest != nil || spot.FundingRate != nil || *spot.BestBid != 83890 {
+		t.Fatalf("BTC-USDC 换算不对: %+v", spot)
 	}
 	if _, err := cat.Market("SOL-USD"); err == nil {
 		t.Fatal("目录外的符号应当报错")
@@ -118,7 +126,7 @@ func TestCatalogAndBookScaleToTicksAndLots(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if b.Seq != 231461888 || len(b.Bids) != 2 || b.Bids[0] != (Level{24926, 300}) || b.Asks[1] != (Level{24936, 2}) {
+	if b.Seq != 231461888 || b.Depth != 2 || len(b.Bids) != 2 || b.Bids[0] != (Level{24926, 300}) || b.Asks[1] != (Level{24936, 2}) {
 		t.Fatalf("盘口换算不对: %+v", b)
 	}
 	if got := f.requests()[1].URL.Query().Get("depth"); got != "2" {
@@ -126,13 +134,22 @@ func TestCatalogAndBookScaleToTicksAndLots(t *testing.T) {
 	}
 }
 
-// 价格没对齐 tick 的响应不能被悄悄舍入:整份目录报错。
+// 价格没对齐 tick、整数字段不是整数:响应不能被悄悄舍入或截断,整份目录报错。
 func TestCatalogRejectsMisalignedPrice(t *testing.T) {
-	f, c := newFake(t)
-	body := strings.Replace(string(fixture(t, "markets.json")), `"lastPrice":"2493"`, `"lastPrice":"2493.05"`, 1)
-	f.routes["/v1/markets"] = func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(body)) }
-	if _, err := c.Catalog(context.Background()); err == nil || !strings.Contains(err.Error(), "lastPrice") {
-		t.Fatalf("没对齐的价格应当报错,得到 %v", err)
+	for _, c := range []struct{ from, to, want string }{
+		{`"lastPrice":"2493"`, `"lastPrice":"2493.05"`, "lastPrice"},
+		{`"quotePerTickLot":"1000"`, `"quotePerTickLot":"1000.5"`, "quotePerTickLot"},
+		{`"basePerLot":"100000"`, `"basePerLot":"-1"`, "basePerLot"},
+	} {
+		f, cl := newFake(t)
+		body := strings.Replace(string(fixture(t, "markets.json")), c.from, c.to, 1)
+		if body == string(fixture(t, "markets.json")) {
+			t.Fatalf("fixture 里没有 %s", c.from)
+		}
+		f.routes["/v1/markets"] = func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(body)) }
+		if _, err := cl.Catalog(context.Background()); err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Fatalf("%s 应当报错,得到 %v", c.to, err)
+		}
 	}
 }
 
@@ -170,9 +187,18 @@ func TestAccountReads(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(orders) != 2 || orders[0].OrderID != 2240412712968 || *orders[0].ClientOrderID != "mm-1" || orders[0].Price != 24905 ||
+	if len(orders) != 3 || orders[0].OrderID != 2240412712968 || *orders[0].ClientOrderID != "mm-1" || orders[0].Price != 24905 ||
 		orders[0].Lots != 50 || orders[0].FilledLots != 10 || orders[0].RemainingLots != 40 || orders[1].ClientOrderID != nil || orders[1].Price != 84000 {
 		t.Fatalf("挂单不对: %+v", orders)
+	}
+	// 在簿挂单没有 tif / trigger;reduceOnly 台账里没有记录时为 null
+	if orders[0].TIF != nil || orders[0].Trigger != nil || orders[0].ReduceOnly == nil || *orders[0].ReduceOnly || orders[1].ReduceOnly != nil {
+		t.Fatalf("在簿挂单的 tif / reduceOnly / trigger 不对: %+v", orders[:2])
+	}
+	// 待触发的条件单(仓位止损):价量方向是子单的,触发价换成 tick
+	if o := orders[2]; o.Trigger == nil || *o.Trigger != (OrderTrigger{Price: 80500, Above: false, PositionTpsl: true}) ||
+		o.TIF == nil || *o.TIF != "gtc" || o.ReduceOnly == nil || !*o.ReduceOnly || o.Price != 80000 || o.Lots != 184 || o.Status != "open" {
+		t.Fatalf("条件单不对: %+v", o)
 	}
 
 	f.routes["/v1/account/agents"] = serve(t, 200, "agents.json")
@@ -228,6 +254,11 @@ func TestMarketDataReads(t *testing.T) {
 	if *e.BestBid != 24926 || *e.Mark != 24931 || e.Oracle != nil || e.PrevDayPrice != nil || *e.Volume24h != 0 {
 		t.Fatalf("ETH 价格不对: %+v", e)
 	}
+	// 资金费时间表:结算过的有指数与上次 / 下次时刻;还没结算过的时刻为 null
+	if *b.FundingIndex != "-1250" || *b.LastFundingMs != 1791884400012 || *b.NextFundingMs != 1791888000012 ||
+		*e.FundingIndex != "0" || e.LastFundingMs != nil || e.NextFundingMs != nil {
+		t.Fatalf("资金费时间表不对: BTC %+v / ETH %+v", b, e)
+	}
 
 	f.routes["/v1/markets/BTC-USD/candles"] = serve(t, 200, "candles.json")
 	ks, err := c.Candles(ctx, btc, CandleQuery{Interval: Interval1M, StartTime: 1788220800000, Limit: 12})
@@ -242,18 +273,42 @@ func TestMarketDataReads(t *testing.T) {
 		t.Fatalf("K 线参数不对: %v", q)
 	}
 	// 问 1M 答了别的周期:报错
-	if _, err := c.Candles(ctx, btc, CandleQuery{Interval: Interval4h}); err == nil {
+	if _, err := c.Candles(ctx, btc, CandleQuery{Interval: Interval12h}); err == nil {
 		t.Fatal("周期对不上应当报错")
+	}
+	if q := f.requests()[len(f.requests())-1].URL.Query(); q.Get("interval") != "12h" {
+		t.Fatalf("12h 应当发出去: %v", q)
 	}
 	// 不在 v1 周期集合里:本地报错,不发请求
 	before := len(f.requests())
-	for _, bad := range []string{"", "1D", "2h", "1W"} {
+	for _, bad := range []string{"", "1D", "3h", "1W"} {
 		if _, err := c.Candles(ctx, btc, CandleQuery{Interval: bad}); err == nil {
 			t.Fatalf("周期 %q 应当本地报错", bad)
 		}
 	}
 	if len(f.requests()) != before {
 		t.Fatal("未知周期不该发请求")
+	}
+
+	// 24 小时成交统计:价格换成 tick、量换成 lot;窗口里没有成交的市场价格为 nil
+	f.routes["/v1/tickers"] = serve(t, 200, "tickers.json")
+	tk, err := c.Tickers(ctx, cat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tk.WindowStart != 1791801480000 || tk.WindowEnd != 1791887880000 || len(tk.Tickers) != 3 {
+		t.Fatalf("tickers 不对: %+v", tk)
+	}
+	b0, e0 := tk.Tickers[0], tk.Tickers[1]
+	if b0.Symbol != "BTC-USD" || *b0.Open != 81000 || *b0.High != 84500 || *b0.Low != 80500 || *b0.Last != 83952 || b0.Volume != 12345 ||
+		b0.QuoteVolume != "1012345.5" || b0.Trades != 42 {
+		t.Fatalf("BTC ticker 不对: %+v", b0)
+	}
+	if e0.Open != nil || e0.Last != nil || e0.Volume != 0 || e0.Trades != 0 {
+		t.Fatalf("没有成交的 ticker 不对: %+v", e0)
+	}
+	if r := f.requests()[len(f.requests())-1]; r.URL.RawQuery != "" || r.Header.Get(minSeqHeader) != "" {
+		t.Fatalf("tickers 不带参数、不带 min-seq: %v %v", r.URL, r.Header)
 	}
 }
 
@@ -565,6 +620,19 @@ func TestTypedErrors(t *testing.T) {
 	f.routes["/v1/account/ledger"] = serve(t, 409, "err409_epoch.json")
 	if _, err = c.Ledger(ctx, ref, LedgerQuery{}); !errors.Is(err, dexos.ErrHistoryEpochMismatch) {
 		t.Fatalf("纪元不符应当 errors.Is ErrHistoryEpochMismatch: %v", err)
+	}
+
+	// 补拉上界越过完整前缀:按稳定错误码判,不看 message
+	f.routes["/v1/account/ledger"] = serve(t, 400, "err400_incomplete.json")
+	if _, err = c.Ledger(ctx, ref, LedgerQuery{}); !errors.Is(err, dexos.ErrHistoryUpperIncomplete) {
+		t.Fatalf("GatewayHistoryIncomplete 应当 errors.Is ErrHistoryUpperIncomplete: %v", err)
+	}
+	f.routes["/v1/account/ledger"] = func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(400)
+		_, _ = w.Write([]byte(`{"error":{"code":"GatewayBadRequest","num":10400,"message":"upper is not yet complete"}}`))
+	}
+	if _, err = c.Ledger(ctx, ref, LedgerQuery{}); errors.Is(err, dexos.ErrHistoryUpperIncomplete) {
+		t.Fatalf("别的 400 不能因为 message 像就当成上界未完整: %v", err)
 	}
 
 	f.routes["/v1/account/ledger"] = serve(t, 503, "err503_gaps.json")

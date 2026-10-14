@@ -1,5 +1,5 @@
 {
- "note": "由 ethers 6.17.0 的 TypedDataEncoder / Wallet.signTypedData 生成(私钥 0x42…42),与 Go 实现互相独立;勿手改",
+ "note": "由 ethers 6.17.0 的 TypedDataEncoder / Wallet.signTypedData 生成(私钥 0x42…42),与 Go 实现互相独立;inputs 是白名单 / 市场摘要的原始输入(摘要也由生成脚本按 dex-os 定义独立算);勿手改",
  "signer": "0x17c5185167401ed00cf5f5b2fc97d9bbfdb7d025",
  "privateKey": "0x4242424242424242424242424242424242424242424242424242424242424242",
  "vectors": [
@@ -256,6 +256,199 @@
    },
    "digest": "0xd67a0ae4d61c7a6cf6afd44151601f1a03f3ab8b837ae660afd30c980a10ce8b",
    "signature": "0x12bb153258aca1e115139148540884da5bba88de9f5cb767fc3126ebe9aab8870b9cb1c7199fc5c9ee7a3d0b25477511a8c9d62bf8ccd4023b08a2fc5f995d291c"
+  },
+  {
+   "type": "CreateManagedVault",
+   "domain": {
+    "chainId": 11155111,
+    "verifyingContract": "0x0000000000000000000000000000000000000000"
+   },
+   "message": {
+    "owner": "0x17c5185167401eD00cF5F5b2fc97D9BBfDb7D025",
+    "accountId": "7",
+    "manager": "0x17c5185167401eD00cF5F5b2fc97D9BBfDb7D025",
+    "profitSharePpm": "200000",
+    "depositMinDurationMs": "86400000",
+    "managerMinPortionPpm": "100000",
+    "managerLiqPortionPpm": "50000",
+    "withdrawWindowS": "604800",
+    "withdrawDurationS": "86400",
+    "depositCap": "1000000000",
+    "seedAmount": "200000000",
+    "nonce": "3",
+    "depositorWhitelistHash": "0x7111c3ae26dd88641261e171a4118bab5ce712471095bda54d210bde9b5b4464"
+   },
+   "digest": "0x49a58978410946ed985d293aeb2072629e7096fe7234621d0eb44036684d2a24",
+   "signature": "0x458a9f2b9409c2534b6dabadf0f95ad5621c1e4121e6a1a0815f801563e56532194d37ff3c9e8591f3b479452a68179254dcd9d4d5170978e01bf83da7edc48a1b",
+   "inputs": {
+    "depositorWhitelist": [
+     "0x1111111111111111111111111111111111111111",
+     "0x17c5185167401eD00cF5F5b2fc97D9BBfDb7D025",
+     "0x1111111111111111111111111111111111111111"
+    ]
+   }
+  },
+  {
+   "type": "CreateManagedVault",
+   "domain": {
+    "chainId": 1337,
+    "verifyingContract": "0x00000000000000000000000000000000000000aa"
+   },
+   "message": {
+    "owner": "0x17c5185167401eD00cF5F5b2fc97D9BBfDb7D025",
+    "accountId": "9",
+    "manager": "0x0000000000000000000000000000000000000000",
+    "profitSharePpm": "0",
+    "depositMinDurationMs": "0",
+    "managerMinPortionPpm": "0",
+    "managerLiqPortionPpm": "0",
+    "withdrawWindowS": "0",
+    "withdrawDurationS": "0",
+    "depositCap": "0",
+    "seedAmount": "0",
+    "nonce": "0",
+    "depositorWhitelistHash": "0x0000000000000000000000000000000000000000000000000000000000000000"
+   },
+   "digest": "0xad97745e7ac3af6d17729a9cb33e7bf47b41792e510e2307e0471824e8c94b86",
+   "signature": "0x4d1bc46e2b206718f8ba841a57290696de41ab46545c40fbdef87bf5dcb4974e2b394f849642a5944396ff9be8bea0efe28a6ba8dedb8b499c59d3a809523a531b",
+   "inputs": {
+    "depositorWhitelist": []
+   }
+  },
+  {
+   "type": "VaultDeposit",
+   "domain": {
+    "chainId": 11155111,
+    "verifyingContract": "0x0000000000000000000000000000000000000000"
+   },
+   "message": {
+    "trader": "0x17c5185167401eD00cF5F5b2fc97D9BBfDb7D025",
+    "vault": "3",
+    "accountId": "7",
+    "amount": "100000000",
+    "nonce": "5"
+   },
+   "digest": "0xec04abe490ad8b72de84d724dd81c6a2bb813d342c8758d7bfb42e30114957e8",
+   "signature": "0x7eee21fdb8554a7d299791e906040de8e0408e5312f3456f6674bfa0de9b64471541d6eab515cb9c4390a1c46871819f45af44af4712bfa47347aca1477aee171c"
+  },
+  {
+   "type": "VaultRedeem",
+   "domain": {
+    "chainId": 1337,
+    "verifyingContract": "0x00000000000000000000000000000000000000aa"
+   },
+   "message": {
+    "trader": "0x17c5185167401eD00cF5F5b2fc97D9BBfDb7D025",
+    "vault": "3",
+    "accountId": "7",
+    "shares": "123456789",
+    "nonce": "6"
+   },
+   "digest": "0x6ec05ef393324fb33eaf0f0c905c27adcae797039d8a929378753f4bb756190d",
+   "signature": "0xc02267a27542d58883439ac6b11e26274ba414c59f4961ec228214d2983a2d175da99f788015f6fec3533f2108d9af8735148b2a1683c4aa54ed9378b4c4b0361c"
+  },
+  {
+   "type": "ClaimVaultManager",
+   "domain": {
+    "chainId": 11155111,
+    "verifyingContract": "0x0000000000000000000000000000000000000000"
+   },
+   "message": {
+    "trader": "0x17c5185167401eD00cF5F5b2fc97D9BBfDb7D025",
+    "vault": "4",
+    "accountId": "7",
+    "amount": "50000000",
+    "nonce": "7"
+   },
+   "digest": "0x673e061723dbe30efe661a1c680634426a7e056898f6c914d525ff260bd4df68",
+   "signature": "0x5c6abbbdca606912be0d356837c4aeec3c2a21ff9528617494dfd5fd1910594f25f39d9beb3df8105c3d61611aa7183392bd820a84f2b0e19d217e3dc0f580211b"
+  },
+  {
+   "type": "VaultConfigChange",
+   "domain": {
+    "chainId": 11155111,
+    "verifyingContract": "0x0000000000000000000000000000000000000000"
+   },
+   "message": {
+    "owner": "0x17c5185167401eD00cF5F5b2fc97D9BBfDb7D025",
+    "vault": "3",
+    "accountId": "7",
+    "kind": "4",
+    "cap": "0",
+    "maxLeverage": "0",
+    "nonce": "8",
+    "marketsHash": "0x51f81bcdfc324a0dff2b5bec9d92e21cbebc4d5e29d3a3d30de3e03fbeab8d7f"
+   },
+   "digest": "0xfc4f487bbd0d1c751793e55fcca034fc49a7f44b12f8b1d3405679d12e1f6735",
+   "signature": "0xe500982effb6d21e8aabadcfcf98f5a94e82b1d5745c3a563520e4cc04394ae204b6aa5347ff7187c30a8f65a1a70ecf339285312cb69c832df2a4b37403062b1c",
+   "inputs": {
+    "markets": [
+     1,
+     0,
+     1
+    ]
+   }
+  },
+  {
+   "type": "VaultConfigChange",
+   "domain": {
+    "chainId": 1337,
+    "verifyingContract": "0x00000000000000000000000000000000000000aa"
+   },
+   "message": {
+    "owner": "0x17c5185167401eD00cF5F5b2fc97D9BBfDb7D025",
+    "vault": "3",
+    "accountId": "7",
+    "kind": "0",
+    "cap": "500000000",
+    "maxLeverage": "0",
+    "nonce": "9",
+    "marketsHash": "0x0000000000000000000000000000000000000000000000000000000000000000"
+   },
+   "digest": "0xf3df91de2759d93d20f4f1145c653e8be4b746af084db4afe477a569fb53d292",
+   "signature": "0x5fa38aa38d0d7e6a48d12b7fcb67e58787d2f5a32fd1ecd12fbe465cf0fc394d78b1d6b80698cb778b5001035d4dc56d558946c83b492613a84d655ed24c135a1c",
+   "inputs": {
+    "markets": []
+   }
+  },
+  {
+   "type": "VaultConfigChange",
+   "domain": {
+    "chainId": 11155111,
+    "verifyingContract": "0x0000000000000000000000000000000000000000"
+   },
+   "message": {
+    "owner": "0x17c5185167401eD00cF5F5b2fc97D9BBfDb7D025",
+    "vault": "3",
+    "accountId": "7",
+    "kind": "6",
+    "cap": "0",
+    "maxLeverage": "5",
+    "nonce": "10",
+    "marketsHash": "0x3f36a6d26b0e24b34ebff24e48cf83e846d3c7e6f8fc24b4c3536e4be3fe6e5b"
+   },
+   "digest": "0x1dde9db01e86baa84218fae41f8d67f0cdceee3c6b4cfce99f0c6aabbfcc1a92",
+   "signature": "0x4148dacc6100ae08e560aa1860386a29872141b4d3fdb469bb15b93384ec0a7a4ef150906537a67d765b0b012cb2171cd28cf680a55e45a01bf76b61c32f3b761b",
+   "inputs": {
+    "markets": [
+     2
+    ]
+   }
+  },
+  {
+   "type": "RevokeAgent",
+   "domain": {
+    "chainId": 1337,
+    "verifyingContract": "0x00000000000000000000000000000000000000aa"
+   },
+   "message": {
+    "owner": "0x17c5185167401eD00cF5F5b2fc97D9BBfDb7D025",
+    "master": "7",
+    "agent": "0x5975c152fE58cDcB7E25586A3c9b994A16dbB615",
+    "nonce": "11"
+   },
+   "digest": "0x2fd6996c61626f1485b50b8f790af13e90094efb1b4c1e8ea4f5b946391abc8e",
+   "signature": "0xc77f1b11577aa356d4d141b1a958f6ee8643a5d1f3dca21a6087b5701c9102eb67068cc48bfee7a6b7d1836193731f6da6c94ed742f318d836f7b71cff547fa01b"
   }
  ]
 }

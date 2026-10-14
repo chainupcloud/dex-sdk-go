@@ -43,7 +43,7 @@
           "Exchange"
         ],
         "summary": "Connection parameters and conventions",
-        "description": "The single entry point for integrators: the EIP-712 domain, chainId, deposit system address, token table, version fingerprint, `serverTime` and the numeric conventions. **Never hard-code the domain**: after a chain change or a contract redeployment every signature fails with 401 while every read-only call keeps working.",
+        "description": "The single entry point for integrators: the EIP-712 domain, chainId, deposit system address, token table, version fingerprint, `serverTime`, the funding settlement period `fundingTickSec` and the numeric conventions. **Never hard-code the domain**: after a chain change or a contract redeployment every signature fails with 401 while every read-only call keeps working.",
         "operationId": "v1_exchange",
         "parameters": [],
         "responses": {
@@ -56,6 +56,9 @@
                 }
               }
             }
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
           }
         }
       }
@@ -180,7 +183,7 @@
           "Market data"
         ],
         "summary": "Price snapshot for all markets",
-        "description": "last / mark / oracle / best bid and ask / funding rate / open interest, plus rolling 24h statistics (`prevDayPrice`, `change24h`, `high24h`, `low24h`, `volume24h`, `quoteVolume24h`).\n\nThe 24h window is anchored at the latest block the analytics projection has seen (`BlockBegun{now_ms}`, the same clock as the candles), not the host wall clock: it is the 1440 one-minute buckets ending with the anchor's bucket, so every 24h field equals a hand calculation over the same window of 1-minute candles. Statistics are cached for at most 5 s. When they are unavailable (analytics store unreachable, or no block projected yet) `window24h` is null and all six 24h fields are null; the live price fields are unaffected.",
+        "description": "last / mark / oracle / best bid and ask / funding rate and schedule (`fundingIndex`, `lastFundingMs`, `nextFundingMs`) / open interest, plus rolling 24h statistics (`prevDayPrice`, `change24h`, `high24h`, `low24h`, `volume24h`, `quoteVolume24h`).\n\nThe 24h window is anchored at the latest block the analytics projection has seen (`BlockBegun{now_ms}`, the same clock as the candles), not the host wall clock: it is the 1440 one-minute buckets ending with the anchor's bucket, so every 24h field equals a hand calculation over the same window of 1-minute candles. Statistics are cached for at most 5 s. When they are unavailable (analytics store unreachable, or no block projected yet) `window24h` is null and all six 24h fields are null; the live price fields are unaffected.",
         "operationId": "v1_prices",
         "parameters": [
           {
@@ -229,6 +232,67 @@
                 }
               }
             }
+          }
+        }
+      }
+    },
+    "/v1/tickers": {
+      "get": {
+        "tags": [
+          "Market data"
+        ],
+        "summary": "24-hour trade statistics",
+        "description": "Rolling 24-hour window ending at the server's current time (`[windowStart, windowEnd)`, millisecond precision), computed from the trade history rather than from candles. Oracle updates do not count. Every market is listed; a market without trades in the window has `trades = 0`, zero volumes and null prices.",
+        "operationId": "v1_tickers",
+        "parameters": [
+          {
+            "name": "symbol",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "description": "Market symbol such as `BTC-USD` (perpetual) or `BTC-USDC` (spot); case-insensitive",
+              "examples": [
+                "BTC-USD"
+              ]
+            },
+            "description": "Only this market (case-insensitive); unknown symbols return 404"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "tickers": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/Ticker"
+                      }
+                    },
+                    "windowStart": {
+                      "type": "integer",
+                      "format": "int64",
+                      "description": "Window start (inclusive), Unix time in milliseconds"
+                    },
+                    "windowEnd": {
+                      "type": "integer",
+                      "format": "int64",
+                      "description": "Window end (exclusive) = server time, Unix time in milliseconds"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
           }
         }
       }
@@ -376,7 +440,7 @@
           "Market data"
         ],
         "summary": "Candles",
-        "description": "`interval` ∈ 1m 5m 15m 30m 1h 4h 1d 1w 1M 1Y, aggregated from the 1-minute base; any other value is 400 (it never falls back to 1m). Fixed intervals align by exact division in UTC (4h starts at 00/04/08/… UTC, 1d at midnight); 1w starts on Monday; 1M and 1Y are the UTC calendar month and year, so `T − t` is that month's or year's length. Timestamps come from `BlockBegun{now_ms}`.",
+        "description": "`interval` ∈ 1m 5m 15m 30m 1h 2h 4h 8h 12h 1d 1w 1M 1Y, aggregated from the 1-minute base; any other value is 400 (it never falls back to 1m). OHLC and volume come from trades only (oracle updates are not candle samples), so a minute without trades has no bar. Fixed intervals align by exact division in UTC (2h / 4h / 8h / 12h count from UTC midnight, e.g. 4h starts at 00/04/08/… UTC; 1d at midnight); 1w starts on Monday; 1M and 1Y are the UTC calendar month and year, so `T − t` is that month's or year's length. Timestamps come from `BlockBegun{now_ms}`.",
         "operationId": "v1_candles",
         "parameters": [
           {
@@ -404,7 +468,10 @@
                 "15m",
                 "30m",
                 "1h",
+                "2h",
                 "4h",
+                "8h",
+                "12h",
                 "1d",
                 "1w",
                 "1M",
@@ -836,7 +903,7 @@
           "Account"
         ],
         "summary": "Open orders",
-        "description": "All markets in one read-model query (one consistent view); `symbol` filters. `clientOrderId` is resolved from the execution history when only the sequence position was recorded (`ack=sequenced`); if that history is missing the whole request answers 503 instead of silently dropping the id.",
+        "description": "All markets in one read-model query (one consistent view); `symbol` filters. `clientOrderId` is resolved from the execution history when only the sequence position was recorded (`ack=sequenced`); if that history is missing the whole request answers 503 instead of silently dropping the id. Pending conditional orders are listed too (status `open`, with `trigger`; price / size / side are the child order's) and can be cancelled by `orderId` with `POST /v1/orders/cancel` (specification v1.1 §4.10-7).",
         "operationId": "v1_open_orders",
         "parameters": [
           {
@@ -1016,7 +1083,7 @@
               "type": "string",
               "pattern": "^[0-9]+-[0-9]+-[0-9]+$"
             },
-            "description": "Fixed upper bound from the first page; **required together with `epoch` when `after` is given**, otherwise 400"
+            "description": "Fixed upper bound from the first page; **required together with `epoch` when `after` is given**, otherwise 400. Beyond this replica's complete history prefix → 400 `GatewayHistoryIncomplete` (retry later)"
           },
           {
             "name": "limit",
@@ -1341,7 +1408,7 @@
               "type": "string",
               "pattern": "^[0-9]+-[0-9]+-[0-9]+$"
             },
-            "description": "Fixed upper bound from the first page; **required together with `epoch` when `after` is given**, otherwise 400"
+            "description": "Fixed upper bound from the first page; **required together with `epoch` when `after` is given**, otherwise 400. Beyond this replica's complete history prefix → 400 `GatewayHistoryIncomplete` (retry later)"
           },
           {
             "name": "limit",
@@ -1493,7 +1560,7 @@
               "type": "string",
               "pattern": "^[0-9]+-[0-9]+-[0-9]+$"
             },
-            "description": "Fixed upper bound from the first page; **required together with `epoch` when `after` is given**, otherwise 400"
+            "description": "Fixed upper bound from the first page; **required together with `epoch` when `after` is given**, otherwise 400. Beyond this replica's complete history prefix → 400 `GatewayHistoryIncomplete` (retry later)"
           },
           {
             "name": "limit",
@@ -1617,7 +1684,7 @@
               "type": "string",
               "pattern": "^[0-9]+-[0-9]+-[0-9]+$"
             },
-            "description": "Fixed upper bound from the first page; **required together with `epoch` when `after` is given**, otherwise 400"
+            "description": "Fixed upper bound from the first page; **required together with `epoch` when `after` is given**, otherwise 400. Beyond this replica's complete history prefix → 400 `GatewayHistoryIncomplete` (retry later)"
           },
           {
             "name": "limit",
@@ -2213,6 +2280,77 @@
         }
       }
     },
+    "/v1/account/pnl": {
+      "get": {
+        "tags": [
+          "Account"
+        ],
+        "summary": "Perpetual PnL composition",
+        "description": "Net inflow, realized / unrealized PnL and accrued funding per risk group, from one read-model view with the ledger totalled over the same log prefix (the same computation as the legacy `GET /equity`, which this replaces). Before answering the server checks Σ ledger entries == balances and the equity identity per group, and answers 500 rather than a self-contradictory snapshot. 503 while the read model has no complete generation yet or the execution history cannot be read; a non-USDC token without display metadata is 500 (amounts are never scaled by a guessed number of decimals).",
+        "operationId": "v1_account_pnl",
+        "parameters": [
+          {
+            "name": "address",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "pattern": "^0x[0-9a-f]{40}$",
+              "description": "EVM address (always lower-case in responses; case-insensitive in requests)"
+            },
+            "description": "Main wallet address (required unless `vault` is given)"
+          },
+          {
+            "name": "subaccount",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0
+            },
+            "description": "Subaccount index (0 = main account; in creation order)"
+          },
+          {
+            "name": "vault",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "description": "Vault id: read the vault's own account instead of a wallet's (specification v1.1 §4.3). Mutually exclusive with `address` / `subaccount` (400); an unknown vault is 404. The response then shows `vault` instead of `address` / `subaccount`."
+          },
+          {
+            "$ref": "#/components/parameters/MinSeq"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AccountPnl"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "412": {
+            "$ref": "#/components/responses/ReplicaBehind"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
     "/v1/requests/{requestId}": {
       "get": {
         "tags": [
@@ -2424,7 +2562,7 @@
               "type": "string",
               "pattern": "^[0-9]+-[0-9]+-[0-9]+$"
             },
-            "description": "Fixed upper bound from the first page; **required together with `epoch` when `after` is given**, otherwise 400"
+            "description": "Fixed upper bound from the first page; **required together with `epoch` when `after` is given**, otherwise 400. Beyond this replica's complete history prefix → 400 `GatewayHistoryIncomplete` (retry later)"
           },
           {
             "name": "limit",
@@ -2548,7 +2686,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object"
+                  "$ref": "#/components/schemas/VaultList"
                 }
               }
             }
@@ -2730,7 +2868,7 @@
           }
         },
         "x-eip712": {
-          "typeString": "CreateManagedVault(address owner,uint32 accountId,address manager,uint32 profitSharePpm,uint64 depositMinDurationMs,uint32 managerMinPortionPpm,uint32 managerLiqPortionPpm,uint64 withdrawWindowS,uint64 withdrawDurationS,uint128 depositCap,uint128 seedAmount,bytes32 depositorWhitelistHash,uint64 nonce)"
+          "typeString": "CreateManagedVault(address owner,uint32 accountId,address manager,uint32 profitSharePpm,uint64 depositMinDurationMs,uint32 managerMinPortionPpm,uint32 managerLiqPortionPpm,uint32 withdrawWindowS,uint32 withdrawDurationS,uint128 depositCap,uint128 seedAmount,bytes32 depositorWhitelistHash,uint64 nonce)"
         }
       }
     },
@@ -2758,7 +2896,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object"
+                  "$ref": "#/components/schemas/VaultDetail"
                 }
               }
             }
@@ -2793,7 +2931,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object"
+                  "$ref": "#/components/schemas/VaultNav"
                 }
               }
             }
@@ -2828,7 +2966,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object"
+                  "$ref": "#/components/schemas/VaultDepositors"
                 }
               }
             }
@@ -2861,7 +2999,7 @@
           "Trading"
         ],
         "summary": "Place order (single or batch)",
-        "description": "Limit / market / conditional orders. The **main wallet** signs `Order` (for a market order `price` is the protective price `mark × (1 ± slippage)` rounded away from the taker, as an integer; conditional orders sign `Conditional`). An **API wallet** (`signer`) signs `AgentExec` over the canonical-bytes hash of the inner `BatchPlace{account, orders, nowMs}`, and the envelope carries `nowMs`. An array body is a batch; only API wallets can batch (per-item `items[]`, always 200). `clientOrderId` is not part of the signature; it is accepted on both paths, reserved atomically before sequencing (a duplicate within the account is 409) and consumed once sequenced; look up and cancel by it. Results carry this command's taker fills (`fills[]`, `avgPrice`).",
+        "description": "Limit / market / conditional orders. The **main wallet** signs `Order` (for a market order `price` is the protective price `mark × (1 ± slippage)` rounded away from the taker, as an integer; conditional orders sign `Conditional`). An **API wallet** (`signer`) signs `AgentExec` over the canonical-bytes hash of the inner `BatchPlace{account, orders, nowMs}` (a conditional type: `PlaceConditional{account, market, side, price, lots, tif, reduceOnly, goodTilMs: 0, triggerPrice, triggerAbove, nowMs}`, never batched), and the envelope carries `nowMs`. An array body is a batch; only API wallets can batch (per-item `items[]`, always 200). `clientOrderId` is not part of the signature; it is accepted on both paths, reserved atomically before sequencing (a duplicate within the account is 409) and consumed once sequenced; look up and cancel by it. Results carry this command's taker fills (`fills[]`, `avgPrice`).",
         "operationId": "v1_place_order",
         "parameters": [
           {
@@ -3554,7 +3692,7 @@
           "Trading"
         ],
         "summary": "TWAP",
-        "description": "The parent order is split into `slices`, one every `intervalMs`; `priceTolerance` is a decimal relative to mark (`0.005` = 0.5%). Signed by the main wallet.",
+        "description": "The parent order is split into `slices`, one every `intervalMs`; `priceTolerance` is a decimal relative to mark (`0.005` = 0.5%). The main wallet signs `Twap`. An **API wallet** (`signer`) signs `AgentExec(keccak(canonical bytes), nonce)` over the inner `PlaceTwap{account, market, side, totalLots, slices, intervalMs, priceTolerancePpm, reduceOnly, nowMs}` instead, with the API wallet's own nonce (`GET /v1/account/nonce?signer=`); same precheck as API-wallet orders (specification v1.1 §4.10-10); the envelope carries `nowMs`. Not available as a vault (403).",
         "operationId": "v1_twap",
         "parameters": [
           {
@@ -3695,7 +3833,7 @@
           "Trading"
         ],
         "summary": "Position take-profit / stop-loss",
-        "description": "OCO: when one leg triggers the other is cancelled; with `positionTpsl=true` both are cancelled automatically when the position reaches zero. `closeSide` is the closing side; `limitPrice` defaults to the trigger price. Returns `orderIds` (both legs).",
+        "description": "OCO: when one leg triggers the other is cancelled; with `positionTpsl=true` both are cancelled automatically when the position reaches zero. `closeSide` is the closing side; `limitPrice` defaults to the trigger price. Returns `orderIds` (both legs). The main wallet signs `TpslPair`. An **API wallet** (`signer`) signs `AgentExec(keccak(canonical bytes), nonce)` over the inner `PlaceTpslPair{account, market, closeSide, lots, tpTrigger, tpPrice, slTrigger, slPrice, positionTpsl, parent: none, nowMs}` instead, with the API wallet's own nonce (`GET /v1/account/nonce?signer=`); same precheck as API-wallet orders (specification v1.1 §4.10-10); the envelope carries `nowMs`. Not available as a vault (403).",
         "operationId": "v1_tpsl",
         "parameters": [
           {
@@ -3870,7 +4008,7 @@
           "Account"
         ],
         "summary": "Set leverage",
-        "description": "An integer multiple; it can only be lowered (anything above the market default is `InvalidLeverage`).",
+        "description": "An integer multiple; it can only be lowered (anything above the market default is `InvalidLeverage`). The main wallet signs `Leverage`. An **API wallet** (`signer`) signs `AgentExec(keccak(canonical bytes), nonce)` over the inner `SetLeverage{account, market, customImfPpm}` instead, with the API wallet's own nonce (`GET /v1/account/nonce?signer=`); same precheck as API-wallet orders (specification v1.1 §4.10-10) (no `nowMs`).",
         "operationId": "v1_leverage",
         "parameters": [
           {
@@ -5095,7 +5233,7 @@
     },
     "responses": {
       "BadRequest": {
-        "description": "Malformed request (`GatewayBadRequest`, num 10400)",
+        "description": "Malformed request (`GatewayBadRequest`, num 10400). On execution-history reads, an `upper` beyond this replica's complete history prefix is `GatewayHistoryIncomplete` (num 10400): retry later",
         "content": {
           "application/json": {
             "schema": {
@@ -5248,6 +5386,11 @@
             "format": "int64",
             "description": "Unix time in milliseconds"
           },
+          "fundingTickSec": {
+            "type": "integer",
+            "description": "Funding settlement period in seconds. Global: every perpetual market settles on the same period (the matcher's funding configuration, carried in the snapshot; same value as `/config`). Spot markets have no funding. Never null: while this node does not know it yet (its read model has not assembled its first generation, right after startup) the whole response is 503 `GatewayUnavailable` — retry",
+            "minimum": 1
+          },
           "version": {
             "type": "object",
             "properties": {
@@ -5278,18 +5421,51 @@
           "docs": {
             "type": "string"
           }
-        }
+        },
+        "required": [
+          "chainId",
+          "domain",
+          "deposit",
+          "serverTime",
+          "fundingTickSec",
+          "version",
+          "conventions",
+          "docs"
+        ]
       },
       "Market": {
         "type": "object",
         "required": [
           "symbol",
+          "signingMarketId",
           "kind",
           "status",
           "priceDecimals",
           "sizeDecimals",
           "tickSize",
-          "lotSize"
+          "lotSize",
+          "minNotional",
+          "maxLeverage",
+          "initialMarginFraction",
+          "maintenanceMarginFraction",
+          "marginMode",
+          "strictIsolated",
+          "quotePerTickLot",
+          "baseToken",
+          "quoteToken",
+          "basePerLot",
+          "lastPrice",
+          "oraclePrice",
+          "markPrice",
+          "bestBid",
+          "bestAsk",
+          "fundingRate",
+          "fundingIndex",
+          "lastFundingMs",
+          "openInterest",
+          "openInterestCap",
+          "dex",
+          "fees"
         ],
         "properties": {
           "symbol": {
@@ -5364,7 +5540,38 @@
               "cross",
               "isolated"
             ],
-            "description": "Account topology the market requires: `cross` (deployer mode normal) or `isolated` (noCross / strictIsolated). The deployer mode itself is on the legacy `/markets`."
+            "description": "Account topology the market requires: `cross` (deployer mode normal) or `isolated` (noCross / strictIsolated); `strictIsolated` tells the two isolated modes apart"
+          },
+          "strictIsolated": {
+            "type": "boolean",
+            "description": "Deployer mode is `strictIsolated`: isolated, and leverage cannot change while a position is open. With `marginMode` it recovers the deployer mode: `cross` = normal, `isolated` + false = noCross, `isolated` + true = strictIsolated"
+          },
+          "quotePerTickLot": {
+            "type": "string",
+            "pattern": "^[0-9]+$",
+            "description": "Quote-token atomic units per tick × lot (integer string): notional in atomic units = price ticks × size lots × quotePerTickLot"
+          },
+          "baseToken": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Spot only: base token id, the `token` of `GET /v1/exchange` `deposit.tokens[]` (token display metadata lives there); null for perpetuals"
+          },
+          "quoteToken": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Spot only: quote token id (as `baseToken`); null for perpetuals"
+          },
+          "basePerLot": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "pattern": "^[0-9]+$",
+            "description": "Spot only: base-token atomic units per lot (integer string); null for perpetuals"
           },
           "lastPrice": {
             "type": "string",
@@ -5549,6 +5756,30 @@
             "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
             "description": "Decimal string"
           },
+          "fundingIndex": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "pattern": "^-?[0-9]+$",
+            "description": "Cumulative funding index after the latest settlement, as an integer string (the same value as `fundingIndex` in `/v1/markets` and the `index` of the funding channel); null for spot"
+          },
+          "lastFundingMs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Block time of the latest funding settlement (Unix ms); null for spot and before the first settlement"
+          },
+          "nextFundingMs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "When the next funding settlement is due: `lastFundingMs + fundingTickSec × 1000` (`fundingTickSec` from `GET /v1/exchange`). Settlement happens at the first block whose time reaches it, so the actual time can be a block later. null for spot and before the first settlement"
+          },
           "openInterest": {
             "type": [
               "string",
@@ -5607,6 +5838,64 @@
           }
         }
       },
+      "Ticker": {
+        "type": "object",
+        "properties": {
+          "symbol": {
+            "type": "string",
+            "description": "Market symbol such as `BTC-USD` (perpetual) or `BTC-USDC` (spot); case-insensitive",
+            "examples": [
+              "BTC-USD"
+            ]
+          },
+          "open": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
+            "description": "Price of the first trade in the window; null when the market had no trades"
+          },
+          "high": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
+            "description": "Highest trade price in the window; null when no trades"
+          },
+          "low": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
+            "description": "Lowest trade price in the window; null when no trades"
+          },
+          "last": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
+            "description": "Price of the last trade in the window; null when no trades"
+          },
+          "volume": {
+            "type": "string",
+            "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
+            "description": "Total traded size in the window (base asset)"
+          },
+          "quoteVolume": {
+            "type": "string",
+            "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
+            "description": "Σ price × size in the window (quote asset)"
+          },
+          "trades": {
+            "type": "integer",
+            "description": "Number of trades in the window"
+          }
+        }
+      },
       "BookLevel": {
         "type": "array",
         "prefixItems": [
@@ -5629,9 +5918,11 @@
         "type": "object",
         "required": [
           "symbol",
+          "depth",
           "bids",
           "asks",
-          "seq"
+          "seq",
+          "ts"
         ],
         "properties": {
           "symbol": {
@@ -5640,6 +5931,10 @@
             "examples": [
               "BTC-USD"
             ]
+          },
+          "depth": {
+            "type": "integer",
+            "description": "Levels per side this snapshot was asked for (REST `depth`, or the WebSocket subscription's `depth`)"
           },
           "bids": {
             "type": "array",
@@ -5789,13 +6084,36 @@
             "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
             "description": "amount − hold"
           }
-        }
+        },
+        "required": [
+          "token",
+          "amount",
+          "hold",
+          "available"
+        ]
       },
       "Account": {
         "type": "object",
         "required": [
+          "epoch",
+          "asOfSeq",
           "collateral",
-          "equity"
+          "equity",
+          "marginUsed",
+          "maintenanceMargin",
+          "openOrderMargin",
+          "availableToTrade",
+          "availableToWithdraw",
+          "balances",
+          "groups",
+          "feeTier",
+          "takerFee",
+          "makerFee",
+          "positionsCount",
+          "ordersCount",
+          "leverage",
+          "nonce",
+          "ts"
         ],
         "properties": {
           "address": {
@@ -5891,7 +6209,16 @@
                   "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
                   "description": "Withdrawable from this group"
                 }
-              }
+              },
+              "required": [
+                "token",
+                "collateral",
+                "equity",
+                "imr",
+                "mmr",
+                "openOrderMargin",
+                "withdrawable"
+              ]
             }
           },
           "feeTier": {
@@ -5981,7 +6308,7 @@
           "size": {
             "type": "string",
             "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
-            "description": "Absolute size in base units"
+            "description": "Signed size in base units: positive = long, negative = short (the same sign as `side`)"
           },
           "entryPrice": {
             "type": "string",
@@ -6006,7 +6333,17 @@
           "fundingIndex": {
             "type": "string"
           }
-        }
+        },
+        "required": [
+          "symbol",
+          "side",
+          "size",
+          "entryPrice",
+          "markPrice",
+          "notional",
+          "unrealizedPnl",
+          "fundingIndex"
+        ]
       },
       "Order": {
         "type": "object",
@@ -6063,6 +6400,54 @@
             "type": "string",
             "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
             "description": "Decimal string"
+          },
+          "tif": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "gtc",
+              "ioc",
+              "alo",
+              "fok",
+              null
+            ],
+            "description": "Time in force. Pending conditional orders: the child order's. Orders resting on the book: null — the execution layer's canonical state does not keep it once the order rests (a resting `alo` order behaves like `gtc`)"
+          },
+          "reduceOnly": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Reduce-only. Resting orders read it from the account's open-order ledger; null only if that ledger has no entry for the order"
+          },
+          "trigger": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "Pending conditional order (stop / take-profit, including position TP/SL legs): the order enters the book as a limit order (`price`, `size`, `side`, `tif`) when the oracle price crosses `price`. null for orders on the book",
+            "required": [
+              "price",
+              "above",
+              "positionTpsl"
+            ],
+            "properties": {
+              "price": {
+                "type": "string",
+                "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
+                "description": "Decimal string"
+              },
+              "above": {
+                "type": "boolean",
+                "description": "true = triggers when the oracle price is at or above `price`; false = at or below"
+              },
+              "positionTpsl": {
+                "type": "boolean",
+                "description": "Position-level TP/SL: cancelled automatically when the position reaches zero"
+              }
+            }
           },
           "status": {
             "type": "string",
@@ -6499,7 +6884,7 @@
           "nowMs": {
             "type": "integer",
             "format": "int64",
-            "description": "**Required on the API-wallet path**: the timestamp of the inner `BatchPlace` / `BatchReplace` command, part of the signed hash"
+            "description": "**Required on the API-wallet path** wherever the inner command carries a timestamp (`BatchPlace` / `BatchReplace` / `PlaceConditional` / `PlaceTwap` / `PlaceTpslPair` / `ScheduleCancel`): it is part of the signed hash"
           },
           "signature": {
             "type": "string",
@@ -6580,9 +6965,12 @@
             "type": "integer"
           },
           "requestId": {
-            "type": "string",
+            "type": [
+              "string",
+              "null"
+            ],
             "pattern": "^0x[0-9a-f]{64}$",
-            "description": "Request identity `0x` + keccak(signer ‖ EIP-712 digest), the same identity as the execution history and `GET /v1/requests/{requestId}`; absent only on builder-`Routed` orders, which have no request identity"
+            "description": "Request identity `0x` + keccak(signer ‖ EIP-712 digest), the same identity as the execution history and `GET /v1/requests/{requestId}`. Always present; `null` only on builder-`Routed` orders, which have no request identity"
           },
           "fills": {
             "type": "array",
@@ -6594,7 +6982,16 @@
             "type": "boolean",
             "description": "Present (true) only when this exact signed request (same signer, nonce and command) was already sequenced: the response points at that original `(seq, sub)` and nothing executed twice"
           }
-        }
+        },
+        "required": [
+          "status",
+          "symbol",
+          "orderId",
+          "clientOrderId",
+          "seq",
+          "sub",
+          "requestId"
+        ]
       },
       "OrderEvent": {
         "type": "object",
@@ -6632,6 +7029,26 @@
               "rejected",
               "autocanceled"
             ]
+          },
+          "side": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "buy",
+              "sell",
+              null
+            ],
+            "description": "Order side, given on `accepted`, `fill` (this account's side of the fill) and `placed` (the conditional order's child side) rows; null on the others, whose events carry no side — take it from the order's earlier rows"
+          },
+          "ts": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Ledger time of the block the event happened in (Unix ms, the same clock as fills' `ts`); null when unknown (no block before it, or a history gap in between)"
           },
           "price": {
             "type": "string",
@@ -6714,6 +7131,12 @@
         "type": "object",
         "description": "Per-item outcome of a batch (always 200 unless the whole command was rejected, then 422). In `/v1/orders/replace` cancels and orders are numbered separately from 0, so an item is identified by `(kind, index)`",
         "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "ok"
+            ]
+          },
           "seq": {
             "type": "integer",
             "format": "uint64",
@@ -6723,9 +7146,12 @@
             "type": "integer"
           },
           "requestId": {
-            "type": "string",
+            "type": [
+              "string",
+              "null"
+            ],
             "pattern": "^0x[0-9a-f]{64}$",
-            "description": "Request identity `0x` + keccak(signer ‖ EIP-712 digest), the same identity as the execution history and `GET /v1/requests/{requestId}`; absent only on builder-`Routed` orders, which have no request identity"
+            "description": "Request identity `0x` + keccak(signer ‖ EIP-712 digest), the same identity as the execution history and `GET /v1/requests/{requestId}`. Always present; `null` only on builder-`Routed` orders, which have no request identity"
           },
           "duplicate": {
             "type": "boolean",
@@ -6807,7 +7233,14 @@
               }
             }
           }
-        }
+        },
+        "required": [
+          "status",
+          "items",
+          "seq",
+          "sub",
+          "requestId"
+        ]
       },
       "PortfolioPoint": {
         "type": "object",
@@ -7029,7 +7462,8 @@
         "required": [
           "status",
           "seq",
-          "sub"
+          "sub",
+          "requestId"
         ],
         "properties": {
           "status": {
@@ -7051,9 +7485,12 @@
             "type": "integer"
           },
           "requestId": {
-            "type": "string",
+            "type": [
+              "string",
+              "null"
+            ],
             "pattern": "^0x[0-9a-f]{64}$",
-            "description": "Request identity `0x` + keccak(signer ‖ EIP-712 digest), the same identity as the execution history and `GET /v1/requests/{requestId}`; absent only on builder-`Routed` orders, which have no request identity"
+            "description": "Request identity `0x` + keccak(signer ‖ EIP-712 digest), the same identity as the execution history and `GET /v1/requests/{requestId}`. Always present; `null` only on builder-`Routed` orders, which have no request identity"
           },
           "duplicate": {
             "type": "boolean",
@@ -7346,6 +7783,710 @@
             ]
           }
         }
+      },
+      "VaultMarket": {
+        "type": "object",
+        "required": [
+          "symbol"
+        ],
+        "properties": {
+          "symbol": {
+            "type": "string",
+            "description": "Market symbol such as `BTC-USD` (perpetual) or `BTC-USDC` (spot); case-insensitive",
+            "examples": [
+              "BTC-USD"
+            ]
+          }
+        }
+      },
+      "VaultMaxLeverage": {
+        "type": "object",
+        "required": [
+          "symbol",
+          "maxLeverage"
+        ],
+        "properties": {
+          "symbol": {
+            "type": "string",
+            "description": "Market symbol such as `BTC-USD` (perpetual) or `BTC-USDC` (spot); case-insensitive",
+            "examples": [
+              "BTC-USD"
+            ]
+          },
+          "maxLeverage": {
+            "type": "integer"
+          }
+        }
+      },
+      "VaultMarketStatus": {
+        "type": "object",
+        "required": [
+          "symbol",
+          "status"
+        ],
+        "properties": {
+          "symbol": {
+            "type": "string",
+            "description": "Market symbol such as `BTC-USD` (perpetual) or `BTC-USDC` (spot); case-insensitive",
+            "examples": [
+              "BTC-USD"
+            ]
+          },
+          "status": {
+            "type": "string",
+            "description": "Per-market sub-vault status (`Quoting` / `StandBy` / `CloseOnly` / `Deactivated`)"
+          }
+        }
+      },
+      "VaultConfig": {
+        "type": "object",
+        "required": [
+          "profitSharePpm",
+          "depositMinDurationMs",
+          "managerMinPortionPpm",
+          "managerLiqPortionPpm",
+          "withdrawWindowS",
+          "withdrawDurationS",
+          "depositCap"
+        ],
+        "properties": {
+          "profitSharePpm": {
+            "type": "integer",
+            "description": "Manager's profit share, ppm"
+          },
+          "depositMinDurationMs": {
+            "type": "integer",
+            "description": "Lock-up of each deposit, ms"
+          },
+          "managerMinPortionPpm": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Minimum manager portion, ppm; null = none"
+          },
+          "managerLiqPortionPpm": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Halt threshold, ppm: below this manager portion the vault stops trading, cancels and closes out; null = none"
+          },
+          "withdrawWindowS": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Redemption window period, seconds; null = redeem any time"
+          },
+          "withdrawDurationS": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Length of the open part of each window, seconds"
+          },
+          "depositCap": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
+            "description": "Deposit cap, USDC; null = none"
+          }
+        }
+      },
+      "Vault": {
+        "type": "object",
+        "description": "A vault (specification v1.1 §4.9-10): USDC amounts are decimal strings, NAV per share is a ratio, shares are integer strings, rates are ppm integers. No numeric account id appears — the account a vault signs with is `GET /v1/account/nonce?vault=` → `signingAccountId`; markets appear by symbol only",
+        "required": [
+          "vault",
+          "name",
+          "description",
+          "creator",
+          "creatorSubaccount",
+          "manager",
+          "managerSubaccount",
+          "hasManager",
+          "leader",
+          "tradingHalt",
+          "lpShares",
+          "managerShares",
+          "totalShares",
+          "lpBalance",
+          "managerBalance",
+          "lastCheckedEquity",
+          "hwm",
+          "equity",
+          "unattributed",
+          "totalDeposits",
+          "pnl",
+          "managerPortionPpm",
+          "navPerShare",
+          "navPerShareByClass",
+          "config",
+          "whitelist",
+          "blacklist",
+          "maxLeverages",
+          "depositorWhitelist",
+          "depositorCount",
+          "createdAtMs",
+          "aprPpm",
+          "maxDrawdownPpm",
+          "netReturnPpm",
+          "inceptionAprPpm",
+          "utilizationPpm",
+          "profitSharePpm",
+          "marketVaults"
+        ],
+        "properties": {
+          "vault": {
+            "type": "integer",
+            "description": "Vault id (the `vault` of `?vault=` reads, write envelopes and WebSocket subscriptions)"
+          },
+          "name": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "creator": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "pattern": "^0x[0-9a-f]{40}$",
+            "description": "Main wallet of the account that created the vault; null for an internal account"
+          },
+          "creatorSubaccount": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Subaccount index of the creating account under `creator` (same numbering as `subaccount=`)"
+          },
+          "manager": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "pattern": "^0x[0-9a-f]{40}$",
+            "description": "Main wallet of the account that claimed the vault; null while unclaimed"
+          },
+          "managerSubaccount": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Subaccount index of the claiming account under `manager`; null while unclaimed"
+          },
+          "hasManager": {
+            "type": "boolean"
+          },
+          "leader": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "pattern": "^0x[0-9a-f]{40}$",
+            "description": "Legacy alias: `manager`, or `creator` while unclaimed"
+          },
+          "tradingHalt": {
+            "type": "boolean",
+            "description": "Halted (below the halt threshold): orders cancelled, positions closed, only cancels allowed"
+          },
+          "lpShares": {
+            "type": "string",
+            "pattern": "^[0-9]+$",
+            "description": "LP share units (integer; not a token amount)"
+          },
+          "managerShares": {
+            "type": "string",
+            "pattern": "^[0-9]+$",
+            "description": "Manager share units (integer)"
+          },
+          "totalShares": {
+            "type": "string",
+            "pattern": "^[0-9]+$",
+            "description": "`lpShares + managerShares`"
+          },
+          "lpBalance": {
+            "type": "string",
+            "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
+            "description": "Balance attributed to the LP class, USDC"
+          },
+          "managerBalance": {
+            "type": "string",
+            "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
+            "description": "Balance attributed to the manager class, USDC"
+          },
+          "lastCheckedEquity": {
+            "type": "string",
+            "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
+            "description": "Equity at the last ledger sync, USDC"
+          },
+          "hwm": {
+            "type": "string",
+            "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
+            "description": "High-water mark for the profit share, USDC"
+          },
+          "equity": {
+            "type": "string",
+            "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
+            "description": "Vault equity (main account net collateral), USDC"
+          },
+          "unattributed": {
+            "type": "string",
+            "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
+            "description": "`equity − lpBalance − managerBalance` (PnL not yet synced into the classes), USDC"
+          },
+          "totalDeposits": {
+            "type": "string",
+            "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
+            "description": "Sum of the principal shown to every depositor, USDC"
+          },
+          "pnl": {
+            "type": "string",
+            "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
+            "description": "`equity − totalDeposits` (signed), USDC"
+          },
+          "managerPortionPpm": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Manager balance / attributed balance, ppm; null when nothing is attributed"
+          },
+          "navPerShare": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
+            "description": "Equity per share as a ratio (1 = par at the first deposit); null while there are no shares"
+          },
+          "navPerShareByClass": {
+            "type": "object",
+            "required": [
+              "lp",
+              "manager"
+            ],
+            "properties": {
+              "lp": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
+                "description": "LP class balance per LP share (ratio); null without shares"
+              },
+              "manager": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
+                "description": "Manager class balance per manager share (ratio); null without shares"
+              }
+            }
+          },
+          "config": {
+            "$ref": "#/components/schemas/VaultConfig"
+          },
+          "whitelist": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/VaultMarket"
+            },
+            "description": "null = every market allowed; otherwise only these (an empty list allows none)"
+          },
+          "blacklist": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/VaultMarket"
+            }
+          },
+          "maxLeverages": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/VaultMaxLeverage"
+            },
+            "description": "Per-market leverage caps; markets without a cap are absent"
+          },
+          "depositorWhitelist": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^0x[0-9a-f]{40}$",
+              "description": "EVM address (always lower-case in responses; case-insensitive in requests)"
+            },
+            "description": "Empty = anyone may deposit"
+          },
+          "depositorCount": {
+            "type": "integer"
+          },
+          "createdAtMs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Block time of the vault's creation; null before the first block"
+          },
+          "aprPpm": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Annualised return over the metric window, ppm; null when it cannot be computed"
+          },
+          "maxDrawdownPpm": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Maximum drawdown of NAV per share over the metric window, ppm; null when it cannot be computed"
+          },
+          "netReturnPpm": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "`pnl / totalDeposits`, ppm; null without principal"
+          },
+          "inceptionAprPpm": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Net return annualised over the vault's age, ppm; null without principal or under one day old"
+          },
+          "utilizationPpm": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Main-account IMR / equity, ppm; null when equity is not positive while margin is in use"
+          },
+          "profitSharePpm": {
+            "type": "integer",
+            "description": "Legacy alias of `config.profitSharePpm`"
+          },
+          "marketVaults": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/VaultMarketStatus"
+            }
+          }
+        }
+      },
+      "VaultDetail": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/Vault"
+          },
+          {
+            "type": "object",
+            "required": [
+              "nextNonce",
+              "availableToWithdraw",
+              "positions",
+              "nextWithdrawWindow",
+              "metricWindow"
+            ],
+            "properties": {
+              "nextNonce": {
+                "type": "integer",
+                "description": "Next nonce of the vault main account (= `GET /v1/account/nonce?vault=`)"
+              },
+              "availableToWithdraw": {
+                "type": "string",
+                "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
+                "description": "Withdrawable from the vault main account, USDC"
+              },
+              "positions": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/Position"
+                },
+                "description": "The vault's positions, the same rows as `GET /v1/account/positions?vault=`"
+              },
+              "nextWithdrawWindow": {
+                "type": [
+                  "object",
+                  "null"
+                ],
+                "description": "`{opensAtMs, closesAtMs, open}`; null = redeem any time"
+              },
+              "metricWindow": {
+                "type": "object",
+                "required": [
+                  "fromMs",
+                  "toMs",
+                  "bucketMs",
+                  "points"
+                ],
+                "properties": {
+                  "fromMs": {
+                    "type": "integer"
+                  },
+                  "toMs": {
+                    "type": "integer"
+                  },
+                  "bucketMs": {
+                    "type": "integer"
+                  },
+                  "points": {
+                    "type": "integer"
+                  }
+                }
+              }
+            }
+          }
+        ]
+      },
+      "VaultList": {
+        "type": "object",
+        "required": [
+          "vaults",
+          "metricWindowMs"
+        ],
+        "properties": {
+          "vaults": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Vault"
+            }
+          },
+          "metricWindowMs": {
+            "type": "integer",
+            "description": "Window of `aprPpm` / `maxDrawdownPpm`"
+          }
+        }
+      },
+      "VaultNav": {
+        "type": "object",
+        "required": [
+          "vault",
+          "bucketMs",
+          "fromMs",
+          "points",
+          "truncated"
+        ],
+        "properties": {
+          "vault": {
+            "type": "integer"
+          },
+          "bucketMs": {
+            "type": "integer"
+          },
+          "fromMs": {
+            "type": "integer"
+          },
+          "points": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "tsMs",
+                "equity",
+                "totalShares",
+                "navPerShare"
+              ],
+              "properties": {
+                "tsMs": {
+                  "type": "integer"
+                },
+                "equity": {
+                  "type": "string",
+                  "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
+                  "description": "Vault equity at the sample, USDC"
+                },
+                "totalShares": {
+                  "type": "string",
+                  "pattern": "^[0-9]+$",
+                  "description": "Shares outstanding at the sample"
+                },
+                "navPerShare": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
+                  "description": "Equity per share (ratio); null without shares"
+                }
+              }
+            }
+          },
+          "truncated": {
+            "type": "boolean",
+            "description": "`limit` reached: narrow `from` or widen `interval`"
+          }
+        }
+      },
+      "VaultDepositors": {
+        "type": "object",
+        "required": [
+          "vault",
+          "lpShares",
+          "managerShares",
+          "totalShares",
+          "depositors",
+          "count",
+          "truncated"
+        ],
+        "properties": {
+          "vault": {
+            "type": "integer"
+          },
+          "lpShares": {
+            "type": "string",
+            "pattern": "^[0-9]+$",
+            "description": "LP share units"
+          },
+          "managerShares": {
+            "type": "string",
+            "pattern": "^[0-9]+$",
+            "description": "Manager share units"
+          },
+          "totalShares": {
+            "type": "string",
+            "pattern": "^[0-9]+$",
+            "description": "All shares"
+          },
+          "depositors": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "address",
+                "class",
+                "shares",
+                "equity",
+                "sharePpm"
+              ],
+              "properties": {
+                "address": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "pattern": "^0x[0-9a-f]{40}$",
+                  "description": "Depositor's main wallet; null for an internal account"
+                },
+                "class": {
+                  "type": "string",
+                  "enum": [
+                    "lp",
+                    "manager"
+                  ]
+                },
+                "shares": {
+                  "type": "string",
+                  "pattern": "^[0-9]+$",
+                  "description": "Share units (integer)"
+                },
+                "equity": {
+                  "type": "string",
+                  "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
+                  "description": "Value of the shares, USDC"
+                },
+                "sharePpm": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "description": "Share of its class, ppm; null when the class has no shares"
+                }
+              }
+            }
+          },
+          "count": {
+            "type": "integer"
+          },
+          "truncated": {
+            "type": "boolean"
+          }
+        }
+      },
+      "AccountPnl": {
+        "type": "object",
+        "description": "Perpetual PnL composition per risk group at one watermark (specification v1.1 §4.10-6): the parts of the legacy `GET /equity` a client shows. Amounts are decimal strings in the group's collateral token. Identity: `equity = netInflow + realizedPnl + unrealizedPnl + accruedFunding + Σ other ledger entries` (fees, rebates, settled funding, liquidations, …)",
+        "required": [
+          "epoch",
+          "asOfSeq",
+          "groups"
+        ],
+        "properties": {
+          "address": {
+            "type": "string",
+            "pattern": "^0x[0-9a-f]{40}$",
+            "description": "EVM address (always lower-case in responses; case-insensitive in requests)"
+          },
+          "subaccount": {
+            "type": "integer"
+          },
+          "vault": {
+            "type": "integer",
+            "description": "Present instead of `address` / `subaccount` when the request addressed a vault (`vault=<id>`, specification v1.1 §4.3)"
+          },
+          "epoch": {
+            "type": "string",
+            "description": "Ledger epoch"
+          },
+          "asOfSeq": {
+            "type": "integer",
+            "format": "uint64",
+            "description": "Log position the snapshot covers: balances and positions come from the read-model view at it and the ledger entries are totalled up to it"
+          },
+          "groups": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "token",
+                "equity",
+                "netInflow",
+                "realizedPnl",
+                "unrealizedPnl",
+                "accruedFunding"
+              ],
+              "properties": {
+                "token": {
+                  "type": "string",
+                  "description": "Collateral token symbol of the risk group"
+                },
+                "equity": {
+                  "type": "string",
+                  "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
+                  "description": "Net equity of the group"
+                },
+                "netInflow": {
+                  "type": "string",
+                  "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
+                  "description": "Σ external entries: deposits, withdrawals, transfers, vault flows"
+                },
+                "realizedPnl": {
+                  "type": "string",
+                  "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
+                  "description": "Σ position consideration (trades, liquidation trades, ADL, settlement) + Σ cost basis of open positions"
+                },
+                "unrealizedPnl": {
+                  "type": "string",
+                  "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
+                  "description": "Σ(position value at the mark price − cost basis)"
+                },
+                "accruedFunding": {
+                  "type": "string",
+                  "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
+                  "description": "Funding accrued but not yet applied to the balance (settled when the position is touched)"
+                }
+              }
+            }
+          }
+        }
       }
     }
   },
@@ -7369,6 +8510,7 @@
           "depth": 50
         },
         "epoch": "<ledger epoch>",
+        "seq": 593504256,
         "id": 1
       },
       "unsubscribe": {
@@ -7392,17 +8534,24 @@
       "error": {
         "channel": "error",
         "data": {
-          "code": "GatewayBadRequest",
-          "message": "unknown channel …"
+          "code": "GatewayNotFound",
+          "message": "no such subscription on this connection",
+          "method": "unsubscribe",
+          "subscription": {
+            "channel": "book",
+            "symbol": "BTC-USD",
+            "depth": 50
+          }
         },
-        "id": 7
+        "id": 2
       },
       "lagged": {
         "channel": "lagged",
         "data": {
           "dropped": 128,
           "epoch": "<ledger epoch>",
-          "upper": "<seq>-<sub>-4294967295"
+          "upper": "<seq>-<sub>-4294967295",
+          "reason": "buffer"
         }
       },
       "frame": {
@@ -7414,14 +8563,14 @@
       }
     },
     "rules": [
-      "Snapshot channels (book / bbo / prices / account / positions / orders) send one frame with `isSnapshot:true` on subscribe. book / bbo / prices / account / positions are then coalesced per block: events only mark them, and at each block boundary (`BlockBegun`, about once a second) each is read once and pushed only if its data changed (`isSnapshot:false`). account / positions of an account that holds positions are also re-read when marks or funding move.",
-      "orders: the snapshot is all open orders across markets; after it every accept / fill / cancel / expiry is one frame with `clientOrderId` (if any) and `status` (open / filled / canceled / expired). Apply frames idempotently by `orderId`: a snapshot replaces the set, any other frame keeps the order if `status` is `open` and removes it otherwise. Order events already covered by the snapshot's view are not sent.",
+      "Snapshot channels (book / bbo / prices / account / positions / orders) send one frame with `isSnapshot:true` on subscribe. book / bbo / prices / account / positions are then coalesced per block: events only mark them, and at each block boundary (`BlockBegun`, about once a second) each is read once and pushed only if its data changed (`isSnapshot:false`). account / positions of an account that holds positions are also re-read when marks or funding move, and those of any account whose ledger moved in the block (from the execution history's per-account ledger index — e.g. a vault redemption, whose events do not name the vault) are re-read at the block boundary (specification v1.1 §4.10-4).",
+      "Error frames answering a `subscribe` / `unsubscribe` carry the request `id` (when the request had one), `data.method` and `data.subscription` (the request's `params` verbatim), so a client can tell which request was refused. Unsubscribing a subscription the connection does not have is an error (`GatewayNotFound`), not `unsubscribed`. Error frames without `id` or `subscription` only answer malformed frames (specification v1.1 §4.10-3).",
+      "orders: the snapshot is all open orders across markets; after it every accept / fill / cancel / expiry is one frame with `clientOrderId` (if any) and `status` (open / filled / canceled / expired). Apply frames idempotently by `orderId`: a snapshot replaces the set, any other frame keeps the order if `status` is `open` and removes it otherwise. Order events already covered by the snapshot's view are not sent. `status` and `remaining` are always present: a taker's fill frames repeat the order's state at the end of the command (the same as its `accepted` frame); fills of protocol orders (liquidation, vault halt; `orderId` `\"0\"`, no `accepted`) are `filled` with `remaining` 0. When the connection cannot work them out it sends a fresh `isSnapshot:true` frame instead of an incomplete one. Pending conditional orders are part of the snapshot (rows with `trigger`); when one is placed, triggered, rejected or auto-cancelled a fresh snapshot is sent (those events carry no side / price / size), and cancelling one sends a `canceled` frame.",
       "The candles channel sends one frame per fill with **the latest state of the current bar** (o/h/l/c/v accumulated; clients keep the last frame); a new bar starts automatically when the interval rolls over.",
-      "Time-series channels (trades / fills / ledger / events) send one frame per event, carrying `seq` and `data.id`; for fills and ledger `data.id` is the `after` cursor of `/v1/account/fills` and `/v1/account/ledger`.",
-      "Resume: the subscribe ack carries the ledger `epoch`; private frames carry `epoch` and `seq`, public book / bbo frames carry `seq`. `lagged{dropped, epoch, upper}` means the server-side broadcast fell behind and frames were dropped; **dropped frames are never resent**. Right after it every snapshot subscription receives one `isSnapshot:true` frame, and fills / ledger frames at or before `upper` are no longer sent: backfill them with `after=<last data.id received>&epoch=<epoch>&upper=<upper>` (retry later on 400 `not yet complete`); the two parts join without gaps or duplicates. If `epoch` changed after a reconnect, rebuild state instead of resuming old cursors.",
+      "Time-series channels (trades / fills / ledger / events) carry `seq`; trades / fills / events send one frame per event with `data.id`, ledger one frame per command with `data.entries[]`. The fills `data.id`, and the last `data.entries[].id` of a ledger frame, are the `after` cursors of `/v1/account/fills` and `/v1/account/ledger`.",
+      "Resume: the subscribe ack carries the ledger `epoch` and the start position `seq`: every event after `seq` is sent on the subscription (unless a `lagged` follows); backfill time series up to `upper=<seq>-65535-4294967295` over REST and de-duplicate by `id` to join without gaps. Private frames carry `epoch` and `seq`, public book / bbo frames carry `seq`. `lagged{dropped, epoch, upper, reason}` means frames were not sent: `reason: buffer` = the server-side broadcast fell behind and `dropped` events were dropped; `reason: render` = the connection could not render time-series frames (execution history unreadable, market metadata missing; `dropped` is 0). **Frames not sent are never resent**. Right after it every snapshot subscription receives one `isSnapshot:true` frame, and fills / ledger frames at or before `upper` are no longer sent: backfill them with `after=<last id received>&epoch=<epoch>&upper=<upper>` (retry later on 400 `GatewayHistoryIncomplete`); the two parts join without gaps or duplicates. If `epoch` changed after a reconnect, rebuild state instead of resuming old cursors.",
       "At most 200 subscriptions per connection; the server closes a connection that has sent no frame (pings count) for 60 s.",
       "Rate limiting: REST uses fixed 60-second windows per IP and, for writes, per main wallet (weights: reads 1, order book / prices 2, history 5, writes 1 + floor(n / 40); default 1200 per minute each); every response carries `ratelimit` / `ratelimit-policy`, writes also `x-ratelimit-account`, and exceeding a budget yields 429 with `retry-after`. The WebSocket connection itself carries no weight.",
-      "Private channels are subscribed by `address` (+ optional `subaccount`, default 0) without authentication (the same data is publicly readable over REST; identical to Hyperliquid / Pacifica). Subscribing by `vault` is not supported yet.",
       "Private channels (orders / fills / account / positions / ledger) accept `vault` instead of `address` / `subaccount` (specification v1.1 §4.3; giving both is an error frame); their frames then show `vault` in place of `address` / `subaccount`."
     ],
     "channels": {
@@ -7434,7 +8583,7 @@
           "symbol",
           "depth?"
         ],
-        "data": "Book (`depth` levels per side, 1..=100, default 20; out of range is an error frame)"
+        "data": "Book (`depth` levels per side, 1..=100, default 20, echoed as `depth`; out of range is an error frame)"
       },
       "bbo": {
         "params": [
@@ -7454,7 +8603,7 @@
           "subaccount?",
           "vault?"
         ],
-        "data": "Snapshot: `{address, subaccount, orders:[OpenOrder]}`. Update: `{address, subaccount, orderId, clientOrderId, symbol, event: accepted|fill|canceled|expired, status: open|filled|canceled|expired, side?, price?, size?, filled?, remaining?, lastFilled?, fillId?, ts}`"
+        "data": "Snapshot: `{address, subaccount, orders:[OpenOrder]}`. Update: `{address, subaccount, orderId, clientOrderId, symbol, event: accepted|fill|canceled|expired, status: open|filled|canceled|expired, remaining, side?, price?, size?, filled?, lastFilled?, fillId?, ts}` (`status` and `remaining` always present)"
       },
       "fills": {
         "params": [
@@ -7499,7 +8648,7 @@
           "subaccount?",
           "vault?"
         ],
-        "data": "LedgerEntry + `address`, `subaccount` (deposits / withdrawals / fees / funding / transfers …); one frame per ledger leg caused by a command"
+        "data": "`{address, subaccount, entries:[LedgerEntry]}` (or `{vault, entries}`): the `GET /v1/account/ledger` body without the paging tail, one frame per command with all of this account's entries in it, each identical to the REST entry. Read from the execution history's per-account ledger index — every entry the REST endpoint returns after the subscribe ack's `seq` is sent (vault deposits / redemptions, ADL and fee legs included)"
       },
       "events": {
         "params": [
@@ -7513,6 +8662,7 @@
   "x-error-codes": {
     "gateway": {
       "GatewayBadRequest": 10400,
+      "GatewayHistoryIncomplete": 10400,
       "GatewayBadSignature": 10401,
       "GatewayForbidden": 10403,
       "GatewayNotFound": 10404,

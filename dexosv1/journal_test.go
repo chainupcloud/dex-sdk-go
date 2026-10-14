@@ -205,6 +205,9 @@ func TestExchangeVersionSubaccountsAndMarketFees(t *testing.T) {
 	if err != nil || ex.Version.CodecVer != dexos.CodecVersion {
 		t.Fatalf("网关的编码版本应为 %d: %+v / %v", dexos.CodecVersion, ex, err)
 	}
+	if ex.FundingTickSec != 3600 {
+		t.Fatalf("资金费结算周期: %d", ex.FundingTickSec)
+	}
 	cat, err := c.Catalog(context.Background())
 	if err != nil {
 		t.Fatal(err)

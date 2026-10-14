@@ -224,8 +224,7 @@ type LedgerEntry struct {
 	Amount string  `json:"amount"`
 	Symbol *string `json:"symbol"`
 	// Vault 只在 `vault_*` 条目上有(v1.1 §4.3):以金库身份查 = 该金库;否则 = 对手账户所属的金库,
-	// 对手不是金库(creator 一侧的 vault_fee)为 nil。WS `ledger` 帧不带对手金库:按钱包订阅时
-	// 推来的 vault_* 条目这里是 nil,要按金库筛请用 [Client.Ledger]。
+	// 对手不是金库(creator 一侧的 vault_fee)为 nil。WS `ledger` 帧的条目与 REST 相同。
 	Vault *uint16 `json:"vault"`
 }
 

@@ -5,6 +5,7 @@ package dexosv1
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -46,8 +47,12 @@ func TestContractReadOnly(t *testing.T) {
 		}
 	}
 
-	if _, err := c.Exchange(ctx); err != nil {
+	ex, err := c.Exchange(ctx)
+	if err != nil {
 		t.Fatalf("Exchange: %v", err)
+	}
+	if ex.FundingTickSec == 0 {
+		t.Error("fundingTickSec 应是正整数秒")
 	}
 	conforms("/v1/exchange", nil, "/v1/exchange")
 
@@ -63,15 +68,28 @@ func TestContractReadOnly(t *testing.T) {
 	if m.MarginMode != "cross" && m.MarginMode != "isolated" {
 		t.Errorf("%s 的 marginMode = %q", m.Symbol, m.MarginMode)
 	}
-	if _, err := c.Book(ctx, &m, 5); err != nil {
+	if b, err := c.Book(ctx, &m, 5); err != nil {
 		t.Fatalf("Book %s: %v", m.Symbol, err)
+	} else if b.Depth != 5 {
+		t.Errorf("Book %s 的 depth = %d,问的是 5", m.Symbol, b.Depth)
 	}
 	conforms("/v1/markets/"+url.PathEscape(m.Symbol)+"/book", url.Values{"depth": {"5"}}, "/v1/markets/{symbol}/book")
-	if _, err := c.Prices(ctx, cat); err != nil {
+	ps, err := c.Prices(ctx, cat)
+	if err != nil {
 		t.Fatalf("Prices: %v", err)
 	}
+	for _, p := range ps.Prices {
+		// 下次结算时刻 = 上次 + 全局结算周期
+		if p.LastFundingMs != nil && (p.NextFundingMs == nil || *p.NextFundingMs != *p.LastFundingMs+int64(ex.FundingTickSec)*1000) {
+			t.Errorf("%s 的资金费时间表对不上周期 %ds: last %d next %v", p.Symbol, ex.FundingTickSec, *p.LastFundingMs, p.NextFundingMs)
+		}
+	}
 	conforms("/v1/prices", nil, "/v1/prices")
-	for _, iv := range []string{Interval4h, Interval1M} {
+	if _, err := c.Tickers(ctx, cat); err != nil {
+		t.Fatalf("Tickers: %v", err)
+	}
+	conforms("/v1/tickers", nil, "/v1/tickers")
+	for _, iv := range []string{Interval2h, Interval4h, Interval12h, Interval1M} {
 		if _, err := c.Candles(ctx, &m, CandleQuery{Interval: iv, Limit: 5}); err != nil {
 			t.Fatalf("Candles %s %s: %v", m.Symbol, iv, err)
 		}
@@ -92,9 +110,11 @@ func TestContractReadOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if acc, err := c.Account(ctx, ref); err != nil {
+	acc, err := c.Account(ctx, ref)
+	if err != nil {
 		t.Fatalf("Account: %v", err)
-	} else if acc.Epoch == "" || acc.AsOfSeq == 0 {
+	}
+	if acc.Epoch == "" || acc.AsOfSeq == 0 {
 		t.Errorf("账户汇总的纪元 / 视图序号: %q / %d", acc.Epoch, acc.AsOfSeq)
 	}
 	conforms("/v1/account", q, "/v1/account")
@@ -116,6 +136,11 @@ func TestContractReadOnly(t *testing.T) {
 		t.Fatalf("Ledger: %v", err)
 	}
 	conforms("/v1/account/ledger", small, "/v1/account/ledger")
+	// 上界远超执行历史的完整前缀:稳定错误码 GatewayHistoryIncomplete
+	far := cursorAt(acc.AsOfSeq + 1_000_000_000).String()
+	if _, err := c.Ledger(ctx, ref, LedgerQuery{HistoryQuery: HistoryQuery{Epoch: acc.Epoch, Upper: far, Limit: 1}}); !errors.Is(err, dexos.ErrHistoryUpperIncomplete) {
+		t.Errorf("上界 %s 应当是 ErrHistoryUpperIncomplete: %v", far, err)
+	}
 	if _, err := c.Nonce(ctx, ref, nil); err != nil {
 		t.Fatalf("Nonce: %v", err)
 	}

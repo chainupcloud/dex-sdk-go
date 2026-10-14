@@ -91,7 +91,8 @@ func parseError(status int, header http.Header, raw []byte) error {
 		return rateLimited(e, header)
 	case status == http.StatusConflict && e.Message == "history_epoch_mismatch":
 		return fmt.Errorf("%w: %w", dexos.ErrHistoryEpochMismatch, e)
-	case status == http.StatusBadRequest && strings.Contains(e.Message, "not yet complete"):
+	case status == http.StatusBadRequest && e.Code == "GatewayHistoryIncomplete":
+		// 补拉上界越过了本副本执行历史的完整前缀(v1.1 §4.9-5):稍后重试
 		return fmt.Errorf("%w: %w", dexos.ErrHistoryUpperIncomplete, e)
 	case status == http.StatusServiceUnavailable && detailString(e.Details, "status") == "history_unavailable":
 		var gaps []dexos.Gap
