@@ -249,6 +249,7 @@ var fixtureSchemas = []struct {
 	{"portfolio.json", "/v1/account/portfolio", "200", ""},
 	{"agent_grants.json", "/v1/agents/{address}", "200", ""},
 	{"my_vaults.json", "/v1/account/vaults", "200", ""},
+	{"subaccounts.json", "/v1/account/subaccounts", "200", ""},
 }
 
 // postFixtureSchemas 写接口回执的 fixture(形状照原生 v1 的 v1_write.rs 整理)。
@@ -341,6 +342,8 @@ func TestDecodedFieldsExistInPinnedSpec(t *testing.T) {
 		{"AgentGrant", reflect.TypeFor[AgentGrant](), schema("AgentGrant")},
 		{"MyVaultPosition", reflect.TypeFor[VaultPosition](), myVault},
 		{"MyVaultPosition.withdrawable", reflect.TypeFor[VaultPosition]().Field(11).Type, props(obj(myVault["withdrawable"]))},
+		{"Market.fees", reflect.TypeFor[MarketFees](), props(obj(schema("Market")["fees"]))},
+		{"Subaccount", reflect.TypeFor[Subaccount](), schema("Subaccount")},
 	}
 	for _, c := range cases {
 		if c.props == nil {
