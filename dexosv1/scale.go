@@ -41,6 +41,18 @@ func (s Scale) Lots(size string) (uint64, error) {
 	return v.Uint64(), nil
 }
 
+// signedLots 带符号的十进制数量 → 带符号的 lot(持仓用)。没对齐、超出 int64 都是错误。
+func (s Scale) signedLots(size string) (int64, error) {
+	v, err := ParseFixed(size, s.SizeDecimals)
+	if err != nil {
+		return 0, fmt.Errorf("数量 %q: %w", size, err)
+	}
+	if !v.IsInt64() {
+		return 0, fmt.Errorf("数量 %q 换成 lot 后超出 int64", size)
+	}
+	return v.Int64(), nil
+}
+
 // Price tick → 十进制价格(去掉末尾多余的 0,与服务端同一写法)。
 func (s Scale) Price(ticks uint32) string {
 	return FormatFixed(new(big.Int).SetUint64(uint64(ticks)), s.PriceDecimals)
