@@ -23,9 +23,9 @@ import (
 //	DEXOS_V1_URL=http://127.0.0.1:17807 DEXOS_V1_WRITE_KEY=0x… DEXOS_V1_TAKER_KEY=0x… \
 //	  go test -tags dexos_contract -run ContractStream ./dexosv1/
 //
-// 两把私钥都必须是测试账户的主钱包(例如本地栈的 anvil 测试账户),账户里要有 USDC;成交后 maker 多、
-// taker 空各留一笔最小仓位。DEXOS_V1_WRITE_SYMBOL 可选,缺省用目录里第一个有标记价的永续;盘口价差
-// 只有一档时挂不出最优买价,换个市场。
+// 两把私钥都必须是测试账户的主钱包(例如本地栈的 anvil 测试账户),账户里要有 USDC。成交开出的两笔
+// 最小仓位在结束时用一笔反向成交(maker 挂卖、taker IOC 买)平掉,账户里原有的仓位不动。
+// DEXOS_V1_WRITE_SYMBOL 可选,缺省用目录里第一个有标记价的永续;盘口价差只有一档时挂不出最优价,换个市场。
 func TestContractStream(t *testing.T) {
 	base, makerKey, takerKey := os.Getenv("DEXOS_V1_URL"), os.Getenv("DEXOS_V1_WRITE_KEY"), os.Getenv("DEXOS_V1_TAKER_KEY")
 	if base == "" || makerKey == "" || takerKey == "" {
@@ -206,6 +206,9 @@ func TestContractStream(t *testing.T) {
 		t.Fatalf("taker 吃单: %v", err)
 	}
 	t.Logf("taker 回执: %s 成交 %s", took.Status, m.Scale.Size(took.FilledLots))
+	if took.FilledLots > 0 {
+		defer unwind(t, c, m, mw, tw, took.FilledLots)
+	}
 
 	// maker:orders 的 fill 帧,之后单子离开在挂集合;fills 帧字段对得上
 	sawFill := false
@@ -255,6 +258,51 @@ func TestContractStream(t *testing.T) {
 	for _, e := range failed {
 		t.Errorf("订阅 %s %v 报错: %s %v", e.Sub.Channel(), e.Sub.Params(), e.State, e.Err)
 	}
+}
+
+// unwind 用一笔反向成交平掉本测试开出的仓位:maker 挂最优卖价的只挂单,taker 用 IOC 买单吃掉。
+func unwind(t *testing.T, c *Client, m *Market, mw, tw *Wallet, lots uint64) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	book, err := c.Book(ctx, m, 1)
+	if err != nil {
+		t.Errorf("平仓读盘口: %v", err)
+		return
+	}
+	mk, err := c.Market(ctx, m.Symbol)
+	if err != nil {
+		t.Errorf("平仓读标记价: %v", err)
+		return
+	}
+	var price uint32
+	switch {
+	case len(book.Bids) == 0 && len(book.Asks) == 0 && mk.MarkPrice != nil:
+		price = *mk.MarkPrice
+	case len(book.Asks) == 0 && len(book.Bids) > 0:
+		price = book.Bids[0].Price + 1
+	case len(book.Asks) > 0 && (len(book.Bids) == 0 || book.Asks[0].Price-book.Bids[0].Price > 1):
+		price = book.Asks[0].Price - 1
+	default:
+		t.Errorf("平仓:%s 盘口价差只有一档,挂不出最优卖价;maker 多、taker 空各剩 %s 要手工平", m.Symbol, m.Scale.Size(lots))
+		return
+	}
+	sell, err := mw.PlaceOrder(ctx, OrderRequest{Market: m, Side: dexos.Sell, Price: price, Lots: lots, TIF: dexos.PostOnly},
+		time.Now().Add(time.Minute))
+	if err != nil || sell.Status != "resting" {
+		t.Errorf("平仓 maker 挂卖: %+v %v", sell, err)
+		return
+	}
+	buy, err := tw.PlaceOrder(ctx, OrderRequest{Market: m, Side: dexos.Buy, Price: price, Lots: lots, TIF: dexos.IOC},
+		time.Now().Add(time.Minute))
+	if err != nil || buy.FilledLots != lots {
+		t.Errorf("平仓 taker 买: %+v %v", buy, err)
+		if _, cerr := mw.Cancel(ctx, m, sell.OrderID); cerr != nil {
+			t.Errorf("撤平仓挂单 %d: %v", sell.OrderID, cerr)
+		}
+		return
+	}
+	t.Logf("已平仓:%s × %s", m.Scale.Price(price), m.Scale.Size(lots))
 }
 
 func put[T any](ch chan T, v T) {
