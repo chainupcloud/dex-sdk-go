@@ -194,21 +194,43 @@ func TestBusinessRejectionIsTypedConsumesNonceAndDoesNotBlock(t *testing.T) {
 	}
 }
 
-// nonce 之前的拒绝(scope 越权等):计数器没动,同样不锁。
+// nonce 之前的拒绝(scope 越权、金库主账户没有 manager 等):计数器没动,同样不锁。
+// NonceMismatch 也没消耗计数器,但它说明本地计数器不可信,另由下面的用例管(锁定)。
 func TestPreNonceRejectionKeepsNonceAndDoesNotBlock(t *testing.T) {
-	g := newFakeGateway(t, 10)
-	s := newTestSession(t, g)
-	g.reply = rejected("AgentScopeViolation")
-	if _, err := s.ScheduleCancel(context.Background(), time.Time{}); err == nil {
-		t.Fatal("scope 越权必须报错")
+	for _, reason := range []string{"SignatureExpired", "BadSignature", "AuthUnavailable", "UnboundSigner",
+		"UnknownAgent", "AgentScopeViolation", "AgentExpired", "VaultNoManager"} {
+		t.Run(reason, func(t *testing.T) {
+			g := newFakeGateway(t, 10)
+			s := newTestSession(t, g)
+			g.reply = rejected(reason)
+			if _, err := s.ScheduleCancel(context.Background(), time.Time{}); err == nil {
+				t.Fatal("拒绝必须报错")
+			}
+			g.reply = nil
+			if _, err := s.ScheduleCancel(context.Background(), time.Time{}); err != nil {
+				t.Fatalf("不该被锁:%v", err)
+			}
+			w := g.recorded()
+			if len(w) != 2 || w[0].Nonce != 10 || w[1].Nonce != 10 {
+				t.Fatalf("nonce 之前的拒绝没消耗计数器,应当重用 10:实得 %+v", w)
+			}
+		})
 	}
-	g.reply = nil
-	if _, err := s.ScheduleCancel(context.Background(), time.Time{}); err != nil {
-		t.Fatalf("不该被锁:%v", err)
+}
+
+// 「哪些拒因没消耗 nonce」逐项对齐 dex-os 的事实源
+// crates/core/src/engine/authn.rs `AuthState::PRE_CONSUME_REJECTIONS`:
+// 多一项,本地会重用已被消耗的 nonce(NonceMismatch 锁会话);少一项,本地跑到服务端前面。
+func TestPreConsumeRejectionsMatchDexOS(t *testing.T) {
+	want := []string{"SignatureExpired", "BadSignature", "AuthUnavailable", "UnboundSigner",
+		"UnknownAgent", "AgentScopeViolation", "AgentExpired", "NonceMismatch", "VaultNoManager"}
+	if len(rejectedBeforeNonce) != len(want) {
+		t.Fatalf("要 %d 项,实有 %d 项:%v", len(want), len(rejectedBeforeNonce), rejectedBeforeNonce)
 	}
-	w := g.recorded()
-	if len(w) != 2 || w[0].Nonce != 10 || w[1].Nonce != 10 {
-		t.Fatalf("nonce 之前的拒绝没消耗计数器,应当重用 10:实得 %+v", w)
+	for _, r := range want {
+		if !rejectedBeforeNonce[r] {
+			t.Fatalf("缺 %s", r)
+		}
 	}
 }
 
