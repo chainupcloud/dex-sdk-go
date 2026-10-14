@@ -219,16 +219,23 @@ func (c *Client) Book(ctx context.Context, m *Market, depth int) (*Book, error) 
 	if depth > 0 {
 		q.Set("depth", strconv.Itoa(depth))
 	}
-	var w struct {
-		Symbol string      `json:"symbol"`
-		Bids   [][2]string `json:"bids"`
-		Asks   [][2]string `json:"asks"`
-		Seq    uint64      `json:"seq"`
-		TS     int64       `json:"ts"`
-	}
+	var w wireBook
 	if err := c.get(ctx, "/v1/markets/"+url.PathEscape(m.Symbol)+"/book", q, marketRead, &w); err != nil {
 		return nil, err
 	}
+	return w.book(m)
+}
+
+// wireBook 盘口的线上形状(REST 响应与 WS `book` 帧同形)。
+type wireBook struct {
+	Symbol string      `json:"symbol"`
+	Bids   [][2]string `json:"bids"`
+	Asks   [][2]string `json:"asks"`
+	Seq    uint64      `json:"seq"`
+	TS     int64       `json:"ts"`
+}
+
+func (w wireBook) book(m *Market) (*Book, error) {
 	if !strings.EqualFold(w.Symbol, m.Symbol) {
 		return nil, fmt.Errorf("dexosv1: 问 %s 的盘口,答的是 %q", m.Symbol, w.Symbol)
 	}
@@ -313,14 +320,21 @@ type Prices struct {
 
 // Prices 全部市场的实时价与 24h 统计。响应里出现目录外的符号时报错(不猜精度)。
 func (c *Client) Prices(ctx context.Context, cat *Catalog) (*Prices, error) {
-	var w struct {
-		Prices []wirePrice `json:"prices"`
-		TS     int64       `json:"ts"`
-		Window *Window24h  `json:"window24h"`
-	}
+	var w wirePrices
 	if err := c.get(ctx, "/v1/prices", nil, marketRead, &w); err != nil {
 		return nil, err
 	}
+	return w.prices(cat)
+}
+
+// wirePrices `/v1/prices` 的线上形状(REST 响应与 WS `prices` 帧同形)。
+type wirePrices struct {
+	Prices []wirePrice `json:"prices"`
+	TS     int64       `json:"ts"`
+	Window *Window24h  `json:"window24h"`
+}
+
+func (w wirePrices) prices(cat *Catalog) (*Prices, error) {
 	out := &Prices{TS: w.TS, Window: w.Window, Prices: make([]Price, 0, len(w.Prices))}
 	for _, wp := range w.Prices {
 		m, err := cat.Market(wp.Symbol)

@@ -75,16 +75,21 @@ func (c *Client) Account(ctx context.Context, ref AccountRef) (*Account, error) 
 	if err := c.get(ctx, "/v1/account", ref.values(), accountRead, &raw); err != nil {
 		return nil, err
 	}
+	return decodeAccount(raw, "/v1/account")
+}
+
+// decodeAccount 账户汇总的体(REST 响应与 WS `account` 帧同形)。
+func decodeAccount(raw json.RawMessage, where string) (*Account, error) {
 	var a Account
 	if err := json.Unmarshal(raw, &a); err != nil {
-		return nil, fmt.Errorf("dexosv1: /v1/account 响应解析失败: %w", err)
+		return nil, fmt.Errorf("dexosv1: %s 解析失败: %w", where, err)
 	}
 	var head struct {
 		Epoch   *string `json:"epoch"`
 		AsOfSeq *uint64 `json:"asOfSeq"`
 	}
 	if err := json.Unmarshal(raw, &head); err != nil || head.Epoch == nil || *head.Epoch == "" || head.AsOfSeq == nil {
-		return nil, fmt.Errorf("dexosv1: /v1/account 缺 epoch / asOfSeq: %s", raw)
+		return nil, fmt.Errorf("dexosv1: %s 缺 epoch / asOfSeq: %s", where, raw)
 	}
 	return &a, nil
 }
@@ -120,8 +125,13 @@ func (c *Client) Positions(ctx context.Context, cat *Catalog, ref AccountRef) ([
 	if err := c.get(ctx, "/v1/account/positions", ref.values(), accountRead, &resp); err != nil {
 		return nil, err
 	}
-	out := make([]Position, 0, len(resp.Positions))
-	for _, w := range resp.Positions {
+	return positionsFrom(cat, resp.Positions)
+}
+
+// positionsFrom 持仓行(REST 响应与 WS `positions` 帧同形)换算成 tick / lot。
+func positionsFrom(cat *Catalog, in []wirePosition) ([]Position, error) {
+	out := make([]Position, 0, len(in))
+	for _, w := range in {
 		m, err := cat.Market(w.Symbol)
 		if err != nil {
 			return nil, err
@@ -179,29 +189,38 @@ func (c *Client) Orders(ctx context.Context, cat *Catalog, ref AccountRef, symbo
 	}
 	out := make([]Order, 0, len(resp.Orders))
 	for _, w := range resp.Orders {
-		m, err := cat.Market(w.Symbol)
+		o, err := w.order(cat)
 		if err != nil {
 			return nil, err
-		}
-		o := Order{ClientOrderID: w.ClientOrderID, Symbol: w.Symbol, Side: w.Side, Status: w.Status}
-		if o.OrderID, err = strconv.ParseUint(w.OrderID, 10, 64); err != nil {
-			return nil, fmt.Errorf("dexosv1: 挂单 orderId %q: %w", w.OrderID, err)
-		}
-		if o.Price, err = m.Scale.Ticks(w.Price); err != nil {
-			return nil, fmt.Errorf("dexosv1: 挂单 %s price: %w", w.OrderID, err)
-		}
-		for _, f := range []struct {
-			name string
-			in   string
-			out  *uint64
-		}{{"size", w.Size, &o.Lots}, {"filled", w.Filled, &o.FilledLots}, {"remaining", w.Remaining, &o.RemainingLots}} {
-			if *f.out, err = m.Scale.Lots(f.in); err != nil {
-				return nil, fmt.Errorf("dexosv1: 挂单 %s %s: %w", w.OrderID, f.name, err)
-			}
 		}
 		out = append(out, o)
 	}
 	return out, nil
+}
+
+// order 挂单行(REST 响应与 WS `orders` 快照同形)换算成 tick / lot。
+func (w wireOrder) order(cat *Catalog) (Order, error) {
+	m, err := cat.Market(w.Symbol)
+	if err != nil {
+		return Order{}, err
+	}
+	o := Order{ClientOrderID: w.ClientOrderID, Symbol: w.Symbol, Side: w.Side, Status: w.Status}
+	if o.OrderID, err = strconv.ParseUint(w.OrderID, 10, 64); err != nil {
+		return Order{}, fmt.Errorf("dexosv1: 挂单 orderId %q: %w", w.OrderID, err)
+	}
+	if o.Price, err = m.Scale.Ticks(w.Price); err != nil {
+		return Order{}, fmt.Errorf("dexosv1: 挂单 %s price: %w", w.OrderID, err)
+	}
+	for _, f := range []struct {
+		name string
+		in   string
+		out  *uint64
+	}{{"size", w.Size, &o.Lots}, {"filled", w.Filled, &o.FilledLots}, {"remaining", w.Remaining, &o.RemainingLots}} {
+		if *f.out, err = m.Scale.Lots(f.in); err != nil {
+			return Order{}, fmt.Errorf("dexosv1: 挂单 %s %s: %w", w.OrderID, f.name, err)
+		}
+	}
+	return o, nil
 }
 
 // Nonce 下一个 nonce。Scope "account" = 主钱包作用域,"agent" = API 钱包作用域(两个独立计数器,
