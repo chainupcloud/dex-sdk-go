@@ -474,6 +474,37 @@ func TestLedgerFilters(t *testing.T) {
 	}
 }
 
+// 持仓 size 带符号(多为正、空为负),换成带符号的 lot;side 与符号对不上就报错。
+func TestPositionsSignedSize(t *testing.T) {
+	f, c := newFake(t)
+	cat := catalog(t, f, c)
+	ref := AccountRef{Address: mustAddr(t, testAddr)}
+	body := func(rows string) http.HandlerFunc {
+		return func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = w.Write([]byte(`{"address":"` + testAddr + `","subaccount":0,"positions":[` + rows + `]}`))
+		}
+	}
+	mark := map[string]string{"BTC-USD": "82680", "ETH-USD": "2501.9"}
+	row := func(symbol, side, size string) string {
+		return `{"symbol":"` + symbol + `","side":"` + side + `","size":"` + size + `","entryPrice":"2509.3","markPrice":"` + mark[symbol] + `",` +
+			`"notional":"1250.95","unrealizedPnl":"3.7","fundingIndex":"0"}`
+	}
+	f.routes["/v1/account/positions"] = body(row("BTC-USD", "long", "0.184") + "," + row("ETH-USD", "short", "-0.5"))
+	ps, err := c.Positions(context.Background(), cat, ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ps) != 2 || ps[0].Lots != 184 || ps[0].Side != "long" || ps[1].Lots != -50 || ps[1].Side != "short" {
+		t.Fatalf("带符号持仓不对: %+v", ps)
+	}
+	for _, bad := range []string{row("ETH-USD", "long", "-0.5"), row("ETH-USD", "short", "0.5"), row("ETH-USD", "flat", "0.5")} {
+		f.routes["/v1/account/positions"] = body(bad)
+		if _, err := c.Positions(context.Background(), cat, ref); err == nil {
+			t.Fatalf("side 与 size 符号不一致要报错: %s", bad)
+		}
+	}
+}
+
 // 响应里出现目录外的符号:不猜精度,报错。
 func TestUnknownSymbolInAccountResponse(t *testing.T) {
 	f, c := newFake(t)

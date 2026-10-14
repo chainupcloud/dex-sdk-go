@@ -94,12 +94,12 @@ func decodeAccount(raw json.RawMessage, where string) (*Account, error) {
 	return &a, nil
 }
 
-// Position 一个持仓。Lots 是绝对值,方向看 Side;MarkPrice 是 tick。
+// Position 一个持仓。Lots 带符号:多为正、空为负(同 Hyperliquid 的 szi),与 Side 一致;MarkPrice 是 tick。
 // 开仓均价是派生的平均值,未必落在 tick 上,保持十进制字符串。
 type Position struct {
 	Symbol        string
 	Side          string // "long" | "short"
-	Lots          uint64
+	Lots          int64
 	EntryPrice    string
 	MarkPrice     uint32
 	Notional      string // USDC
@@ -138,8 +138,12 @@ func positionsFrom(cat *Catalog, in []wirePosition) ([]Position, error) {
 		}
 		p := Position{Symbol: w.Symbol, Side: w.Side, EntryPrice: w.EntryPrice, Notional: w.Notional,
 			UnrealizedPnl: w.UnrealizedPnl, FundingIndex: w.FundingIndex}
-		if p.Lots, err = m.Scale.Lots(w.Size); err != nil {
+		if p.Lots, err = m.Scale.signedLots(w.Size); err != nil {
 			return nil, fmt.Errorf("dexosv1: 持仓 %s size: %w", w.Symbol, err)
+		}
+		// 方向与符号要一致:服务端按 lots > 0 为 long、否则 short 给 side(gateway positions_json);对不上不猜
+		if (w.Side != "long" && w.Side != "short") || (w.Side == "long") != (p.Lots > 0) {
+			return nil, fmt.Errorf("dexosv1: 持仓 %s 的 side %q 与 size %q 的符号不一致", w.Symbol, w.Side, w.Size)
 		}
 		if p.MarkPrice, err = m.Scale.Ticks(w.MarkPrice); err != nil {
 			return nil, fmt.Errorf("dexosv1: 持仓 %s markPrice: %w", w.Symbol, err)
