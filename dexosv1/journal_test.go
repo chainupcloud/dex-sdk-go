@@ -186,7 +186,7 @@ func TestSubmitApproval(t *testing.T) {
 	}
 }
 
-func TestSubaccountsAndMarketFees(t *testing.T) {
+func TestExchangeVersionSubaccountsAndMarketFees(t *testing.T) {
 	f, c := newFake(t)
 	f.routes["/v1/account/subaccounts"] = serve(t, http.StatusOK, "subaccounts.json")
 	f.routes["/v1/markets"] = serve(t, http.StatusOK, "markets.json")
@@ -199,6 +199,11 @@ func TestSubaccountsAndMarketFees(t *testing.T) {
 	}
 	if _, err := c.Subaccounts(context.Background(), mustAddr(t, agentAddr)); err == nil {
 		t.Fatal("答的不是所问地址时应报错")
+	}
+	f.routes["/v1/exchange"] = serve(t, http.StatusOK, "exchange.json")
+	ex, err := c.Exchange(context.Background())
+	if err != nil || ex.Version.CodecVer != dexos.CodecVersion {
+		t.Fatalf("网关的编码版本应为 %d: %+v / %v", dexos.CodecVersion, ex, err)
 	}
 	cat, err := c.Catalog(context.Background())
 	if err != nil {

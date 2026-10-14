@@ -330,6 +330,7 @@ func TestDecodedFieldsExistInPinnedSpec(t *testing.T) {
 		{"Agent", reflect.TypeFor[Agent](), schema("Agent")},
 		{"Exchange", reflect.TypeFor[Exchange](), exchange},
 		{"Exchange.domain", reflect.TypeFor[Exchange]().Field(1).Type, props(obj(exchange["domain"]))},
+		{"Exchange.version", reflect.TypeFor[Exchange]().Field(4).Type, props(obj(exchange["version"]))},
 		{"Exchange.deposit.tokens[]", reflect.TypeFor[Token](), props(obj(obj(props(obj(exchange["deposit"]))["tokens"])["items"]))},
 		{"Account.groups[]", reflect.TypeFor[RiskGroup](), props(obj(obj(schema("Account")["groups"])["items"]))},
 		{"Price", reflect.TypeFor[wirePrice](), schema("Price")},

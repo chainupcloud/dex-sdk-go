@@ -20,6 +20,10 @@ type Exchange struct {
 		Tokens []Token `json:"tokens"`
 	} `json:"deposit"`
 	ServerTime int64 `json:"serverTime"`
+	// Version 网关的版本指纹。CodecVer 是它认的规范命令编码版本,与 dexos.CodecVersion 不同就签不出它认的命令。
+	Version struct {
+		CodecVer uint32 `json:"codecVer"`
+	} `json:"version"`
 }
 
 // Token 一个资产。Token 是签名结构体里的数字 id(Withdrawal / Transfer 用),Decimals 是金额的小数位:
