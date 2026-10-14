@@ -1,0 +1,1 @@
+{"agent":"0x2222222222222222222222222222222222222222","grants":[{"address":"0x1111111111111111111111111111111111111111","subaccount":0,"label":"mm","validUntil":null,"expired":false},{"address":"0x3333333333333333333333333333333333333333","vault":3,"label":"vault-mm","validUntil":1791999999000,"expired":false}]}

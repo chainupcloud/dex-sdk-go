@@ -5,6 +5,7 @@ package dexosv1
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -22,7 +23,7 @@ import (
 //
 //	DEXOS_V1_URL=http://127.0.0.1:17807 DEXOS_V1_ADDRESS=0x… go test -tags dexos_contract -run Contract ./dexosv1/
 //
-// DEXOS_V1_ADDRESS 可选,给了才测账户类接口。只发十几个读请求(翻页 Limit 很小),不调 /v1/events。
+// DEXOS_V1_ADDRESS 可选,给了才测账户类接口。只发二十来个读请求(翻页 Limit 很小),不调 /v1/events。
 func TestContractReadOnly(t *testing.T) {
 	base := os.Getenv("DEXOS_V1_URL")
 	if base == "" {
@@ -59,10 +60,23 @@ func TestContractReadOnly(t *testing.T) {
 	}
 	conforms("/v1/markets", nil, "/v1/markets")
 	m := cat.Markets()[0]
+	if m.MarginMode != "cross" && m.MarginMode != "isolated" {
+		t.Errorf("%s 的 marginMode = %q", m.Symbol, m.MarginMode)
+	}
 	if _, err := c.Book(ctx, &m, 5); err != nil {
 		t.Fatalf("Book %s: %v", m.Symbol, err)
 	}
 	conforms("/v1/markets/"+url.PathEscape(m.Symbol)+"/book", url.Values{"depth": {"5"}}, "/v1/markets/{symbol}/book")
+	if _, err := c.Prices(ctx, cat); err != nil {
+		t.Fatalf("Prices: %v", err)
+	}
+	conforms("/v1/prices", nil, "/v1/prices")
+	for _, iv := range []string{Interval4h, Interval1M} {
+		if _, err := c.Candles(ctx, &m, CandleQuery{Interval: iv, Limit: 5}); err != nil {
+			t.Fatalf("Candles %s %s: %v", m.Symbol, iv, err)
+		}
+		conforms("/v1/markets/"+url.PathEscape(m.Symbol)+"/candles", url.Values{"interval": {iv}, "limit": {"5"}}, "/v1/markets/{symbol}/candles")
+	}
 
 	addr := os.Getenv("DEXOS_V1_ADDRESS")
 	if addr == "" {
@@ -75,8 +89,10 @@ func TestContractReadOnly(t *testing.T) {
 	}
 	ref := AccountRef{Address: a}
 	q := ref.values()
-	if _, err := c.Account(ctx, ref); err != nil {
+	if acc, err := c.Account(ctx, ref); err != nil {
 		t.Fatalf("Account: %v", err)
+	} else if acc.Epoch == "" || acc.AsOfSeq == 0 {
+		t.Errorf("账户汇总的纪元 / 视图序号: %q / %d", acc.Epoch, acc.AsOfSeq)
 	}
 	conforms("/v1/account", q, "/v1/account")
 	if _, err := c.Positions(ctx, cat, ref); err != nil {
@@ -101,10 +117,31 @@ func TestContractReadOnly(t *testing.T) {
 		t.Fatalf("Nonce: %v", err)
 	}
 	conforms("/v1/account/nonce", q, "/v1/account/nonce")
-	if _, err := c.Agents(ctx, ref); err != nil {
+	agents, err := c.Agents(ctx, ref)
+	if err != nil {
 		t.Fatalf("Agents: %v", err)
 	}
 	conforms("/v1/account/agents", q, "/v1/account/agents")
+	if len(agents) > 0 {
+		ag, err := dexos.ParseAddress(agents[0].Address)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := c.AgentGrants(ctx, ag); err != nil {
+			t.Fatalf("AgentGrants: %v", err)
+		}
+		conforms("/v1/agents/"+ag.Hex(), nil, "/v1/agents/{address}")
+	}
+	if _, err := c.Portfolio(ctx, ref, Period7d); err != nil {
+		t.Fatalf("Portfolio: %v", err)
+	}
+	pq := cloneValues(q)
+	pq.Set("period", Period7d)
+	conforms("/v1/account/portfolio", pq, "/v1/account/portfolio")
+	if _, err := c.MyVaults(ctx, a); err != nil {
+		t.Fatalf("MyVaults: %v", err)
+	}
+	conforms("/v1/account/vaults", url.Values{"address": {a.Hex()}}, "/v1/account/vaults")
 }
 
 // capture 记下每个写请求的响应,事后对钉住规格的 POST 响应 schema 校验(本包的类型只读它需要的字段,
@@ -227,6 +264,8 @@ func TestContractWrites(t *testing.T) {
 	}
 	o2 := o
 	o2.Price = far - 1
+	// 换单的新单带 clientOrderId(v1.1 起支持);账户内唯一,按时间取
+	o2.ClientOrderID = fmt.Sprintf("sdk-ct-%d", time.Now().UnixMilli())
 	rep, err := s.Replace(ctx, m, []uint64{*placed.Items[0].OrderID}, []OrderRequest{o2})
 	if err != nil {
 		t.Fatalf("Replace: %v", err)
@@ -238,6 +277,9 @@ func TestContractWrites(t *testing.T) {
 		}
 		if it.Kind == "place" {
 			newID = it.OrderID
+			if it.ClientOrderID == nil || *it.ClientOrderID != o2.ClientOrderID {
+				t.Errorf("换单新单没回显 clientOrderId: %+v", it)
+			}
 		}
 	}
 	if cr, err := s.Cancel(ctx, m, *newID); err != nil || cr.Items[0].Status != "canceled" {

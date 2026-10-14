@@ -63,13 +63,25 @@ type captured struct {
 }
 
 // writeFake 假 dex-os:读接口回 fixture,写接口记下请求体再回给定的状态与 body。
+// 回执 body 里的占位 requestId(testReqID)换成假网关按请求体独立算出的请求身份,见 gatewayRequestID。
 type writeFake struct {
 	*fakeV1
+	cat    *Catalog
 	writes []captured
 }
 
 func newWriteFake(t *testing.T) (*writeFake, *Client) {
 	t.Helper()
+	var ms struct {
+		Markets []wireMarket `json:"markets"`
+	}
+	if err := json.Unmarshal(fixture(t, "markets.json"), &ms); err != nil {
+		t.Fatal(err)
+	}
+	cat, err := newCatalog(ms.Markets)
+	if err != nil {
+		t.Fatal(err)
+	}
 	f, c := newFake(t)
 	f.routes["/v1/exchange"] = serve(t, 200, "exchange.json")
 	f.routes["/v1/markets"] = serve(t, 200, "markets.json")
@@ -81,7 +93,7 @@ func newWriteFake(t *testing.T) (*writeFake, *Client) {
 		}
 		serve(t, 200, name)(w, r)
 	}
-	return &writeFake{fakeV1: f}, c
+	return &writeFake{fakeV1: f, cat: cat}, c
 }
 
 // answer 写端点 path 回 status + fixture,并记下请求。
@@ -95,14 +107,116 @@ func (f *writeFake) answerRaw(t *testing.T, path string, status int, body []byte
 		if r.Method != http.MethodPost || r.URL.Query().Get("ack") != "result" {
 			t.Errorf("%s: 应为 POST ?ack=result,得到 %s %s", path, r.Method, r.URL)
 		}
+		req := decodeJSON(t, raw)
 		f.mu.Lock()
-		f.writes = append(f.writes, captured{path: path, body: decodeJSON(t, raw), raw: raw})
+		f.writes = append(f.writes, captured{path: path, body: req, raw: raw})
 		f.mu.Unlock()
+		out := body
+		if strings.Contains(string(body), testReqID) {
+			out = []byte(strings.ReplaceAll(string(body), testReqID, gatewayRequestID(t, f.cat, path, req)))
+		}
 		w.Header().Set("content-type", "application/json")
 		w.Header().Set("x-dexos-seq", "500")
+		if status == http.StatusTooManyRequests {
+			// 与网关一致:账户桶 429 上 `ratelimit` 是 IP 桶的读数,扣光的账户桶在 `x-ratelimit-account`
+			w.Header().Set("retry-after", "12")
+			w.Header().Set("ratelimit", "limit=1200, remaining=1100, reset=12")
+			w.Header().Set("x-ratelimit-account", "limit=1200, remaining=0, reset=12")
+		}
 		w.WriteHeader(status)
-		_, _ = w.Write(body)
+		_, _ = w.Write(out)
 	}
+}
+
+// gatewayRequestID 假网关按线上请求体独立算请求身份,与网关同一定义:keccak256(签名者 ‖ 签名摘要)。
+// API 钱包签 AgentExec(规范命令编码, nonce),主钱包签 EIP-712 具名结构体;都从请求体重建,不经 SDK 的签名路径。
+func gatewayRequestID(t *testing.T, cat *Catalog, path string, body any) string {
+	t.Helper()
+	env := m(body)
+	items, isBatch := body.([]any)
+	if isBatch {
+		env = m(items[0])
+	}
+	market := func(sym any) *Market {
+		mk, err := cat.Market(sym.(string))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return mk
+	}
+	orderID := func(sym, id any) dexos.OrderID {
+		seq, err := strconv.ParseUint(id.(string), 10, 64)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return dexos.NewOrderID(market(sym).SigningMarketID, seq)
+	}
+	nonce := num(t, env["nonce"])
+	var digest []byte
+	signerHex, isAgent := env["signer"].(string)
+	if isAgent {
+		var cmd []byte
+		switch path {
+		case "/v1/orders":
+			orders := make([]dexos.BatchOrder, len(items))
+			for i, it := range items {
+				orders[i] = gatewayOrder(t, cat, m(it))
+			}
+			cmd = dexos.EncodeBatchPlace(signingID, num(t, env["nowMs"]), orders)
+		case "/v1/orders/cancel":
+			ids := make([]dexos.OrderID, len(items))
+			for i, it := range items {
+				ids[i] = orderID(m(it)["symbol"], m(it)["orderId"])
+			}
+			cmd = dexos.EncodeBatchCancel(signingID, ids)
+		case "/v1/orders/replace":
+			var ids []dexos.OrderID
+			for _, c := range env["cancels"].([]any) {
+				ids = append(ids, orderID(env["symbol"], c))
+			}
+			var orders []dexos.BatchOrder
+			for _, o := range env["orders"].([]any) {
+				orders = append(orders, gatewayOrder(t, cat, m(o)))
+			}
+			cmd = dexos.EncodeBatchReplace(signingID, num(t, env["nowMs"]), ids, orders)
+		case "/v1/orders/cancel-all":
+			cmd = dexos.EncodeScheduleCancel(signingID, num(t, env["nowMs"]), num(t, env["nowMs"]))
+		case "/v1/orders/schedule-cancel":
+			cmd = dexos.EncodeScheduleCancel(signingID, num(t, env["at"]), num(t, env["nowMs"]))
+		default:
+			t.Fatalf("假网关不会算 %s 的 API 钱包请求身份", path)
+		}
+		digest = testDomain.AgentExecHash(cmd, nonce)
+	} else {
+		signerHex = env["account"].(string)
+		owner := mustAddr(t, signerHex)
+		optional := func(k string) uint64 {
+			if env[k] == nil {
+				return 0
+			}
+			return num(t, env[k])
+		}
+		switch path {
+		case "/v1/orders":
+			g := gatewayOrder(t, cat, env)
+			digest = orderHash(testDomain, owner, signingID, g.Market, g.Side, g.Price, g.Lots, g.TIF, g.ReduceOnly, nonce, optional("expiresAt"))
+		case "/v1/orders/cancel":
+			id := orderID(env["symbol"], env["orderId"])
+			digest = cancelHash(testDomain, owner, signingID, id.Market(), id.Seq(), nonce)
+		case "/v1/account/leverage":
+			var imf uint32
+			if lev := num(t, env["leverage"]); lev > 0 {
+				imf = uint32(1_000_000 / lev)
+			}
+			digest = leverageHash(testDomain, owner, signingID, market(env["symbol"]).SigningMarketID, imf, nonce)
+		case "/v1/account/agents/approve":
+			digest = testDomain.ApproveAgentHash(owner, signingID, mustAddr(t, env["agent"].(string)), optional("validUntil"), nonce)
+		default:
+			t.Fatalf("假网关不会算 %s 的主钱包请求身份", path)
+		}
+	}
+	signer := mustAddr(t, signerHex)
+	return "0x" + hex.EncodeToString(dexos.Keccak256(signer[:], digest))
 }
 
 func (f *writeFake) last(t *testing.T) captured {
@@ -243,7 +357,7 @@ func TestSessionPlaceSignsWhatTheGatewayVerifies(t *testing.T) {
 	if a.Status != "accepted" || *a.OrderID != 101 || *a.FilledLots != 0 || !*a.Resting {
 		t.Fatalf("第 0 项: %+v", a)
 	}
-	if r.Status != "rejected" || r.Code != "InsufficientMargin" || r.OrderID != nil {
+	if r.Status != "rejected" || r.Code != "InsufficientMargin" || r.OrderID != nil || r.ClientOrderID == nil || *r.ClientOrderID != "q-1" {
 		t.Fatalf("第 1 项: %+v", r)
 	}
 }
@@ -273,13 +387,13 @@ func TestSessionCancelAndReplace(t *testing.T) {
 	}
 
 	f.answer(t, "/v1/orders/replace", 200, "w_replace.json")
-	rep, err := s.Replace(context.Background(), btc, []uint64{101}, []OrderRequest{{Market: btc, Side: dexos.Buy, Price: 64900, Lots: 200, TIF: dexos.GTC}})
+	rep, err := s.Replace(context.Background(), btc, []uint64{101}, []OrderRequest{{Market: btc, Side: dexos.Buy, Price: 64900, Lots: 200, TIF: dexos.GTC, ClientOrderID: "r-1"}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	req = f.last(t)
 	// 规格缺陷:replace 的 orders[] 引用了 PlaceOrder,把信封字段也列成必填;实现只用外层信封(v1_write.rs replace)。
-	conformsRequest(t, "/v1/orders/replace", req.body, "缺必填字段 account", "缺必填字段 nonce", "缺必填字段 signature")
+	conformsRequest(t, "/v1/orders/replace", req.body)
 	body := m(req.body)
 	if body["cancels"].([]any)[0] != "101" {
 		t.Fatalf("cancels 应是十进制字符串: %v", body["cancels"])
@@ -291,6 +405,13 @@ func TestSessionCancelAndReplace(t *testing.T) {
 	}
 	if len(rep.Items) != 2 || rep.Items[1].Kind != "place" || *rep.Items[1].FilledLots != 200 || rep.Sub != 1 {
 		t.Fatalf("换单回执: %+v", rep)
+	}
+	// 换单的新单也带 clientOrderId(v1.1 §4.2);吃单成交逐笔回在回执里
+	if m(body["orders"].([]any)[0])["clientOrderId"] != "r-1" {
+		t.Fatalf("换单新单的 clientOrderId 没带上: %v", body["orders"])
+	}
+	if it := rep.Items[1]; *it.AvgPrice != 64900 || len(it.Fills) != 1 || it.Fills[0] != (ReceiptFill{FillID: "502-1-0", Price: 64900, Lots: 200, Fee: "6.49", FeeToken: "USDC"}) {
+		t.Fatalf("换单新单的成交: %+v", it)
 	}
 	if s.Nonce() != 43 {
 		t.Fatalf("nonce 应为 43,得到 %d", s.Nonce())
@@ -347,7 +468,7 @@ func TestSessionNonceOutcomes(t *testing.T) {
 		{"定序前:网关验签失败", 401, "err401_sig.json", 41, false, nil, true},
 		{"定序前:账户桶限流", 429, "err429_account.json", 41, false, func(err error) bool {
 			var rl *RateLimitedError
-			return errors.As(err, &rl) && rl.Bucket == "account"
+			return errors.As(err, &rl) && rl.Bucket == "account" && rl.Remaining == 0 && rl.Limit == 1200 && rl.RetryAfter == 12*time.Second
 		}, true},
 		{"业务拒绝:nonce 已消耗", 422, "err422_margin.json", 42, false, nil, true},
 		{"nonce 之前的拒绝", 422, "err422_unknown_agent.json", 41, false, nil, true},
@@ -395,7 +516,7 @@ func TestBatchReceiptMustCoverEveryItem(t *testing.T) {
 	f, s, cat := newTestSession(t)
 	btc, _ := cat.Market("BTC-USD")
 	// 下两张单,回执只有一项:批次执行了,但另一张的结局说不清 → 锁定
-	f.answerRaw(t, "/v1/orders", 200, []byte(`{"status":"ok","items":[{"index":0,"kind":"place","status":"accepted","symbol":"BTC-USD","orderId":"1","filled":"0","resting":true}],"seq":9,"sub":0}`))
+	f.answerRaw(t, "/v1/orders", 200, []byte(`{"status":"ok","items":[{"index":0,"kind":"place","status":"accepted","symbol":"BTC-USD","orderId":"1","filled":"0","resting":true}],"seq":9,"sub":0,"requestId":"`+testReqID+`"}`))
 	o := OrderRequest{Market: btc, Side: dexos.Buy, Price: 1, Lots: 1}
 	_, err := s.Place(context.Background(), o, o)
 	if !errors.Is(err, ErrIncompleteBatch) || !errors.Is(err, ErrSessionBlocked) {
@@ -403,11 +524,41 @@ func TestBatchReceiptMustCoverEveryItem(t *testing.T) {
 	}
 }
 
+// 回执的 requestId 必须在、且与本地按签名算出的相同;对不上说明两边签的不是同一个请求,结论不可信 → 锁定。
 func TestServerRequestIDMustMatchLocal(t *testing.T) {
+	other := "0x" + strings.Repeat("cd", 32)
+	for name, body := range map[string]string{
+		"不同": `{"status":"ok","seq":9,"sub":0,"requestId":"` + other + `"}`,
+		"缺失": `{"status":"ok","seq":9,"sub":0}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			f, s, _ := newTestSession(t)
+			f.answerRaw(t, "/v1/orders/cancel-all", 200, []byte(body))
+			if _, err := s.CancelAll(context.Background()); err == nil || !strings.Contains(err.Error(), "requestId") || !errors.Is(err, ErrSessionBlocked) {
+				t.Fatalf("requestId %s 应报错并锁定: %v", name, err)
+			}
+		})
+	}
+}
+
+// AckWait 换成 `waitMs`;超过 5s 本地就报错,不发请求。
+func TestAckWaitParam(t *testing.T) {
 	f, s, _ := newTestSession(t)
-	f.answerRaw(t, "/v1/orders/cancel-all", 200, []byte(`{"status":"ok","seq":9,"sub":0,"requestId":"`+testReqID+`"}`))
-	if _, err := s.CancelAll(context.Background()); err == nil || !strings.Contains(err.Error(), "requestId") {
-		t.Fatalf("服务端 requestId 与本地不同时应报错: %v", err)
+	var got string
+	f.answer(t, "/v1/orders/cancel-all", 200, "w_cancel_all.json")
+	h := f.routes["/v1/orders/cancel-all"]
+	f.routes["/v1/orders/cancel-all"] = func(w http.ResponseWriter, r *http.Request) {
+		got = r.URL.Query().Get("waitMs")
+		h(w, r)
+	}
+	s.Client.AckWait = 2500 * time.Millisecond
+	if _, err := s.CancelAll(context.Background()); err != nil || got != "2500" {
+		t.Fatalf("waitMs 应为 2500,得到 %q: %v", got, err)
+	}
+	s.Client.AckWait = 6 * time.Second
+	before := f.count()
+	if _, err := s.CancelAll(context.Background()); err == nil || f.count() != before || s.Nonce() != 42 {
+		t.Fatalf("AckWait 超上限应本地报错、不发请求、不动 nonce: %v", err)
 	}
 }
 
@@ -481,6 +632,9 @@ func TestWalletWrites(t *testing.T) {
 	if o.OrderID != 202 || o.Status != "partiallyFilled" || o.FilledLots != 5 || *o.AvgPrice != 64990 || *o.ClientOrderID != "c-1" || o.Request.Scope != "account:7" {
 		t.Fatalf("下单结论: %+v", o)
 	}
+	if len(o.Fills) != 1 || o.Fills[0] != (ReceiptFill{FillID: "503-0-0", Price: 64990, Lots: 5, Fee: "0.16", FeeToken: "USDC"}) {
+		t.Fatalf("下单回执的成交: %+v", o.Fills)
+	}
 
 	f.answer(t, "/v1/orders/cancel", 200, "w_cancel_one.json")
 	cr, err := w.Cancel(context.Background(), btc, 202)
@@ -518,17 +672,9 @@ func TestWalletWrites(t *testing.T) {
 	}
 }
 
-// specDeviations 本包按原生实现(v1_write.rs)读、而钉住的规格里没有的字段。两类:
-//   - 规格落后于实现:批量回执逐项的形状、`duplicate`;
-//   - v1.1 规格(dex-os docs/specs/public-api-v1-1.md §4.2)新加、规格副本还没有的回执字段。
-//
-// 都已报给 dex-os(v1.1 §4.7「三方一致」)。规格改好、同步副本后删掉对应条目 —— 条目多余时测试会红。
-var specDeviations = map[string][]string{
-	"BatchResult.items[]": {"avgPrice", "canceled", "clientOrderId", "filled", "fills", "kind", "orderId", "resting", "symbol"},
-	"OrderResult":         {"fills"},
-	"OrderResult(ack)":    {"duplicate"},
-	"ReceiptFill":         {"feeToken", "fee", "fillId", "price", "size"},
-}
+// specDeviations 本包按实现读、而钉住的规格里没有的字段:发现了就报给 dex-os,规格改好、同步副本后
+// 删掉对应条目 —— 条目多余时测试会红。dex-os 724acfc(v1.1 #72 / #75)之后没有已知偏差。
+var specDeviations = map[string][]string{}
 
 // 本包解码 / 发送用到的每个字段都必须在规格里,specDeviations 除外。
 func TestWriteFieldsExistInPinnedSpec(t *testing.T) {
@@ -555,7 +701,7 @@ func TestWriteFieldsExistInPinnedSpec(t *testing.T) {
 		{"OrderResult", reflect.TypeFor[wireOrderResult](), props(componentSchema(t, spec, "OrderResult"))},
 		{"OrderResult(ack)", reflect.TypeFor[wireAck](), props(componentSchema(t, spec, "OrderResult"))},
 		{"BatchResult.items[]", reflect.TypeFor[wireBatchItem](), batchItems},
-		{"ReceiptFill", reflect.TypeFor[wireReceiptFill](), map[string]any{}},
+		{"ReceiptFill", reflect.TypeFor[wireReceiptFill](), props(componentSchema(t, spec, "ReceiptFill"))},
 		{"envelope", reflect.TypeFor[envelope](), props(componentSchema(t, spec, "SignedEnvelope"))},
 		{"PlaceOrder", reflect.TypeFor[wireOrderReq](), props(componentSchema(t, spec, "PlaceOrder"))},
 		{"cancel", reflect.TypeFor[wireCancelReq](), props(obj(asSlice(requestSchema(t, spec, "/v1/orders/cancel")["oneOf"])[0]))},

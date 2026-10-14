@@ -1,1 +1,1 @@
-{"error":{"code":"GatewayRateLimited","num":10429,"message":"rate limit exceeded","details":{"bucket":"account"}}}
+{"error":{"code":"GatewayRateLimited","num":10429,"message":"rate limit exceeded: 1200 weight per 60 s per account","details":{"bucket":"account","weight":1,"retryAfterS":12}}}

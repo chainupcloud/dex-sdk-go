@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/chainupcloud/dex-sdk-go/dexos"
 )
@@ -78,7 +79,7 @@ type Receipt struct {
 	Sub uint16
 	// Duplicate 同一请求早已执行过:这次没有再提交,位号与结局都是原来那一次的。
 	Duplicate bool
-	// Request 本地算出的请求身份。服务端回了 `requestId`(v1.1)时必须与它相同,否则报错。
+	// Request 本地算出的请求身份;已与回执里的 `requestId` 核对过。
 	Request *RequestIdentity
 }
 
@@ -174,13 +175,20 @@ func validCID(s string) bool {
 // post 发一次写请求(恒 `ack=result`:会话要靠结论决定 nonce 前进与否)。
 // 2xx 返回原始响应;非 2xx 解析成类型化错误。
 func (c *Client) post(ctx context.Context, path string, body any) (int, []byte, error) {
+	if c.AckWait < 0 || c.AckWait > maxAckWait {
+		return 0, nil, fmt.Errorf("%w: AckWait %s 超出 0..%s", errNotSent, c.AckWait, maxAckWait)
+	}
 	raw, err := json.Marshal(body)
 	if err != nil {
-		return 0, nil, err
+		return 0, nil, fmt.Errorf("%w: %w", errNotSent, err)
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.BaseURL+path+"?ack=result", bytes.NewReader(raw))
+	u := c.BaseURL + path + "?ack=result"
+	if c.AckWait > 0 {
+		u += "&waitMs=" + strconv.FormatInt(c.AckWait.Milliseconds(), 10)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, bytes.NewReader(raw))
 	if err != nil {
-		return 0, nil, err
+		return 0, nil, fmt.Errorf("%w: %w", errNotSent, err)
 	}
 	req.Header.Set("content-type", "application/json")
 	// 带上见过的最大位号:刚授权就写时,网关的预检在这个位号之后的视图上查(v1.1 §4.1)。
@@ -207,6 +215,12 @@ func (c *Client) post(ctx context.Context, path string, body any) (int, []byte, 
 	return resp.StatusCode, out.Bytes(), nil
 }
 
+// errNotSent 请求在发出之前就失败了(配置错误、编码失败):服务端什么都没收到,nonce 没动,结论是确定的。
+var errNotSent = errors.New("dexosv1: 请求没有发出")
+
+// maxAckWait 服务端 `waitMs` 的上限。
+const maxAckWait = 5 * time.Second
+
 func decodeInto(raw []byte, out any, what string) error {
 	if err := json.Unmarshal(raw, out); err != nil {
 		return fmt.Errorf("dexosv1: %s解析失败: %w", what, err)
@@ -224,6 +238,7 @@ type wireAck struct {
 }
 
 // receipt 解析公共部分;已定序但没有结论(202 / status=sequenced)返回 ErrPending。
+// 回执必须带 requestId 且与本地按签名算出的相同(v1.1 §4.2;只有 builder 转发的单没有,本包不发那种单)。
 func receipt(status int, raw []byte, id *RequestIdentity) (Receipt, error) {
 	var a wireAck
 	if err := json.Unmarshal(raw, &a); err != nil {
@@ -232,7 +247,10 @@ func receipt(status int, raw []byte, id *RequestIdentity) (Receipt, error) {
 	if a.Seq == nil || a.Sub == nil {
 		return Receipt{}, fmt.Errorf("dexosv1: 写回执缺 seq/sub: %s", raw)
 	}
-	if a.RequestID != "" && !strings.EqualFold(a.RequestID, id.RequestID) {
+	if a.RequestID == "" {
+		return Receipt{}, fmt.Errorf("dexosv1: 写回执缺 requestId(本地是 %s): %s", id.RequestID, raw)
+	}
+	if !strings.EqualFold(a.RequestID, id.RequestID) {
 		return Receipt{}, fmt.Errorf("dexosv1: 服务端的 requestId %s 与本地按签名算出的 %s 不同", a.RequestID, id.RequestID)
 	}
 	r := Receipt{Seq: *a.Seq, Sub: *a.Sub, Duplicate: a.Duplicate, Request: id}
@@ -242,7 +260,8 @@ func receipt(status int, raw []byte, id *RequestIdentity) (Receipt, error) {
 	return r, nil
 }
 
-// ReceiptFill 回执里本命令作为吃单方产生的一笔成交(v1.1 §4.2;服务端还没给时为空)。
+// ReceiptFill 回执里本命令作为吃单方产生的一笔成交(v1.1 §4.2)。被动成交(别人吃到本账户的挂单)
+// 不在回执里,走 fills / WS。FillID 与 `/v1/account/fills` 里同一笔的 id 相同。
 type ReceiptFill struct {
 	FillID   string
 	Price    uint32
@@ -265,6 +284,9 @@ func receiptFills(m *Market, in []wireReceiptFill) ([]ReceiptFill, error) {
 	}
 	out := make([]ReceiptFill, 0, len(in))
 	for _, w := range in {
+		if w.FillID == "" || w.FeeToken == "" {
+			return nil, fmt.Errorf("dexosv1: 回执成交缺 fillId / feeToken: %+v", w)
+		}
 		f := ReceiptFill{FillID: w.FillID, Fee: w.Fee, FeeToken: w.FeeToken}
 		var err error
 		if f.Price, err = m.Scale.Ticks(w.Price); err != nil {
@@ -358,10 +380,11 @@ type BatchItem struct {
 	Resting    *bool
 	// CanceledLots 撤单项成功时有:撤掉的剩余量。
 	CanceledLots *uint64
-	// 以下是 v1.1 §4.2 的回执字段,服务端还没给时为空。
+	// ClientOrderID 下单项带了 clientOrderId 时回显。
 	ClientOrderID *string
-	AvgPrice      *uint32
-	Fills         []ReceiptFill
+	// AvgPrice / Fills 下单项本命令里作为吃单方的成交;没有即时成交时为空。
+	AvgPrice *uint32
+	Fills    []ReceiptFill
 }
 
 // BatchResult 批量写的结论。Items 与请求逐项对齐(本包已核对过每一项都在)。

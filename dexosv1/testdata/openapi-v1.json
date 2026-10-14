@@ -4,7 +4,7 @@
     "title": "DEXOS Open API v1",
     "version": "0.1.0",
     "summary": "The standard public interface (REST + WebSocket) for builders, developers and liquidity providers",
-    "description": "The DEXOS public API for third-party developers, builders and liquidity providers. The specification\nlives in `docs/specs/public-api-v1.md`; `docs/research/api-landscape-2026-09.md` compares it with\nHyperliquid, Lighter, Aster and Pacifica. **This document mirrors the gateway's v1 route table**\n(`crates/gateway/src/api/v1.rs`, pinned by `scripts/check-openapi.mjs`, INV-API-V1-SPEC-MIRROR).\n**Every read endpoint, write endpoint, vault endpoint and WebSocket channel listed here is implemented.**\nThe only planned items are the timestamp-window nonce (v1.1, an execution-layer change) and the\nbuilder volume projection (§6 of the specification).\nThe legacy endpoints (`/order`, `/markets`, `/ws`, …, documented at `/docs`) remain available; v1 is a\ntranslation layer on top of them and returns bit-identical data.\n\n## Quick start\n\n1. `GET /v1/exchange` → the EIP-712 domain (`domain` / `chainId`) and the token table (with the numeric\n   `token` ids the `Withdrawal` / `Transfer` structs carry); `GET /v1/markets/BTC-USD` → `priceDecimals` /\n   `sizeDecimals` and `signingMarketId` (the `market` field of the signed structs).\n2. `GET /v1/account/nonce?address=<your address>` → the next `nonce` and `signingAccountId` (the value for the\n   `accountId` field of the signed struct; signing is the only thing it is for).\n3. Scale `price` and `size` to integers locally (`ticks = price × 10^priceDecimals`,\n   `lots = size × 10^sizeDecimals`), sign the `Order(...)` struct (each write endpoint states its\n   `x-eip712.typeString`) and `POST /v1/orders`\n   `{account, nonce, signature, symbol, side, type: \"limit\", price, size, clientOrderId?}` →\n   `200 {orderId, status: resting|filled|…}` or `422 {error}`.\n4. Programmatic trading: approve an API wallet once from the main wallet with\n   `POST /v1/account/agents/approve`, then sign with it and pass its address as `signer`\n   (the `AgentExec` signature covers the canonical-bytes hash of the inner command). Batch orders,\n   cancels, replaces and the dead man's switch all go through the API wallet; **an API wallet cannot\n   move funds**.\n5. Subscriptions: `GET /v1/ws` → `{\"method\":\"subscribe\",\"params\":{\"channel\":\"book\",\"symbol\":\"BTC-USD\"}}`.\n   After a disconnect, resume from the last `id` you saw with `/v1/account/fills?after=` or\n   `/v1/events?after=`.\n\n## Conventions\n\n- Path prefix `/v1`; JSON; camelCase field names; timestamps in Unix milliseconds; lower-case enums.\n- **Prices, sizes and amounts are decimal strings**: `ticks = price × 10^priceDecimals`,\n  `lots = size × 10^sizeDecimals` (both must divide exactly); USDC amounts are scaled by `10^6`.\n  `priceDecimals` / `sizeDecimals` come from `GET /v1/markets`.\n- Markets are addressed by **`symbol`** (`BTC-USD` / `BTC-USDC`), accounts by **`address`**\n  (+ `subaccount`, 0 = main account). **No v1 response addresses anything by a numeric id.** The numeric ids v1\n  does return (`signingAccountId` on `/v1/account/nonce` and `/v1/account/subaccounts`, `signingMarketId` on\n  `/v1/markets`, `token` on `/v1/exchange`) exist only because the EIP-712 structs carry them; they are inputs to\n  signing, never addresses.\n- Every error has the shape `{error:{code, num, message, details?}}`: `code` is a stable string\n  (`Gateway*` for the gateway, the `CoreError` variant name for the execution layer), `num` a stable\n  number (1xxxx gateway / 2xxxx execution layer). HTTP status: 400 malformed request · 401 bad\n  signature · 403 ownership / scope · 404 · 409 · 412 replica behind · 421 wrong node · 422 business\n  rejection · 429 rate limited · 5xx.\n- Pagination: `?limit=&after=<cursor>` → `{…, next, hasMore}`; execution-history endpoints also\n  return a fixed upper bound `upper`, which you pass back unchanged on the following pages.\n- Read consistency: write receipts carry `x-dexos-seq`; a **read after a write** sends\n  `x-dexos-min-seq` and gets 412 when the replica is behind (same semantics as the legacy API).\n\n## Signing (write endpoints)\n\nAll write endpoints share one envelope: `{account, subaccount?, signer?, nonce, expiresAt?, signature,\n…business fields}`. The signature is over the existing EIP-712 typed structs (each endpoint states its\n`x-eip712.typeString`), with the domain from `GET /v1/exchange`. Prices and sizes inside the struct are\nthe **scaled integers**: the SDK scales locally and signs, the gateway performs the same scaling for its\npre-check, and the execution layer verifies the signature authoritatively. When `signer` is present the\nrequest is signed by an API wallet (its nonce lives in the agent scope:\n`GET /v1/account/nonce?address=&signer=`). API wallets can only trade; every fund-moving endpoint\nanswers `403 AgentScopeViolation`.\n\n## Write receipts\n\nBy default (`ack=result`) the request waits for the fold (at most one epoch) and returns the business\noutcome: a single order gets `200` with the order object or `422` with the rejection reason; a batch\nalways gets `200` with per-item `items[]`. `ack=sequenced` returns only `{seq, sub}` (for\nhigh-frequency clients). If the outcome does not arrive within the budget the response is `202`:\n**do not resend**; look it up with `GET /v1/requests/{requestId}`.\n\n## Rate limiting\n\nA fixed 60-second window per IP with request weights: reads 1, order book and prices 2, history\nendpoints 5, writes 10; default 1200 per minute (`V1_RATE_LIMIT_PER_MIN`). Every `/v1/*` response\ncarries `ratelimit: limit=…, remaining=…, reset=…` and `ratelimit-policy: 1200;w=60`; exceeding the\nlimit returns `429 GatewayRateLimited` with `retry-after`. The legacy endpoints are not rate limited.\n"
+    "description": "The DEXOS public API for third-party developers, builders and liquidity providers. The specification\nlives in `docs/specs/public-api-v1.md`; `docs/research/api-landscape-2026-09.md` compares it with\nHyperliquid, Lighter, Aster and Pacifica. **This document mirrors the gateway's v1 route table**\n(`crates/gateway/src/api/v1.rs`, pinned by `scripts/check-openapi.mjs`, INV-API-V1-SPEC-MIRROR).\n**Every read endpoint, write endpoint, vault endpoint and WebSocket channel listed here is implemented.**\nThe only planned items are the timestamp-window nonce (v1.1, an execution-layer change) and the\nbuilder volume projection (§6 of the specification).\nThe legacy endpoints (`/order`, `/markets`, `/ws`, …, documented at `/docs`) remain available; v1 is a\ntranslation layer on top of them and returns bit-identical data.\n\n## Quick start\n\n1. `GET /v1/exchange` → the EIP-712 domain (`domain` / `chainId`) and the token table (with the numeric\n   `token` ids the `Withdrawal` / `Transfer` structs carry); `GET /v1/markets/BTC-USD` → `priceDecimals` /\n   `sizeDecimals` and `signingMarketId` (the `market` field of the signed structs).\n2. `GET /v1/account/nonce?address=<your address>` → the next `nonce` and `signingAccountId` (the value for the\n   `accountId` field of the signed struct; signing is the only thing it is for).\n3. Scale `price` and `size` to integers locally (`ticks = price × 10^priceDecimals`,\n   `lots = size × 10^sizeDecimals`), sign the `Order(...)` struct (each write endpoint states its\n   `x-eip712.typeString`) and `POST /v1/orders`\n   `{account, nonce, signature, symbol, side, type: \"limit\", price, size, clientOrderId?}` →\n   `200 {orderId, status: resting|filled|…}` or `422 {error}`.\n4. Programmatic trading: approve an API wallet once from the main wallet with\n   `POST /v1/account/agents/approve`, then sign with it and pass its address as `signer`\n   (the `AgentExec` signature covers the canonical-bytes hash of the inner command). Batch orders,\n   cancels, replaces and the dead man's switch all go through the API wallet; **an API wallet cannot\n   move funds**.\n5. Subscriptions: `GET /v1/ws` → `{\"method\":\"subscribe\",\"params\":{\"channel\":\"book\",\"symbol\":\"BTC-USD\"}}`.\n   After a disconnect, resume from the last `id` you saw with `/v1/account/fills?after=` or\n   `/v1/events?after=`.\n\n## Conventions\n\n- Path prefix `/v1`; JSON; camelCase field names; timestamps in Unix milliseconds; lower-case enums.\n- **Prices, sizes and amounts are decimal strings**: `ticks = price × 10^priceDecimals`,\n  `lots = size × 10^sizeDecimals` (both must divide exactly); USDC amounts are scaled by `10^6`.\n  `priceDecimals` / `sizeDecimals` come from `GET /v1/markets`.\n- Markets are addressed by **`symbol`** (`BTC-USD` / `BTC-USDC`), accounts by **`address`**\n  (+ `subaccount`, 0 = main account). **No v1 response addresses anything by a numeric id.** The numeric ids v1\n  does return (`signingAccountId` on `/v1/account/nonce` and `/v1/account/subaccounts`, `signingMarketId` on\n  `/v1/markets`, `token` on `/v1/exchange`) exist only because the EIP-712 structs carry them; they are inputs to\n  signing, never addresses.\n- Every error has the shape `{error:{code, num, message, details?}}`: `code` is a stable string\n  (`Gateway*` for the gateway, the `CoreError` variant name for the execution layer), `num` a stable\n  number (1xxxx gateway / 2xxxx execution layer). HTTP status: 400 malformed request · 401 bad\n  signature · 403 ownership / scope · 404 · 409 · 412 replica behind · 421 wrong node · 422 business\n  rejection · 429 rate limited · 5xx.\n- Pagination: `?limit=&after=<cursor>` → `{…, next, hasMore}`; execution-history endpoints also\n  return a fixed upper bound `upper`, which you pass back unchanged on the following pages.\n- Read consistency: write receipts carry `x-dexos-seq`; a **read after a write** sends\n  `x-dexos-min-seq` and gets 412 when the replica is behind (same semantics as the legacy API).\n\n## Signing (write endpoints)\n\nAll write endpoints share one envelope: `{account, subaccount?, signer?, nonce, expiresAt?, signature,\n…business fields}`. The signature is over the existing EIP-712 typed structs (each endpoint states its\n`x-eip712.typeString`), with the domain from `GET /v1/exchange`. Prices and sizes inside the struct are\nthe **scaled integers**: the SDK scales locally and signs, the gateway performs the same scaling for its\npre-check, and the execution layer verifies the signature authoritatively. When `signer` is present the\nrequest is signed by an API wallet (its nonce lives in the agent scope:\n`GET /v1/account/nonce?address=&signer=`). API wallets can only trade; every fund-moving endpoint\nanswers `403 AgentScopeViolation`.\n\n## Write receipts\n\nBy default (`ack=result`) the request waits for the fold (at most one epoch) and returns the business\noutcome: a single order gets `200` with the order object or `422` with the rejection reason; a batch\nalways gets `200` with per-item `items[]`. `ack=sequenced` returns only `{seq, sub}` (for\nhigh-frequency clients). If the outcome does not arrive within the budget the response is `202`:\n**do not resend**; look it up with `GET /v1/requests/{requestId}`.\n\n## Rate limiting\n\nTwo budgets, each a fixed 60-second window counted in request weights:\n\n- **Per IP** — every `/v1/*` request. The IP is the TCP peer of the gateway; behind the deployment's own\n  reverse proxy it is the `x-real-ip` that proxy writes. `x-forwarded-for`, and an `x-real-ip` sent by\n  anyone other than a trusted proxy, are ignored.\n- **Per account** — writes only, charged **after** the signature pre-check passes, keyed by the main wallet\n  of the account being acted on (subaccounts share their main wallet's budget). A request that names\n  someone else's address cannot pass the pre-check, so it never touches that account's budget.\n\nWeights: reads 1, order book and prices 2, history endpoints 5, writes `1 + floor(n / 40)` where `n` is\nthe number of orders plus cancels in the request (a replace counts both). Both budgets default to 1200\nper minute; the operator can raise either for a given IP or main wallet (market-maker tiers). Every\n`/v1/*` response carries `ratelimit: limit=…, remaining=…, reset=…` and `ratelimit-policy: <limit>;w=60`\nfor the IP budget; a write that reached the account budget also carries\n`x-ratelimit-account: limit=…, remaining=…, reset=…`. Exceeding either budget returns\n`429 GatewayRateLimited` with `retry-after` and `details.bucket` = `ip` | `account`. API-wallet writes are\npre-checked at the gateway too: a signature that does not recover to `signer` is `401\nGatewayBadSignature`; a `signer` with no grant on the account is `403 UnknownAgent`, an expired one\n`403 AgentExpired` — none of them is sequenced. Right after approving an API wallet, send\n`x-dexos-min-seq` = the approval receipt's `seq` with the first write. The legacy endpoints are not rate\nlimited (except `POST /subaccount`, which shares the IP budget).\n"
   },
   "servers": [
     {
@@ -180,7 +180,7 @@
           "Market data"
         ],
         "summary": "Price snapshot for all markets",
-        "description": "last / mark / oracle / best bid and ask / funding rate / open interest.",
+        "description": "last / mark / oracle / best bid and ask / funding rate / open interest, plus rolling 24h statistics (`prevDayPrice`, `change24h`, `high24h`, `low24h`, `volume24h`, `quoteVolume24h`).\n\nThe 24h window is anchored at the latest block the analytics projection has seen (`BlockBegun{now_ms}`, the same clock as the candles), not the host wall clock: it is the 1440 one-minute buckets ending with the anchor's bucket, so every 24h field equals a hand calculation over the same window of 1-minute candles. Statistics are cached for at most 5 s. When they are unavailable (analytics store unreachable, or no block projected yet) `window24h` is null and all six 24h fields are null; the live price fields are unaffected.",
         "operationId": "v1_prices",
         "parameters": [
           {
@@ -205,6 +205,25 @@
                       "type": "integer",
                       "format": "int64",
                       "description": "Unix time in milliseconds"
+                    },
+                    "window24h": {
+                      "type": [
+                        "object",
+                        "null"
+                      ],
+                      "description": "The rolling 24h window the statistics cover; null when 24h statistics are unavailable",
+                      "properties": {
+                        "from": {
+                          "type": "integer",
+                          "format": "int64",
+                          "description": "Window start (inclusive, aligned to the minute), Unix ms"
+                        },
+                        "to": {
+                          "type": "integer",
+                          "format": "int64",
+                          "description": "Anchor: the latest projected block time, Unix ms"
+                        }
+                      }
                     }
                   }
                 }
@@ -357,7 +376,7 @@
           "Market data"
         ],
         "summary": "Candles",
-        "description": "`interval` ∈ 1m 5m 15m 30m 1h 4h 1d 1w, aggregated from the 1-minute base. Timestamps come from `BlockBegun{now_ms}`.",
+        "description": "`interval` ∈ 1m 5m 15m 30m 1h 4h 1d 1w 1M 1Y, aggregated from the 1-minute base; any other value is 400 (it never falls back to 1m). Fixed intervals align by exact division in UTC (4h starts at 00/04/08/… UTC, 1d at midnight); 1w starts on Monday; 1M and 1Y are the UTC calendar month and year, so `T − t` is that month's or year's length. Timestamps come from `BlockBegun{now_ms}`.",
         "operationId": "v1_candles",
         "parameters": [
           {
@@ -387,7 +406,9 @@
                 "1h",
                 "4h",
                 "1d",
-                "1w"
+                "1w",
+                "1M",
+                "1Y"
               ],
               "default": "1m"
             },
@@ -659,7 +680,7 @@
           "Account"
         ],
         "summary": "Account summary",
-        "description": "Addressed by wallet (`?address=&subaccount=`). Equity / margin / available / balances / fee rates / counts, all as decimal strings; **no account id** (INV-API-V1-NO-ACCOUNT-ID). An address that has never deposited is 404.",
+        "description": "Addressed by wallet (`?address=&subaccount=`). Equity / margin / available / balances / per-group risk / fee rates / counts, all as decimal strings; the risk fields come from one view at `asOfSeq` (in `epoch`); **no account id** (INV-API-V1-NO-ACCOUNT-ID). An address that has never deposited is 404.",
         "operationId": "v1_account",
         "parameters": [
           {
@@ -791,7 +812,7 @@
           "Account"
         ],
         "summary": "Open orders",
-        "description": "All markets; `symbol` filters. The read model is indexed by (account, market).",
+        "description": "All markets; `symbol` filters. The read model is indexed by (account, market). `clientOrderId` is resolved from the execution history when only the sequence position was recorded (`ack=sequenced`); if that history is missing the whole request answers 503 instead of silently dropping the id.",
         "operationId": "v1_open_orders",
         "parameters": [
           {
@@ -868,6 +889,9 @@
           },
           "412": {
             "$ref": "#/components/responses/ReplicaBehind"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
           }
         }
       }
@@ -926,6 +950,25 @@
               "description": "Execution-layer event identity `<seq>-<sub>-<idx>`; the backfill cursor and the `id` in WebSocket frames are character-for-character the same"
             },
             "description": "Cursor: the `next` value of the previous page"
+          },
+          {
+            "name": "epoch",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Ledger epoch from the first page; **required together with `upper` when `after` is given** (409 `history_epoch_mismatch` if the ledger was reset)"
+          },
+          {
+            "name": "upper",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9]+-[0-9]+-[0-9]+$"
+            },
+            "description": "Fixed upper bound from the first page; **required together with `epoch` when `after` is given**, otherwise 400"
           },
           {
             "name": "limit",
@@ -1003,7 +1046,7 @@
           "Account"
         ],
         "summary": "Order by client order id",
-        "description": "The mapping lives in the gateway (only orders placed with `ack=result` are recorded). A resting order returns the `Order`; a filled or canceled one returns `status: closed` and points to the order history.",
+        "description": "The mapping lives in the gateway (`clientOrderId` from any placement path; orders sequenced with `ack=sequenced` / 202 are resolved from the execution history). A resting order returns the `Order`; a filled or canceled one returns `status: closed` and points to the order history. An order the execution layer rejected is 404 with `details.status = rejected` and `details.code`; one that is sequenced but not yet folded is 503 with `details.status = pending`.",
         "operationId": "v1_order_by_client_id",
         "parameters": [
           {
@@ -1058,6 +1101,9 @@
           },
           "404": {
             "$ref": "#/components/responses/NotFound"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
           }
         }
       }
@@ -1183,6 +1229,25 @@
             "description": "Cursor: the `next` value of the previous page"
           },
           {
+            "name": "epoch",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Ledger epoch from the first page; **required together with `upper` when `after` is given** (409 `history_epoch_mismatch` if the ledger was reset)"
+          },
+          {
+            "name": "upper",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9]+-[0-9]+-[0-9]+$"
+            },
+            "description": "Fixed upper bound from the first page; **required together with `epoch` when `after` is given**, otherwise 400"
+          },
+          {
             "name": "limit",
             "in": "query",
             "required": false,
@@ -1190,7 +1255,7 @@
               "type": "integer",
               "minimum": 1,
               "maximum": 1000,
-              "default": 100
+              "default": 200
             },
             "description": "Page size"
           },
@@ -1259,7 +1324,7 @@
             "schema": {
               "type": "string"
             },
-            "description": "Only this kind"
+            "description": "Only this kind (cannot be combined with `external=true`)"
           },
           {
             "name": "token",
@@ -1268,7 +1333,17 @@
             "schema": {
               "type": "string"
             },
-            "description": "Only this token"
+            "description": "Only this token: a symbol (`USDC`) or the numeric token id"
+          },
+          {
+            "name": "external",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false
+            },
+            "description": "`true` = only entries that cross the account boundary (deposits, withdrawals, transfers, vault deposits / redemptions; same semantics as INV-API-LEDGER-EXTERNAL); `false` = all. Combined with `kind` → 400"
           },
           {
             "name": "after",
@@ -1282,6 +1357,25 @@
             "description": "Cursor: the `next` value of the previous page"
           },
           {
+            "name": "epoch",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Ledger epoch from the first page; **required together with `upper` when `after` is given** (409 `history_epoch_mismatch` if the ledger was reset)"
+          },
+          {
+            "name": "upper",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9]+-[0-9]+-[0-9]+$"
+            },
+            "description": "Fixed upper bound from the first page; **required together with `epoch` when `after` is given**, otherwise 400"
+          },
+          {
             "name": "limit",
             "in": "query",
             "required": false,
@@ -1289,7 +1383,7 @@
               "type": "integer",
               "minimum": 1,
               "maximum": 1000,
-              "default": 100
+              "default": 200
             },
             "description": "Page size"
           },
@@ -1363,6 +1457,25 @@
             "description": "Cursor: the `next` value of the previous page"
           },
           {
+            "name": "epoch",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Ledger epoch from the first page; **required together with `upper` when `after` is given** (409 `history_epoch_mismatch` if the ledger was reset)"
+          },
+          {
+            "name": "upper",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9]+-[0-9]+-[0-9]+$"
+            },
+            "description": "Fixed upper bound from the first page; **required together with `epoch` when `after` is given**, otherwise 400"
+          },
+          {
             "name": "limit",
             "in": "query",
             "required": false,
@@ -1370,7 +1483,7 @@
               "type": "integer",
               "minimum": 1,
               "maximum": 1000,
-              "default": 100
+              "default": 200
             },
             "description": "Page size"
           },
@@ -1539,7 +1652,10 @@
               ],
               "default": "result"
             },
-            "description": "Default: wait for the fold and return the business outcome; high-frequency clients use `sequenced` to get only `(seq, sub)`"
+            "description": "Default: wait for the fold and return the business outcome; high-frequency clients use `sequenced` to get only `{status, seq, sub, requestId}`"
+          },
+          {
+            "$ref": "#/components/parameters/WaitMs"
           }
         ],
         "responses": {
@@ -1562,7 +1678,7 @@
             }
           },
           "202": {
-            "description": "Sequenced, but the outcome did not arrive within the budget (do not resend; look it up with `/v1/requests/{requestId}`)"
+            "$ref": "#/components/responses/Sequenced"
           },
           "400": {
             "$ref": "#/components/responses/BadRequest"
@@ -1690,6 +1806,61 @@
         }
       }
     },
+    "/v1/agents/{address}": {
+      "get": {
+        "tags": [
+          "Account"
+        ],
+        "summary": "Accounts an API wallet acts for",
+        "description": "Reverse lookup by API wallet address: every account that authorized it, as main wallet address + subaccount index (or manager address + `vault`). Lets a client that only holds the API wallet key complete its identity. No authorization = empty list (not 404). Never contains numeric account ids.",
+        "operationId": "v1_agent_grants",
+        "parameters": [
+          {
+            "name": "address",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^0x[0-9a-f]{40}$",
+              "description": "EVM address (always lower-case in responses; case-insensitive in requests)"
+            },
+            "description": "API wallet address"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "agent",
+                    "grants"
+                  ],
+                  "properties": {
+                    "agent": {
+                      "type": "string",
+                      "pattern": "^0x[0-9a-f]{40}$",
+                      "description": "EVM address (always lower-case in responses; case-insensitive in requests)"
+                    },
+                    "grants": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/AgentGrant"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          }
+        }
+      }
+    },
     "/v1/account/nonce": {
       "get": {
         "tags": [
@@ -1759,7 +1930,7 @@
           "Vaults"
         ],
         "summary": "My vault positions",
-        "description": "",
+        "description": "Amounts are decimal USDC strings like every other v1 amount (until v1.1 they were integer USDC atoms); share counts stay integers.",
         "operationId": "v1_my_vaults",
         "parameters": [
           {
@@ -1780,7 +1951,20 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object"
+                  "type": "object",
+                  "properties": {
+                    "address": {
+                      "type": "string",
+                      "pattern": "^0x[0-9a-f]{40}$",
+                      "description": "EVM address (always lower-case in responses; case-insensitive in requests)"
+                    },
+                    "positions": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/MyVaultPosition"
+                      }
+                    }
+                  }
                 }
               }
             }
@@ -1791,22 +1975,51 @@
         }
       }
     },
-    "/v1/requests/{requestId}": {
+    "/v1/account/portfolio": {
       "get": {
         "tags": [
           "Account"
         ],
-        "summary": "Request receipt",
-        "description": "Look up the outcome of a request by its identity (`0x` + keccak(signer ‖ EIP-712 digest)): executed / rejected / pending / history_unavailable. Use it when `ack=result` returned 202.",
-        "operationId": "v1_request",
+        "summary": "Account value and PnL history",
+        "description": "Account value, PnL and net inflow over time, plus window statistics, for the performance card of a portfolio page (spec `public-api-v1-1.md` §4.8; compare Hyperliquid `info type=portfolio`, Lighter `/api/v1/pnl`, Aster's portfolio chart). Every point comes from a per-minute account value sample; the curve starts when sampling started for this account (no backfill), buckets without a sample produce no point, and nothing is interpolated.\n\nTwo scopes are returned side by side. `perp` = the USDC risk group's net collateral (the same number as `/v1/account` `equity`); USDC moved by spot trades counts as a transfer between perp and spot. `total` = all collateral groups, other token balances valued at the token's latest USDC spot trade price, and vault shares; vault deposits / redemptions are internal moves there. Tokens without a USDC price are excluded and listed in `unvaluedTokens`.\n\n`pnl = accountValue − cumulative net inflow`, so deposits, withdrawals and transfers never show up as PnL. `history[].pnl` and `history[].netInflow` are relative to the first point of the window. When two samples straddle missing execution history, that interval's PnL is not counted (its value change is carried by `netInflow`) and it is listed in `gaps`.",
+        "operationId": "v1_portfolio",
         "parameters": [
           {
-            "name": "requestId",
-            "in": "path",
+            "name": "address",
+            "in": "query",
             "required": true,
             "schema": {
-              "type": "string"
-            }
+              "type": "string",
+              "pattern": "^0x[0-9a-f]{40}$",
+              "description": "EVM address (always lower-case in responses; case-insensitive in requests)"
+            },
+            "description": "Main wallet address"
+          },
+          {
+            "name": "subaccount",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0
+            },
+            "description": "Subaccount index (0 = main account; in creation order)"
+          },
+          {
+            "name": "period",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "24h",
+                "7d",
+                "30d",
+                "all"
+              ]
+            },
+            "description": "Window. Bucket width: 24h → 5m, 7d → 1h, 30d → 4h, all → the finest of 5m / 1h / 4h / 1d with at most 500 points"
           }
         ],
         "responses": {
@@ -1815,7 +2028,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object"
+                  "$ref": "#/components/schemas/Portfolio"
                 }
               }
             }
@@ -1825,6 +2038,159 @@
           },
           "404": {
             "$ref": "#/components/responses/NotFound"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/v1/requests/{requestId}": {
+      "get": {
+        "tags": [
+          "Account"
+        ],
+        "summary": "Request receipt",
+        "description": "Look up the outcome of a request by its identity (`0x` + keccak(signer ‖ EIP-712 digest), the `requestId` of every write response). 200: `status` = `executed` / `rejected` (with `seq`, `sub`, `events`, `items`, `nonceConsumed`, `reason` when rejected) or `pending` (sequenced, not yet folded). Otherwise an error whose `details.status` is `not_found` (404: no execution with this id up to `details.asOfSeq`), `conflict` (409: the nonce in `scope`/`nonce` was consumed by a different request, `details.conflictingRequest`) or `history_unavailable` (503: the execution history has gaps, `details.gaps`). Pass `scope` + `nonce` to detect a conflicting nonce; for API-wallet requests add `commandHash` so that, when the history has gaps, the agent nonce can still prove the request did not execute (404 with `details.basis = agent_nonce`). Use it when `ack=result` returned 202.",
+        "operationId": "v1_request",
+        "parameters": [
+          {
+            "name": "requestId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "scope",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "pattern": "^(account:[0-9]+|agent:0x[0-9a-fA-F]{40}|owner:0x[0-9a-fA-F]{40})$"
+            },
+            "description": "Nonce scope the request was signed in: `agent:0x…` (API wallet), `owner:0x…` (main wallet's primary scope) or `account:<n>`; goes together with `nonce`"
+          },
+          {
+            "name": "nonce",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "description": "The request's nonce; goes together with `scope`"
+          },
+          {
+            "name": "commandHash",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "pattern": "^0x[0-9a-fA-F]{64}$"
+            },
+            "description": "API-wallet requests only (`scope=agent:0x…`): the `AgentExec.commandHash` that was signed; the gateway recomputes the request id from agent, nonce and commandHash (mismatch → 400)"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Executed, rejected or pending",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "executed",
+                        "rejected",
+                        "pending"
+                      ]
+                    },
+                    "epoch": {
+                      "type": "string"
+                    },
+                    "seq": {
+                      "type": "integer",
+                      "format": "uint64",
+                      "description": "Raft log sequence number (the same axis as the write receipt's `seq` and the `x-dexos-seq` header)"
+                    },
+                    "sub": {
+                      "type": "integer"
+                    },
+                    "requestId": {
+                      "type": "string"
+                    },
+                    "signer": {
+                      "type": "string"
+                    },
+                    "nonceScope": {
+                      "type": "string"
+                    },
+                    "nonce": {
+                      "type": "integer"
+                    },
+                    "nonceConsumed": {
+                      "type": "boolean"
+                    },
+                    "reason": {
+                      "type": "string",
+                      "description": "Rejected only: the CoreError"
+                    },
+                    "events": {
+                      "type": "array",
+                      "items": {
+                        "type": "object"
+                      }
+                    },
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "type": "object"
+                      }
+                    },
+                    "source": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "404": {
+            "description": "`details.status = not_found`: no execution with this id as of `details.asOfSeq` (history complete, or proven by the agent nonce: `details.basis = agent_nonce`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "`details.status = conflict`: the nonce given in `scope` / `nonce` was consumed by a different request (`details.conflictingRequest`, `seq`, `sub`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "`details.status = history_unavailable`: the execution history has gaps (`details.gaps`) and cannot prove whether this request executed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           }
         }
       }
@@ -1872,6 +2238,25 @@
               "description": "Execution-layer event identity `<seq>-<sub>-<idx>`; the backfill cursor and the `id` in WebSocket frames are character-for-character the same"
             },
             "description": "Cursor: the `next` value of the previous page"
+          },
+          {
+            "name": "epoch",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Ledger epoch from the first page; **required together with `upper` when `after` is given** (409 `history_epoch_mismatch` if the ledger was reset)"
+          },
+          {
+            "name": "upper",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9]+-[0-9]+-[0-9]+$"
+            },
+            "description": "Fixed upper bound from the first page; **required together with `epoch` when `after` is given**, otherwise 400"
           },
           {
             "name": "limit",
@@ -2025,7 +2410,10 @@
               ],
               "default": "result"
             },
-            "description": "Default: wait for the fold and return the business outcome; high-frequency clients use `sequenced` to get only `(seq, sub)`"
+            "description": "Default: wait for the fold and return the business outcome; high-frequency clients use `sequenced` to get only `{status, seq, sub, requestId}`"
+          },
+          {
+            "$ref": "#/components/parameters/WaitMs"
           }
         ],
         "responses": {
@@ -2059,7 +2447,7 @@
             }
           },
           "202": {
-            "description": "Sequenced, but the outcome did not arrive within the budget (do not resend; look it up with `/v1/requests/{requestId}`)"
+            "$ref": "#/components/responses/Sequenced"
           },
           "400": {
             "$ref": "#/components/responses/BadRequest"
@@ -2305,7 +2693,7 @@
           "Trading"
         ],
         "summary": "Place order (single or batch)",
-        "description": "Limit / market / conditional orders. The **main wallet** signs `Order` (for a market order `price` is the protective price `mark × (1 ± slippage)` rounded away from the taker, as an integer; conditional orders sign `Conditional`). An **API wallet** (`signer`) signs `AgentExec` over the canonical-bytes hash of the inner `BatchPlace{account, orders, nowMs}`, and the envelope carries `nowMs`. An array body is a batch; only API wallets can batch (per-item `items[]`, always 200). `clientOrderId` is not part of the signature: a duplicate within the account is 409, and after an `ack=result` success the gateway records the mapping so you can look up and cancel by it.",
+        "description": "Limit / market / conditional orders. The **main wallet** signs `Order` (for a market order `price` is the protective price `mark × (1 ± slippage)` rounded away from the taker, as an integer; conditional orders sign `Conditional`). An **API wallet** (`signer`) signs `AgentExec` over the canonical-bytes hash of the inner `BatchPlace{account, orders, nowMs}`, and the envelope carries `nowMs`. An array body is a batch; only API wallets can batch (per-item `items[]`, always 200). `clientOrderId` is not part of the signature; it is accepted on both paths, reserved atomically before sequencing (a duplicate within the account is 409) and consumed once sequenced; look up and cancel by it. Results carry this command's taker fills (`fills[]`, `avgPrice`).",
         "operationId": "v1_place_order",
         "parameters": [
           {
@@ -2320,7 +2708,10 @@
               ],
               "default": "result"
             },
-            "description": "Default: wait for the fold and return the business outcome; high-frequency clients use `sequenced` to get only `(seq, sub)`"
+            "description": "Default: wait for the fold and return the business outcome; high-frequency clients use `sequenced` to get only `{status, seq, sub, requestId}`"
+          },
+          {
+            "$ref": "#/components/parameters/WaitMs"
           }
         ],
         "responses": {
@@ -2342,7 +2733,7 @@
             }
           },
           "202": {
-            "description": "Sequenced, but the outcome did not arrive within the budget (do not resend; look it up with `/v1/requests/{requestId}`)"
+            "$ref": "#/components/responses/Sequenced"
           },
           "400": {
             "$ref": "#/components/responses/BadRequest"
@@ -2359,6 +2750,16 @@
           },
           "403": {
             "description": "Ownership / scope (an API wallet cannot move funds)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "`clientOrderId` already used by this account (`GatewayDuplicateClientOrderId`, num 10409; `details.clientOrderId`, and `details.orderId` when known)",
             "content": {
               "application/json": {
                 "schema": {
@@ -2424,7 +2825,10 @@
               ],
               "default": "result"
             },
-            "description": "Default: wait for the fold and return the business outcome; high-frequency clients use `sequenced` to get only `(seq, sub)`"
+            "description": "Default: wait for the fold and return the business outcome; high-frequency clients use `sequenced` to get only `{status, seq, sub, requestId}`"
+          },
+          {
+            "$ref": "#/components/parameters/WaitMs"
           }
         ],
         "responses": {
@@ -2470,7 +2874,7 @@
             }
           },
           "202": {
-            "description": "Sequenced, but the outcome did not arrive within the budget (do not resend; look it up with `/v1/requests/{requestId}`)"
+            "$ref": "#/components/responses/Sequenced"
           },
           "400": {
             "$ref": "#/components/responses/BadRequest"
@@ -2535,7 +2939,7 @@
                           },
                           "clientOrderId": {
                             "type": "string",
-                            "description": "Instead of `orderId` (only orders placed with `ack=result` are mapped); the signature still covers the real `orderSeq`"
+                            "description": "Instead of `orderId` (any order placed with a `clientOrderId`; orders sequenced with `ack=sequenced` / 202 are resolved from the execution history); the signature still covers the real `orderSeq`"
                           }
                         }
                       }
@@ -2566,7 +2970,7 @@
                             },
                             "clientOrderId": {
                               "type": "string",
-                              "description": "Instead of `orderId` (only orders placed with `ack=result` are mapped); the signature still covers the real `orderSeq`"
+                              "description": "Instead of `orderId` (any order placed with a `clientOrderId`; orders sequenced with `ack=sequenced` / 202 are resolved from the execution history); the signature still covers the real `orderSeq`"
                             }
                           }
                         }
@@ -2604,7 +3008,10 @@
               ],
               "default": "result"
             },
-            "description": "Default: wait for the fold and return the business outcome; high-frequency clients use `sequenced` to get only `(seq, sub)`"
+            "description": "Default: wait for the fold and return the business outcome; high-frequency clients use `sequenced` to get only `{status, seq, sub, requestId}`"
+          },
+          {
+            "$ref": "#/components/parameters/WaitMs"
           }
         ],
         "responses": {
@@ -2635,7 +3042,7 @@
             }
           },
           "202": {
-            "description": "Sequenced, but the outcome did not arrive within the budget (do not resend; look it up with `/v1/requests/{requestId}`)"
+            "$ref": "#/components/responses/Sequenced"
           },
           "400": {
             "$ref": "#/components/responses/BadRequest"
@@ -2724,7 +3131,10 @@
               ],
               "default": "result"
             },
-            "description": "Default: wait for the fold and return the business outcome; high-frequency clients use `sequenced` to get only `(seq, sub)`"
+            "description": "Default: wait for the fold and return the business outcome; high-frequency clients use `sequenced` to get only `{status, seq, sub, requestId}`"
+          },
+          {
+            "$ref": "#/components/parameters/WaitMs"
           }
         ],
         "responses": {
@@ -2739,7 +3149,7 @@
             }
           },
           "202": {
-            "description": "Sequenced, but the outcome did not arrive within the budget (do not resend; look it up with `/v1/requests/{requestId}`)"
+            "$ref": "#/components/responses/Sequenced"
           },
           "400": {
             "$ref": "#/components/responses/BadRequest"
@@ -2756,6 +3166,16 @@
           },
           "403": {
             "description": "Ownership / scope (an API wallet cannot move funds)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "`clientOrderId` already used by this account (`GatewayDuplicateClientOrderId`, num 10409; `details.clientOrderId`, and `details.orderId` when known)",
             "content": {
               "application/json": {
                 "schema": {
@@ -2809,7 +3229,7 @@
                       "orders": {
                         "type": "array",
                         "items": {
-                          "$ref": "#/components/schemas/PlaceOrder"
+                          "$ref": "#/components/schemas/OrderItem"
                         }
                       },
                       "nowMs": {
@@ -2850,7 +3270,10 @@
               ],
               "default": "result"
             },
-            "description": "Default: wait for the fold and return the business outcome; high-frequency clients use `sequenced` to get only `(seq, sub)`"
+            "description": "Default: wait for the fold and return the business outcome; high-frequency clients use `sequenced` to get only `{status, seq, sub, requestId}`"
+          },
+          {
+            "$ref": "#/components/parameters/WaitMs"
           }
         ],
         "responses": {
@@ -2883,7 +3306,7 @@
             }
           },
           "202": {
-            "description": "Sequenced, but the outcome did not arrive within the budget (do not resend; look it up with `/v1/requests/{requestId}`)"
+            "$ref": "#/components/responses/Sequenced"
           },
           "400": {
             "$ref": "#/components/responses/BadRequest"
@@ -2978,7 +3401,10 @@
               ],
               "default": "result"
             },
-            "description": "Default: wait for the fold and return the business outcome; high-frequency clients use `sequenced` to get only `(seq, sub)`"
+            "description": "Default: wait for the fold and return the business outcome; high-frequency clients use `sequenced` to get only `{status, seq, sub, requestId}`"
+          },
+          {
+            "$ref": "#/components/parameters/WaitMs"
           }
         ],
         "responses": {
@@ -2993,7 +3419,7 @@
             }
           },
           "202": {
-            "description": "Sequenced, but the outcome did not arrive within the budget (do not resend; look it up with `/v1/requests/{requestId}`)"
+            "$ref": "#/components/responses/Sequenced"
           },
           "400": {
             "$ref": "#/components/responses/BadRequest"
@@ -3116,7 +3542,10 @@
               ],
               "default": "result"
             },
-            "description": "Default: wait for the fold and return the business outcome; high-frequency clients use `sequenced` to get only `(seq, sub)`"
+            "description": "Default: wait for the fold and return the business outcome; high-frequency clients use `sequenced` to get only `{status, seq, sub, requestId}`"
+          },
+          {
+            "$ref": "#/components/parameters/WaitMs"
           }
         ],
         "responses": {
@@ -3142,7 +3571,7 @@
             }
           },
           "202": {
-            "description": "Sequenced, but the outcome did not arrive within the budget (do not resend; look it up with `/v1/requests/{requestId}`)"
+            "$ref": "#/components/responses/Sequenced"
           },
           "400": {
             "$ref": "#/components/responses/BadRequest"
@@ -3288,7 +3717,10 @@
               ],
               "default": "result"
             },
-            "description": "Default: wait for the fold and return the business outcome; high-frequency clients use `sequenced` to get only `(seq, sub)`"
+            "description": "Default: wait for the fold and return the business outcome; high-frequency clients use `sequenced` to get only `{status, seq, sub, requestId}`"
+          },
+          {
+            "$ref": "#/components/parameters/WaitMs"
           }
         ],
         "responses": {
@@ -3303,7 +3735,7 @@
             }
           },
           "202": {
-            "description": "Sequenced, but the outcome did not arrive within the budget (do not resend; look it up with `/v1/requests/{requestId}`)"
+            "$ref": "#/components/responses/Sequenced"
           },
           "400": {
             "$ref": "#/components/responses/BadRequest"
@@ -3398,7 +3830,10 @@
               ],
               "default": "result"
             },
-            "description": "Default: wait for the fold and return the business outcome; high-frequency clients use `sequenced` to get only `(seq, sub)`"
+            "description": "Default: wait for the fold and return the business outcome; high-frequency clients use `sequenced` to get only `{status, seq, sub, requestId}`"
+          },
+          {
+            "$ref": "#/components/parameters/WaitMs"
           }
         ],
         "responses": {
@@ -3426,7 +3861,7 @@
             }
           },
           "202": {
-            "description": "Sequenced, but the outcome did not arrive within the budget (do not resend; look it up with `/v1/requests/{requestId}`)"
+            "$ref": "#/components/responses/Sequenced"
           },
           "400": {
             "$ref": "#/components/responses/BadRequest"
@@ -3520,7 +3955,10 @@
               ],
               "default": "result"
             },
-            "description": "Default: wait for the fold and return the business outcome; high-frequency clients use `sequenced` to get only `(seq, sub)`"
+            "description": "Default: wait for the fold and return the business outcome; high-frequency clients use `sequenced` to get only `{status, seq, sub, requestId}`"
+          },
+          {
+            "$ref": "#/components/parameters/WaitMs"
           }
         ],
         "responses": {
@@ -3535,7 +3973,7 @@
             }
           },
           "202": {
-            "description": "Sequenced, but the outcome did not arrive within the budget (do not resend; look it up with `/v1/requests/{requestId}`)"
+            "$ref": "#/components/responses/Sequenced"
           },
           "400": {
             "$ref": "#/components/responses/BadRequest"
@@ -3636,7 +4074,10 @@
               ],
               "default": "result"
             },
-            "description": "Default: wait for the fold and return the business outcome; high-frequency clients use `sequenced` to get only `(seq, sub)`"
+            "description": "Default: wait for the fold and return the business outcome; high-frequency clients use `sequenced` to get only `{status, seq, sub, requestId}`"
+          },
+          {
+            "$ref": "#/components/parameters/WaitMs"
           }
         ],
         "responses": {
@@ -3645,13 +4086,13 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Agent"
+                  "$ref": "#/components/schemas/AgentApproved"
                 }
               }
             }
           },
           "202": {
-            "description": "Sequenced, but the outcome did not arrive within the budget (do not resend; look it up with `/v1/requests/{requestId}`)"
+            "$ref": "#/components/responses/Sequenced"
           },
           "400": {
             "$ref": "#/components/responses/BadRequest"
@@ -3749,7 +4190,10 @@
               ],
               "default": "result"
             },
-            "description": "Default: wait for the fold and return the business outcome; high-frequency clients use `sequenced` to get only `(seq, sub)`"
+            "description": "Default: wait for the fold and return the business outcome; high-frequency clients use `sequenced` to get only `{status, seq, sub, requestId}`"
+          },
+          {
+            "$ref": "#/components/parameters/WaitMs"
           }
         ],
         "responses": {
@@ -3758,13 +4202,13 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object"
+                  "$ref": "#/components/schemas/AgentRevoked"
                 }
               }
             }
           },
           "202": {
-            "description": "Sequenced, but the outcome did not arrive within the budget (do not resend; look it up with `/v1/requests/{requestId}`)"
+            "$ref": "#/components/responses/Sequenced"
           },
           "400": {
             "$ref": "#/components/responses/BadRequest"
@@ -3862,7 +4306,10 @@
               ],
               "default": "result"
             },
-            "description": "Default: wait for the fold and return the business outcome; high-frequency clients use `sequenced` to get only `(seq, sub)`"
+            "description": "Default: wait for the fold and return the business outcome; high-frequency clients use `sequenced` to get only `{status, seq, sub, requestId}`"
+          },
+          {
+            "$ref": "#/components/parameters/WaitMs"
           }
         ],
         "responses": {
@@ -3906,7 +4353,7 @@
             }
           },
           "202": {
-            "description": "Sequenced, but the outcome did not arrive within the budget (do not resend; look it up with `/v1/requests/{requestId}`)"
+            "$ref": "#/components/responses/Sequenced"
           },
           "400": {
             "$ref": "#/components/responses/BadRequest"
@@ -4004,7 +4451,10 @@
               ],
               "default": "result"
             },
-            "description": "Default: wait for the fold and return the business outcome; high-frequency clients use `sequenced` to get only `(seq, sub)`"
+            "description": "Default: wait for the fold and return the business outcome; high-frequency clients use `sequenced` to get only `{status, seq, sub, requestId}`"
+          },
+          {
+            "$ref": "#/components/parameters/WaitMs"
           }
         ],
         "responses": {
@@ -4048,7 +4498,7 @@
             }
           },
           "202": {
-            "description": "Sequenced, but the outcome did not arrive within the budget (do not resend; look it up with `/v1/requests/{requestId}`)"
+            "$ref": "#/components/responses/Sequenced"
           },
           "400": {
             "$ref": "#/components/responses/BadRequest"
@@ -4146,7 +4596,10 @@
               ],
               "default": "result"
             },
-            "description": "Default: wait for the fold and return the business outcome; high-frequency clients use `sequenced` to get only `(seq, sub)`"
+            "description": "Default: wait for the fold and return the business outcome; high-frequency clients use `sequenced` to get only `{status, seq, sub, requestId}`"
+          },
+          {
+            "$ref": "#/components/parameters/WaitMs"
           }
         ],
         "responses": {
@@ -4190,7 +4643,7 @@
             }
           },
           "202": {
-            "description": "Sequenced, but the outcome did not arrive within the budget (do not resend; look it up with `/v1/requests/{requestId}`)"
+            "$ref": "#/components/responses/Sequenced"
           },
           "400": {
             "$ref": "#/components/responses/BadRequest"
@@ -4288,7 +4741,10 @@
               ],
               "default": "result"
             },
-            "description": "Default: wait for the fold and return the business outcome; high-frequency clients use `sequenced` to get only `(seq, sub)`"
+            "description": "Default: wait for the fold and return the business outcome; high-frequency clients use `sequenced` to get only `{status, seq, sub, requestId}`"
+          },
+          {
+            "$ref": "#/components/parameters/WaitMs"
           }
         ],
         "responses": {
@@ -4319,7 +4775,7 @@
             }
           },
           "202": {
-            "description": "Sequenced, but the outcome did not arrive within the budget (do not resend; look it up with `/v1/requests/{requestId}`)"
+            "$ref": "#/components/responses/Sequenced"
           },
           "400": {
             "$ref": "#/components/responses/BadRequest"
@@ -4424,6 +4880,17 @@
           "type": "integer"
         },
         "description": "Read-your-writes: send the `x-dexos-seq` of a write receipt only on a **read after that write**; a replica that is behind answers 412. **Do not send it on market-data polling or on `/trades` / `/candles`** (the projection advances on its own timeline)."
+      },
+      "WaitMs": {
+        "name": "waitMs",
+        "in": "query",
+        "required": false,
+        "schema": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 5000
+        },
+        "description": "`ack=result` only: how long to wait for the outcome before answering 202 (default = the gateway's `V1_ACK_WAIT_MS`, 1500 ms; `0` = do not wait). Not accepted with `ack=sequenced`"
       }
     },
     "headers": {
@@ -4437,13 +4904,19 @@
         "schema": {
           "type": "string"
         },
-        "description": "On every `/v1/*` response: `limit=1200, remaining=1187, reset=42` (IETF draft-ietf-httpapi-ratelimit-headers)"
+        "description": "On every `/v1/*` response, for the per-IP budget: `limit=1200, remaining=1187, reset=42` (IETF draft-ietf-httpapi-ratelimit-headers)"
       },
       "ratelimit-policy": {
         "schema": {
           "type": "string"
         },
         "description": "`1200;w=60`: a fixed 60-second window with a per-IP weight budget (`V1_RATE_LIMIT_PER_MIN`)"
+      },
+      "x-ratelimit-account": {
+        "schema": {
+          "type": "string"
+        },
+        "description": "On a write that passed the signature pre-check and was charged to the per-account budget (key: the main wallet of the account acted on): `limit=1200, remaining=1197, reset=42`. Absent when the request was refused before that point."
       },
       "retry-after": {
         "schema": {
@@ -4492,6 +4965,16 @@
             }
           }
         }
+      },
+      "Sequenced": {
+        "description": "Sequenced, but the outcome did not arrive within the wait budget (do not resend; look it up with `GET /v1/requests/{requestId}`)",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Sequenced"
+            }
+          }
+        }
       }
     },
     "schemas": {
@@ -4523,7 +5006,7 @@
               "details": {
                 "type": "object",
                 "additionalProperties": true,
-                "description": "Context, e.g. `symbol` / `address`; on 412, which watermark is behind and by how much"
+                "description": "Context, e.g. `symbol` / `address`; on 412, which watermark is behind and by how much. `cause` carries the original text of an internal failure (storage, analytics) whose wording is not English; `message` itself is always English"
               }
             }
           }
@@ -4712,7 +5195,8 @@
             "enum": [
               "cross",
               "isolated"
-            ]
+            ],
+            "description": "Account topology the market requires: `cross` (deployer mode normal) or `isolated` (noCross / strictIsolated). The deployer mode itself is on the legacy `/markets`."
           },
           "lastPrice": {
             "type": "string",
@@ -4904,6 +5388,54 @@
             ],
             "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
             "description": "Decimal string"
+          },
+          "prevDayPrice": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
+            "description": "Open of the rolling 24h window (first 1-minute candle in it). null when the market had no tick in the window, or 24h statistics are unavailable"
+          },
+          "change24h": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
+            "description": "(close − open) / open over the rolling 24h window, as a ratio (0.01 = 1%), 8 decimals truncated toward zero. null when there is no open price"
+          },
+          "high24h": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
+            "description": "Highest price in the rolling 24h window (same data as the 1-minute candles)"
+          },
+          "low24h": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
+            "description": "Lowest price in the rolling 24h window"
+          },
+          "volume24h": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
+            "description": "Traded size in base units over the rolling 24h window. \"0\" when nothing traded; null when 24h statistics are unavailable"
+          },
+          "quoteVolume24h": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
+            "description": "Σ price × size of the trades in the rolling 24h window, in quote units. null when unknown (24h statistics unavailable, or the window only holds migrated candles without per-trade ticks)"
           }
         }
       },
@@ -5007,7 +5539,7 @@
           "T": {
             "type": "integer",
             "format": "int64",
-            "description": "Close time (exclusive)"
+            "description": "Close time (exclusive) = next bucket's open time; for 1M / 1Y the length of that calendar month / year"
           },
           "i": {
             "type": "string"
@@ -5124,6 +5656,11 @@
             "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
             "description": "Maintenance margin (MMR)"
           },
+          "openOrderMargin": {
+            "type": "string",
+            "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
+            "description": "Initial margin reserved by resting non-reduce-only orders"
+          },
           "availableToTrade": {
             "type": "string",
             "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
@@ -5138,6 +5675,49 @@
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/Balance"
+            }
+          },
+          "groups": {
+            "type": "array",
+            "description": "Per collateral group (one per settlement token) from the same risk view",
+            "items": {
+              "type": "object",
+              "properties": {
+                "token": {
+                  "type": "string",
+                  "description": "Settlement token symbol"
+                },
+                "collateral": {
+                  "type": "string",
+                  "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
+                  "description": "Cash balance of this token"
+                },
+                "equity": {
+                  "type": "string",
+                  "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
+                  "description": "Group net collateral (including unrealised PnL)"
+                },
+                "imr": {
+                  "type": "string",
+                  "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
+                  "description": "Initial margin requirement"
+                },
+                "mmr": {
+                  "type": "string",
+                  "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
+                  "description": "Maintenance margin requirement"
+                },
+                "openOrderMargin": {
+                  "type": "string",
+                  "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
+                  "description": "Initial margin reserved by resting orders in this group"
+                },
+                "withdrawable": {
+                  "type": "string",
+                  "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
+                  "description": "Withdrawable from this group"
+                }
+              }
             }
           },
           "feeTier": {
@@ -5195,6 +5775,15 @@
             "type": "integer",
             "format": "int64",
             "description": "Unix time in milliseconds"
+          },
+          "epoch": {
+            "type": "string",
+            "description": "Ledger epoch the risk view belongs to (changes only when the node restarts / resets)"
+          },
+          "asOfSeq": {
+            "type": "integer",
+            "format": "uint64",
+            "description": "Log position the risk fields (`equity` / margins / `groups`) were taken at — one view, the same as `/risk/{id}` (INV-API-RISK-HEAD)"
           }
         }
       },
@@ -5464,6 +6053,49 @@
               "string",
               "null"
             ]
+          },
+          "order": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint64",
+            "description": "This account's order for trade / fee legs"
+          },
+          "counterOrder": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint64",
+            "description": "The other side's order for trade legs"
+          },
+          "reference": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Escrow / outbox id for transfers and withdrawals"
+          },
+          "ts": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Block time (unix ms) of the execution"
+          },
+          "outboxStatus": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "acked"
+            ],
+            "description": "`send_asset` only: whether the outbox entry has been acknowledged"
+          },
+          "ackedAt": {
+            "type": "string",
+            "description": "`send_asset` only: event identity of the acknowledgement"
           }
         }
       },
@@ -5684,92 +6316,7 @@
             "$ref": "#/components/schemas/SignedEnvelope"
           },
           {
-            "type": "object",
-            "required": [
-              "symbol",
-              "side",
-              "type",
-              "size"
-            ],
-            "properties": {
-              "symbol": {
-                "type": "string",
-                "description": "Market symbol such as `BTC-USD` (perpetual) or `BTC-USDC` (spot); case-insensitive",
-                "examples": [
-                  "BTC-USD"
-                ]
-              },
-              "side": {
-                "type": "string",
-                "enum": [
-                  "buy",
-                  "sell"
-                ]
-              },
-              "type": {
-                "type": "string",
-                "enum": [
-                  "limit",
-                  "market",
-                  "stopMarket",
-                  "stopLimit",
-                  "takeProfitMarket",
-                  "takeProfitLimit"
-                ]
-              },
-              "price": {
-                "type": "string",
-                "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
-                "description": "Limit price; omitted for market orders"
-              },
-              "size": {
-                "type": "string",
-                "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
-                "description": "Decimal string"
-              },
-              "tif": {
-                "type": "string",
-                "enum": [
-                  "gtc",
-                  "ioc",
-                  "alo",
-                  "fok"
-                ],
-                "default": "gtc"
-              },
-              "reduceOnly": {
-                "type": "boolean",
-                "default": false
-              },
-              "triggerPrice": {
-                "type": "string",
-                "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
-                "description": "Decimal string"
-              },
-              "triggerBy": {
-                "type": "string",
-                "enum": [
-                  "mark",
-                  "last"
-                ],
-                "default": "mark"
-              },
-              "slippage": {
-                "type": "string",
-                "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
-                "description": "Protective-price offset for market orders (decimal, default 0.01)"
-              },
-              "clientOrderId": {
-                "type": "string",
-                "pattern": "^[A-Za-z0-9._:/-]{1,36}$",
-                "description": "Client order id, unique per account (a duplicate is `409 GatewayDuplicateClientOrderId`); after an `ack=result` success the gateway stores the mapping so you can look the order up (`GET /v1/orders/client/{cid}`) and cancel by it. **Not part of the signature**"
-              },
-              "builder": {
-                "type": "string",
-                "pattern": "^0x[0-9a-f]{40}$",
-                "description": "The builder this order is attributed to (must be in the registry); alternatively use the `Host` header"
-              }
-            }
+            "$ref": "#/components/schemas/OrderItem"
           }
         ]
       },
@@ -5800,7 +6347,8 @@
               "partiallyFilled",
               "canceled",
               "pendingTrigger",
-              "running"
+              "running",
+              "sequenced"
             ]
           },
           "price": {
@@ -5824,7 +6372,7 @@
               "null"
             ],
             "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
-            "description": "Decimal string"
+            "description": "Volume-weighted price of `fills[]`; absent when nothing filled"
           },
           "seq": {
             "type": "integer",
@@ -5835,7 +6383,19 @@
             "type": "integer"
           },
           "requestId": {
-            "type": "string"
+            "type": "string",
+            "pattern": "^0x[0-9a-f]{64}$",
+            "description": "Request identity `0x` + keccak(signer ‖ EIP-712 digest), the same identity as the execution history and `GET /v1/requests/{requestId}`; absent only on builder-`Routed` orders, which have no request identity"
+          },
+          "fills": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ReceiptFill"
+            }
+          },
+          "duplicate": {
+            "type": "boolean",
+            "description": "Present (true) only when this exact signed request (same signer, nonce and command) was already sequenced: the response points at that original `(seq, sub)` and nothing executed twice"
           }
         }
       },
@@ -5955,6 +6515,7 @@
       },
       "BatchResult": {
         "type": "object",
+        "description": "Per-item outcome of a batch (always 200 unless the whole command was rejected, then 422). In `/v1/orders/replace` cancels and orders are numbered separately from 0, so an item is identified by `(kind, index)`",
         "properties": {
           "seq": {
             "type": "integer",
@@ -5965,15 +6526,35 @@
             "type": "integer"
           },
           "requestId": {
-            "type": "string"
+            "type": "string",
+            "pattern": "^0x[0-9a-f]{64}$",
+            "description": "Request identity `0x` + keccak(signer ‖ EIP-712 digest), the same identity as the execution history and `GET /v1/requests/{requestId}`; absent only on builder-`Routed` orders, which have no request identity"
+          },
+          "duplicate": {
+            "type": "boolean",
+            "description": "Present (true) only when this exact signed request (same signer, nonce and command) was already sequenced: the response points at that original `(seq, sub)` and nothing executed twice"
           },
           "items": {
             "type": "array",
             "items": {
               "type": "object",
+              "required": [
+                "index",
+                "kind",
+                "status",
+                "symbol"
+              ],
               "properties": {
                 "index": {
-                  "type": "integer"
+                  "type": "integer",
+                  "description": "Position in the input (`orders[]` or `cancels[]` for replace)"
+                },
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "place",
+                    "cancel"
+                  ]
                 },
                 "status": {
                   "type": "string",
@@ -5983,17 +6564,589 @@
                     "canceled"
                   ]
                 },
+                "symbol": {
+                  "type": "string",
+                  "description": "Market symbol such as `BTC-USD` (perpetual) or `BTC-USDC` (spot); case-insensitive",
+                  "examples": [
+                    "BTC-USD"
+                  ]
+                },
+                "orderId": {
+                  "type": "string"
+                },
+                "clientOrderId": {
+                  "type": "string",
+                  "description": "Echoed on place items that carried one"
+                },
                 "code": {
-                  "type": "string"
+                  "type": "string",
+                  "description": "Rejected items: the CoreError variant name"
                 },
-                "message": {
-                  "type": "string"
+                "filled": {
+                  "type": "string",
+                  "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
+                  "description": "Place items accepted: size filled within this command"
                 },
-                "order": {
-                  "$ref": "#/components/schemas/OrderResult"
+                "resting": {
+                  "type": "boolean",
+                  "description": "Place items accepted: whether the remainder rests on the book"
+                },
+                "avgPrice": {
+                  "type": "string",
+                  "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
+                  "description": "Place items accepted: volume-weighted price of `fills[]`; absent when nothing filled"
+                },
+                "fills": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/ReceiptFill"
+                  }
+                },
+                "canceled": {
+                  "type": "string",
+                  "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
+                  "description": "Cancel items canceled: size removed from the book"
                 }
               }
             }
+          }
+        }
+      },
+      "PortfolioPoint": {
+        "type": "object",
+        "required": [
+          "ts",
+          "accountValue",
+          "pnl",
+          "netInflow"
+        ],
+        "properties": {
+          "ts": {
+            "type": "integer",
+            "description": "Bucket start (unix ms); the values are the bucket's last sample"
+          },
+          "accountValue": {
+            "type": "string",
+            "description": "USDC amount as a decimal string"
+          },
+          "pnl": {
+            "type": "string",
+            "description": "USDC PnL since the first point of the window"
+          },
+          "netInflow": {
+            "type": "string",
+            "description": "USDC net inflow since the first point of the window"
+          }
+        }
+      },
+      "PortfolioScope": {
+        "type": "object",
+        "required": [
+          "history",
+          "pnl",
+          "returnRate",
+          "maxDrawdown",
+          "volume",
+          "fees"
+        ],
+        "properties": {
+          "history": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PortfolioPoint"
+            }
+          },
+          "pnl": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Last point − first point (USDC); null when the window has no point"
+          },
+          "returnRate": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Time-weighted return over the window, chaining `(V_k − ΔN_k) / V_{k−1}` per bucket (segments starting at a non-positive value are skipped); deposits and withdrawals do not move it. Null without a usable segment"
+          },
+          "maxDrawdown": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Largest fall of the time-weighted return index from its running peak, in [0, 1]; deposits and withdrawals never cause a drawdown. Null with fewer than 2 points"
+          },
+          "volume": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Traded notional in the window (USDC), as taker or maker; `perp` counts perpetual markets only, `total` adds spot"
+          },
+          "fees": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Net trading fees paid in the window (USDC): taker + maker fees − maker rebates + builder fees + dex deployer fees"
+          }
+        }
+      },
+      "Portfolio": {
+        "type": "object",
+        "required": [
+          "address",
+          "subaccount",
+          "epoch",
+          "period",
+          "bucketMs",
+          "fromMs",
+          "asOfMs",
+          "seriesStartMs",
+          "total",
+          "perp",
+          "unvaluedTokens",
+          "gaps"
+        ],
+        "properties": {
+          "address": {
+            "type": "string"
+          },
+          "subaccount": {
+            "type": "integer"
+          },
+          "epoch": {
+            "type": "string",
+            "description": "Ledger epoch; a new epoch starts a new series"
+          },
+          "period": {
+            "type": "string",
+            "enum": [
+              "24h",
+              "7d",
+              "30d",
+              "all"
+            ]
+          },
+          "bucketMs": {
+            "type": "integer"
+          },
+          "fromMs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Window start: max(now − period, seriesStartMs); for `all`, seriesStartMs"
+          },
+          "asOfMs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Time of the latest sample (at most one sampling period old)"
+          },
+          "seriesStartMs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "First sample of this account in this epoch; null = never sampled yet"
+          },
+          "total": {
+            "$ref": "#/components/schemas/PortfolioScope"
+          },
+          "perp": {
+            "$ref": "#/components/schemas/PortfolioScope"
+          },
+          "unvaluedTokens": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Tokens held in the window that have no USDC price and are not counted"
+          },
+          "gaps": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "fromMs",
+                "toMs"
+              ],
+              "properties": {
+                "fromMs": {
+                  "type": "integer"
+                },
+                "toMs": {
+                  "type": "integer"
+                }
+              }
+            },
+            "description": "Intervals whose PnL is not counted because the execution history between two samples is missing"
+          }
+        }
+      },
+      "ReceiptFill": {
+        "type": "object",
+        "description": "A fill this order produced **as the taker within this command** (resting-side fills against the account's orders arrive via `/v1/account/fills` / WS)",
+        "required": [
+          "price",
+          "size",
+          "fee",
+          "feeToken",
+          "fillId"
+        ],
+        "properties": {
+          "price": {
+            "type": "string",
+            "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
+            "description": "Decimal string"
+          },
+          "size": {
+            "type": "string",
+            "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
+            "description": "Decimal string"
+          },
+          "fee": {
+            "type": "string",
+            "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
+            "description": "Taker fee of this fill"
+          },
+          "feeToken": {
+            "type": "string",
+            "examples": [
+              "USDC"
+            ]
+          },
+          "fillId": {
+            "type": "string",
+            "pattern": "^[0-9]+-[0-9]+-[0-9]+$",
+            "description": "Equals the `id` of the same fill in `/v1/account/fills` and in WebSocket frames (`<seq>-<sub>-<idx>`)"
+          }
+        }
+      },
+      "Sequenced": {
+        "type": "object",
+        "description": "Sequenced but not (yet) folded: `ack=sequenced`, or `ack=result` whose wait budget ran out (202). **Do not resend**; look the outcome up with `GET /v1/requests/{requestId}`",
+        "required": [
+          "status",
+          "seq",
+          "sub"
+        ],
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "sequenced"
+            ]
+          },
+          "message": {
+            "type": "string",
+            "description": "Only on 202"
+          },
+          "seq": {
+            "type": "integer",
+            "format": "uint64",
+            "description": "Raft log sequence number (the same axis as the write receipt's `seq` and the `x-dexos-seq` header)"
+          },
+          "sub": {
+            "type": "integer"
+          },
+          "requestId": {
+            "type": "string",
+            "pattern": "^0x[0-9a-f]{64}$",
+            "description": "Request identity `0x` + keccak(signer ‖ EIP-712 digest), the same identity as the execution history and `GET /v1/requests/{requestId}`; absent only on builder-`Routed` orders, which have no request identity"
+          },
+          "duplicate": {
+            "type": "boolean",
+            "description": "Present (true) only when this exact signed request (same signer, nonce and command) was already sequenced: the response points at that original `(seq, sub)` and nothing executed twice"
+          }
+        }
+      },
+      "OrderItem": {
+        "type": "object",
+        "required": [
+          "symbol",
+          "side",
+          "type",
+          "size"
+        ],
+        "properties": {
+          "symbol": {
+            "type": "string",
+            "description": "Market symbol such as `BTC-USD` (perpetual) or `BTC-USDC` (spot); case-insensitive",
+            "examples": [
+              "BTC-USD"
+            ]
+          },
+          "side": {
+            "type": "string",
+            "enum": [
+              "buy",
+              "sell"
+            ]
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "limit",
+              "market",
+              "stopMarket",
+              "stopLimit",
+              "takeProfitMarket",
+              "takeProfitLimit"
+            ]
+          },
+          "price": {
+            "type": "string",
+            "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
+            "description": "Limit price; omitted for market orders"
+          },
+          "size": {
+            "type": "string",
+            "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
+            "description": "Decimal string"
+          },
+          "tif": {
+            "type": "string",
+            "enum": [
+              "gtc",
+              "ioc",
+              "alo",
+              "fok"
+            ],
+            "default": "gtc"
+          },
+          "reduceOnly": {
+            "type": "boolean",
+            "default": false
+          },
+          "triggerPrice": {
+            "type": "string",
+            "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
+            "description": "Decimal string"
+          },
+          "triggerBy": {
+            "type": "string",
+            "enum": [
+              "mark",
+              "last"
+            ],
+            "default": "mark"
+          },
+          "slippage": {
+            "type": "string",
+            "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
+            "description": "Protective-price offset for market orders (decimal, default 0.01)"
+          },
+          "clientOrderId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:/-]{1,36}$",
+            "description": "Client order id, unique per account and **consumed once sequenced** (even if execution rejects the order). Accepted on the main-wallet path and on the API-wallet path (batch items, single `signer` orders, `/v1/orders/replace` orders). A duplicate is `409 GatewayDuplicateClientOrderId`; the gateway reserves it atomically before sequencing and releases it if the request fails before sequencing. Look the order up with `GET /v1/orders/client/{cid}` and cancel by it. **Not part of the signature**"
+          },
+          "builder": {
+            "type": "string",
+            "pattern": "^0x[0-9a-f]{40}$",
+            "description": "The builder this order is attributed to (must be in the registry); alternatively use the `Host` header"
+          }
+        },
+        "description": "An order without the signature envelope (the items of `/v1/orders/replace` `orders[]`, signed by the outer envelope)"
+      },
+      "AgentApproved": {
+        "type": "object",
+        "required": [
+          "status",
+          "agent"
+        ],
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "ok"
+            ]
+          },
+          "agent": {
+            "type": "string",
+            "pattern": "^0x[0-9a-f]{40}$",
+            "description": "EVM address (always lower-case in responses; case-insensitive in requests)"
+          },
+          "label": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "validUntil": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "null = no expiry"
+          },
+          "seq": {
+            "type": "integer"
+          },
+          "sub": {
+            "type": "integer"
+          },
+          "requestId": {
+            "type": "string"
+          },
+          "duplicate": {
+            "type": "boolean"
+          }
+        }
+      },
+      "AgentRevoked": {
+        "type": "object",
+        "required": [
+          "status",
+          "agent",
+          "revoked"
+        ],
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "ok"
+            ]
+          },
+          "agent": {
+            "type": "string",
+            "pattern": "^0x[0-9a-f]{40}$",
+            "description": "EVM address (always lower-case in responses; case-insensitive in requests)"
+          },
+          "revoked": {
+            "type": "boolean",
+            "enum": [
+              true
+            ]
+          },
+          "seq": {
+            "type": "integer"
+          },
+          "sub": {
+            "type": "integer"
+          },
+          "requestId": {
+            "type": "string"
+          },
+          "duplicate": {
+            "type": "boolean"
+          }
+        }
+      },
+      "AgentGrant": {
+        "type": "object",
+        "required": [
+          "address",
+          "label",
+          "validUntil",
+          "expired"
+        ],
+        "properties": {
+          "address": {
+            "type": "string",
+            "pattern": "^0x[0-9a-f]{40}$",
+            "description": "Main wallet address of the represented account; for a vault, the manager's main wallet"
+          },
+          "subaccount": {
+            "type": "integer",
+            "description": "Subaccount index under `address` (absent for a vault)"
+          },
+          "vault": {
+            "type": "integer",
+            "description": "Vault id when the grant is on a vault's main account (absent otherwise)"
+          },
+          "label": {
+            "type": "string"
+          },
+          "validUntil": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "null = no expiry"
+          },
+          "expired": {
+            "type": "boolean",
+            "description": "Listed even when expired: renew it, it was not revoked"
+          }
+        }
+      },
+      "MyVaultPosition": {
+        "type": "object",
+        "properties": {
+          "vault": {
+            "type": "integer"
+          },
+          "name": {
+            "type": "string"
+          },
+          "class": {
+            "type": "string",
+            "enum": [
+              "lp",
+              "manager"
+            ]
+          },
+          "shares": {
+            "type": "string",
+            "pattern": "^[0-9]+$",
+            "description": "Share units (integer; not a token amount)"
+          },
+          "balanceShare": {
+            "type": "string",
+            "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
+            "description": "Current value of the shares, USDC"
+          },
+          "equity": {
+            "type": "string",
+            "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
+            "description": "Same as `balanceShare`, USDC"
+          },
+          "initialEquity": {
+            "type": "string",
+            "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
+            "description": "Principal shown to the depositor, USDC"
+          },
+          "allTimePnl": {
+            "type": "string",
+            "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
+            "description": "`equity − initialEquity`, USDC"
+          },
+          "lockUntilMs": {
+            "type": "integer"
+          },
+          "locked": {
+            "type": "boolean"
+          },
+          "lockedShares": {
+            "type": "string",
+            "pattern": "^[0-9]+$"
+          },
+          "withdrawable": {
+            "type": "object",
+            "properties": {
+              "ok": {
+                "type": "boolean"
+              },
+              "reason": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            }
+          },
+          "nextWithdrawWindow": {
+            "type": [
+              "object",
+              "null"
+            ]
           }
         }
       }
@@ -6062,13 +7215,13 @@
       "Time-series channels (trades / fills / events) send one frame per event, carrying `seq` and `data.id` (`<seq>-<sub>-<idx>`); after a disconnect, pass the last id seen as `after` to `/v1/account/fills` or `/v1/events` to backfill.",
       "`lagged` means the server-side broadcast fell behind and frames were dropped; **dropped frames are never resent**. On receiving it, stop and backfill.",
       "At most 200 subscriptions per connection; the server closes a connection that has sent no frame (pings count) for 60 s.",
-      "Rate limiting: REST uses a fixed 60-second window per IP (weights: reads 1, order book / prices 2, history 5, writes 10; default 1200 per minute); every response carries `ratelimit` / `ratelimit-policy`, and exceeding the budget yields 429 with `retry-after`. The WebSocket connection itself carries no weight.",
+      "Rate limiting: REST uses fixed 60-second windows per IP and, for writes, per main wallet (weights: reads 1, order book / prices 2, history 5, writes 1 + floor(n / 40); default 1200 per minute each); every response carries `ratelimit` / `ratelimit-policy`, writes also `x-ratelimit-account`, and exceeding a budget yields 429 with `retry-after`. The WebSocket connection itself carries no weight.",
       "Private channels are subscribed by address without authentication (the same data is publicly readable over REST; identical to Hyperliquid / Pacifica)."
     ],
     "channels": {
       "prices": {
         "params": [],
-        "data": "`{prices:[Price], ts}`"
+        "data": "`{prices:[Price], ts, window24h}` (same body as `GET /v1/prices`, including the 24h fields)"
       },
       "book": {
         "params": [
@@ -6117,7 +7270,7 @@
           "symbol",
           "interval"
         ],
-        "data": "Candle (`{symbol, i, t, T, o, h, l, c, v}`); the current bar is sent on every fill"
+        "data": "Candle (`{symbol, i, t, T, o, h, l, c, v}`); the current bar is sent on every fill. `interval` takes the same values as REST; an unknown one is an error frame"
       },
       "funding": {
         "params": [

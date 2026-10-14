@@ -60,7 +60,7 @@ type nonceGuard struct {
 // run 串行执行一次签名写入。f 用给定的 nonce 签名并发送,返回请求身份(签名之后恒非 nil)。
 //
 //   - 成功:nonce 已消耗 → 本地 ++。
-//   - 定序前的拒绝(beforeSequencing):命令没进日志 → 不动,不锁。
+//   - 没发出(errNotSent)或定序前的拒绝(beforeSequencing):命令没进日志 → 不动,不锁。
 //   - 422 执行层拒绝:NonceMismatch → 锁(本地计数器不可信);preConsume 里的其余拒因 → 不动,不锁;
 //     其余(InsufficientMargin 等业务拒绝)→ ++,不锁。都是终局结论,锁住只会让一笔保证金不足停掉整个做市进程。
 //   - ErrPending(202)、ErrIncompleteBatch、传输失败、5xx、回执解析失败:结论未知或本地看不全 → 锁定。
@@ -77,6 +77,9 @@ func (g *nonceGuard) run(ctx context.Context, f func(nonce uint64) (*RequestIden
 	if err == nil {
 		g.nonce++
 		return nil
+	}
+	if errors.Is(err, errNotSent) {
+		return err
 	}
 	var e *Error
 	if errors.As(err, &e) && e.Code != "NonceMismatch" {
@@ -288,7 +291,7 @@ type wireReplaceReq struct {
 }
 
 // Replace **原子换单**:撤旧挂新落在同一个状态机转移里,没有无报价的中间窗口。做市刷新报价用它。
-// 逐项仍尽力而为(一张保证金不足不废掉整轮)。
+// 逐项仍尽力而为(一张保证金不足不废掉整轮)。新单可以带 clientOrderId,规则同批量下单。
 func (s *Session) Replace(ctx context.Context, m *Market, cancels []uint64, orders []OrderRequest) (*BatchResult, error) {
 	if err := sameMarket(m, orders); err != nil {
 		return nil, err
@@ -302,9 +305,6 @@ func (s *Session) Replace(ctx context.Context, m *Market, cancels []uint64, orde
 	items := make([]wireOrderReq, len(orders))
 	batch := make([]dexos.BatchOrder, len(orders))
 	for i, o := range orders {
-		if o.ClientOrderID != "" {
-			return nil, errors.New("dexosv1: 换单的新单不收 clientOrderId(服务端不记)")
-		}
 		w, err := o.wire(nil)
 		if err != nil {
 			return nil, err
@@ -580,8 +580,19 @@ func (w *Wallet) ApproveAgent(ctx context.Context, agent dexos.Address, validUnt
 		if err != nil {
 			return id, err
 		}
-		out, err = receipt(status, raw, id)
-		return id, err
+		if out, err = receipt(status, raw, id); err != nil {
+			return id, err
+		}
+		var wr struct {
+			Agent string `json:"agent"`
+		}
+		if err := decodeInto(raw, &wr, "授权回执"); err != nil {
+			return id, err
+		}
+		if !strings.EqualFold(wr.Agent, agent.Hex()) {
+			return id, fmt.Errorf("dexosv1: 授权 %s,回执是 %q", agent.Hex(), wr.Agent)
+		}
+		return id, nil
 	})
 	if err != nil {
 		return nil, err

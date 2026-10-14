@@ -151,6 +151,10 @@ func TestAccountReads(t *testing.T) {
 		a.Leverage[0] != (MarketLeverage{"ETH-USD", 10}) || a.Nonce != 2 {
 		t.Fatalf("账户汇总不对: %+v", a)
 	}
+	if a.Epoch != "k1-1" || a.AsOfSeq != 231461888 || a.OpenOrderMargin != "12.5" || len(a.Groups) != 1 ||
+		a.Groups[0] != (RiskGroup{"USDC", "-1282.814453", "13928.966644", "760.656", "456.3936", "12.5", "13168.310644"}) {
+		t.Fatalf("账户风险头不对: %+v", a)
+	}
 
 	f.routes["/v1/account/positions"] = serve(t, 200, "positions.json")
 	ps, err := c.Positions(ctx, cat, ref)
@@ -184,6 +188,131 @@ func TestAccountReads(t *testing.T) {
 	q := f.requests()[1].URL.Query()
 	if q.Get("address") != testAddr || q.Get("subaccount") != "0" {
 		t.Fatalf("账户寻址参数不对: %v", q)
+	}
+}
+
+// 缺 epoch / asOfSeq 的账户汇总不能用:判断不了纪元变没变、视图新不新。
+func TestAccountRequiresEpochAndAsOfSeq(t *testing.T) {
+	for _, field := range []string{`"epoch":"k1-1",`, `"asOfSeq":231461888,`} {
+		f, c := newFake(t)
+		body := strings.Replace(string(fixture(t, "account.json")), field, "", 1)
+		if body == string(fixture(t, "account.json")) {
+			t.Fatalf("fixture 里没有 %s", field)
+		}
+		f.routes["/v1/account"] = func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(body)) }
+		if _, err := c.Account(context.Background(), AccountRef{Address: mustAddr(t, testAddr)}); err == nil {
+			t.Fatalf("缺 %s 应当报错", field)
+		}
+	}
+}
+
+func TestMarketDataReads(t *testing.T) {
+	f, c := newFake(t)
+	cat := catalog(t, f, c)
+	ctx := context.Background()
+	btc, _ := cat.Market("BTC-USD")
+	if btc.MarginMode != "cross" {
+		t.Fatalf("marginMode: %q", btc.MarginMode)
+	}
+
+	f.routes["/v1/prices"] = serve(t, 200, "prices.json")
+	ps, err := c.Prices(ctx, cat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, e := ps.Prices[0], ps.Prices[1]
+	if ps.Window == nil || ps.Window.From != 1791801480000 || b.Last != 83952 || *b.Mark != 82680 || *b.PrevDayPrice != 81000 ||
+		*b.High24h != 84500 || *b.Low24h != 80500 || *b.Volume24h != 12345 || *b.Change24h != "0.036444" || *b.OpenInterest != 184 {
+		t.Fatalf("BTC 24h 统计不对: %+v", b)
+	}
+	if *e.BestBid != 24926 || *e.Mark != 24931 || e.Oracle != nil || e.PrevDayPrice != nil || *e.Volume24h != 0 {
+		t.Fatalf("ETH 价格不对: %+v", e)
+	}
+
+	f.routes["/v1/markets/BTC-USD/candles"] = serve(t, 200, "candles.json")
+	ks, err := c.Candles(ctx, btc, CandleQuery{Interval: Interval1M, StartTime: 1788220800000, Limit: 12})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ks) != 1 || ks[0] != (Candle{Open: 1788220800000, Close: 1790812800000, Interval: "1M", O: 80000, H: 85000, L: 79000, C: 83952, Volume: 123456}) {
+		t.Fatalf("K 线不对: %+v", ks)
+	}
+	q := f.requests()[len(f.requests())-1].URL.Query()
+	if q.Get("interval") != "1M" || q.Get("startTime") != "1788220800000" || q.Get("limit") != "12" || q.Get("endTime") != "" {
+		t.Fatalf("K 线参数不对: %v", q)
+	}
+	// 问 1M 答了别的周期:报错
+	if _, err := c.Candles(ctx, btc, CandleQuery{Interval: Interval4h}); err == nil {
+		t.Fatal("周期对不上应当报错")
+	}
+	// 不在 v1 周期集合里:本地报错,不发请求
+	before := len(f.requests())
+	for _, bad := range []string{"", "1D", "2h", "1W"} {
+		if _, err := c.Candles(ctx, btc, CandleQuery{Interval: bad}); err == nil {
+			t.Fatalf("周期 %q 应当本地报错", bad)
+		}
+	}
+	if len(f.requests()) != before {
+		t.Fatal("未知周期不该发请求")
+	}
+}
+
+func TestPortfolio(t *testing.T) {
+	f, c := newFake(t)
+	ctx := context.Background()
+	ref := AccountRef{Address: mustAddr(t, testAddr)}
+	c.ObserveSeq(900)
+	f.routes["/v1/account/portfolio"] = serve(t, 200, "portfolio.json")
+	p, err := c.Portfolio(ctx, ref, Period7d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Epoch != "k1-1" || p.BucketMs != 3600000 || *p.SeriesStartMs != 1791200000000 || len(p.Total.History) != 2 ||
+		p.Total.History[1].PnL != "128.466644" || *p.Total.ReturnRate != "0.009309" || p.Perp.PnL != nil || len(p.Perp.History) != 0 ||
+		p.UnvaluedTokens[0] != "XYZ" || p.Gaps[0] != (PortfolioGap{1791500000000, 1791600000000}) {
+		t.Fatalf("portfolio 不对: %+v", p)
+	}
+	r := f.requests()[0]
+	if r.URL.Query().Get("period") != "7d" || r.Header.Get(minSeqHeader) != "" {
+		t.Fatalf("portfolio 参数不对(不带 min-seq): %v %v", r.URL.Query(), r.Header)
+	}
+	if _, err := c.Portfolio(ctx, ref, Period30d); err == nil {
+		t.Fatal("问 30d 答 7d 应当报错")
+	}
+	before := len(f.requests())
+	if _, err := c.Portfolio(ctx, ref, "1y"); err == nil || len(f.requests()) != before {
+		t.Fatalf("未知区间应本地报错、不发请求: %v", err)
+	}
+}
+
+func TestAgentGrantsAndMyVaults(t *testing.T) {
+	f, c := newFake(t)
+	ctx := context.Background()
+	f.routes["/v1/agents/"+testAgent] = serve(t, 200, "agent_grants.json")
+	gs, err := c.AgentGrants(ctx, mustAddr(t, testAgent))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(gs) != 2 || gs[0].Address != testAddr || *gs[0].Subaccount != 0 || gs[0].Vault != nil || gs[0].ValidUntil != nil ||
+		gs[1].Subaccount != nil || *gs[1].Vault != 3 || *gs[1].ValidUntil != 1791999999000 {
+		t.Fatalf("授权反查不对: %+v", gs)
+	}
+	// 答的不是问的那把钥匙:报错
+	f.routes["/v1/agents/"+testAddr] = serve(t, 200, "agent_grants.json")
+	if _, err := c.AgentGrants(ctx, mustAddr(t, testAddr)); err == nil {
+		t.Fatal("反查结果的 agent 对不上应当报错")
+	}
+
+	f.routes["/v1/account/vaults"] = serve(t, 200, "my_vaults.json")
+	vs, err := c.MyVaults(ctx, mustAddr(t, testAddr))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(vs) != 1 || vs[0].Vault != 3 || vs[0].Class != "lp" || vs[0].Equity != "1012.345678" || vs[0].AllTimePnl != "12.345678" || !vs[0].Withdrawable.OK {
+		t.Fatalf("金库头寸不对: %+v", vs)
+	}
+	if q := f.requests()[len(f.requests())-1].URL.Query(); q.Get("address") != testAddr || q.Has("subaccount") {
+		t.Fatalf("金库头寸只按主钱包地址查: %v", q)
 	}
 }
 
@@ -330,8 +459,18 @@ func TestLedgerFilters(t *testing.T) {
 		t.Fatalf("流水不对: %+v", h)
 	}
 	q := f.requests()[0].URL.Query()
-	if q.Get("kind") != "deposit" || q.Get("token") != "USDC" || q.Get("subaccount") != "2" {
+	if q.Get("kind") != "deposit" || q.Get("token") != "USDC" || q.Get("subaccount") != "2" || q.Has("external") {
 		t.Fatalf("过滤参数不对: %v", q)
+	}
+	if _, err := c.Ledger(context.Background(), AccountRef{Address: mustAddr(t, testAddr)}, LedgerQuery{External: true}); err != nil {
+		t.Fatal(err)
+	}
+	if q = f.requests()[1].URL.Query(); q.Get("external") != "true" || q.Has("kind") {
+		t.Fatalf("external 过滤参数不对: %v", q)
+	}
+	// external 与 kind 同给:服务端 400,本地先拦住
+	if _, err := c.Ledger(context.Background(), AccountRef{Address: mustAddr(t, testAddr)}, LedgerQuery{Kind: "deposit", External: true}); err == nil || len(f.requests()) != 2 {
+		t.Fatalf("external 与 kind 同给应本地报错: %v", err)
 	}
 }
 
@@ -361,11 +500,35 @@ func TestTypedErrors(t *testing.T) {
 	f.routes["/v1/account"] = serve(t, 429, "err429.json", "retry-after", "7", "ratelimit", "limit=1200, remaining=0, reset=42")
 	_, err = c.Account(ctx, ref)
 	var rl *RateLimitedError
-	if !errors.As(err, &rl) || rl.RetryAfter != 7*time.Second || !rl.HasRateLimit || rl.Limit != 1200 || rl.Remaining != 0 || rl.Reset != 42*time.Second {
+	if !errors.As(err, &rl) || rl.Bucket != "ip" || rl.RetryAfter != 7*time.Second || rl.Limit != 1200 || rl.Remaining != 0 || rl.Reset != 42*time.Second {
 		t.Fatalf("429 应解析成 *RateLimitedError: %#v", err)
 	}
 	if !errors.As(err, &e) || e.Code != "GatewayRateLimited" {
 		t.Fatalf("*RateLimitedError 应能展开成 *Error: %#v", err)
+	}
+	// 不是网关限流的形状(没 bucket、没 retry-after、没扣光那个桶的读数头):不当成限流,但仍能取到 429
+	ipBody := string(fixture(t, "err429.json"))
+	noBucket := `{"error":{"code":"GatewayRateLimited","num":10429,"message":"rate limit exceeded"}}`
+	for name, tc := range map[string]struct {
+		body string
+		h    []string
+	}{
+		"缺 bucket":      {noBucket, []string{"retry-after", "7", "ratelimit", "limit=1200, remaining=0, reset=42"}},
+		"缺 retry-after": {ipBody, []string{"ratelimit", "limit=1200, remaining=0, reset=42"}},
+		"缺 ratelimit":   {ipBody, []string{"retry-after", "7"}},
+		"读数头取错桶":        {ipBody, []string{"retry-after", "7", "x-ratelimit-account", "limit=1200, remaining=0, reset=42"}},
+	} {
+		f.routes["/v1/account"] = func(w http.ResponseWriter, _ *http.Request) {
+			for i := 0; i+1 < len(tc.h); i += 2 {
+				w.Header().Set(tc.h[i], tc.h[i+1])
+			}
+			w.WriteHeader(429)
+			_, _ = w.Write([]byte(tc.body))
+		}
+		_, err = c.Account(ctx, ref)
+		if errors.As(err, &rl) || !errors.As(err, &e) || e.Status != 429 {
+			t.Fatalf("%s:不该解析成 *RateLimitedError,但要能取到 *Error: %#v", name, err)
+		}
 	}
 
 	f.routes["/v1/account/ledger"] = serve(t, 409, "err409_epoch.json")

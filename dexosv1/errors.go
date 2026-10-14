@@ -32,27 +32,27 @@ func (e *Error) Error() string {
 	return fmt.Sprintf("dexosv1: HTTP %d %s(%d): %s", e.Status, e.Code, e.Num, e.Message)
 }
 
-// RateLimitedError 429 `GatewayRateLimited`。
+// RateLimitedError 429 `GatewayRateLimited`(v1.1 §4.1)。网关的 429 一定带 `details.bucket`、`retry-after`
+// 和扣光那个桶的读数头;缺任何一项就不是网关限流的形状,不解析成本类型,而是包着 [*Error] 的普通错误。
 //
 // 本包不重试也不等待:同一个进程里往往有多个币对共用额度,退让多久、暂停哪个币对只有调用方知道。
 type RateLimitedError struct {
 	Err *Error
-	// Bucket 扣光的是哪个桶(v1.1 §4.1 的 `details.bucket`):"ip" | "account";"" = 服务端没给。
+	// Bucket 扣光的是哪个桶:"ip" | "account"。
 	// 账户桶满说明这个账户的写太密,IP 桶满说明同一台机器上的总量太大 —— 两者的退让对象不同。
 	Bucket string
-	// RetryAfter 服务端 `retry-after` 给的等待时长;0 = 响应没带这个头。
+	// RetryAfter 服务端 `retry-after` 给的等待时长。
 	RetryAfter time.Duration
-	// Limit / Remaining / Reset 来自 `ratelimit: limit=…, remaining=…, reset=…`(IETF 限流头);
-	// HasRateLimit=false 表示响应没带这个头,三个值无意义。
-	HasRateLimit bool
-	Limit        int
-	Remaining    int
-	Reset        time.Duration
+	// Limit / Remaining / Reset 是扣光那个桶的读数:IP 桶取 `ratelimit`(IETF 限流头),
+	// 账户桶取 `x-ratelimit-account`(账户桶 429 上的 `ratelimit` 是 IP 桶的读数,不是被扣光的那个)。
+	Limit     int
+	Remaining int
+	Reset     time.Duration
 }
 
 func (e *RateLimitedError) Error() string {
-	return fmt.Sprintf("dexosv1: 被限流(retry-after %s, limit=%d remaining=%d): %v",
-		e.RetryAfter, e.Limit, e.Remaining, e.Err)
+	return fmt.Sprintf("dexosv1: %s 桶被限流(retry-after %s, limit=%d remaining=%d): %v",
+		e.Bucket, e.RetryAfter, e.Limit, e.Remaining, e.Err)
 }
 
 func (e *RateLimitedError) Unwrap() error { return e.Err }
@@ -105,26 +105,32 @@ func parseError(status int, header http.Header, raw []byte) error {
 	return e
 }
 
-func rateLimited(e *Error, h http.Header) *RateLimitedError {
+// rateLimited 按 v1.1 §4.1 解析 429;形状不全就返回包着 e 的错误(状态码仍可经 errors.As 取到)。
+func rateLimited(e *Error, h http.Header) error {
 	r := &RateLimitedError{Err: e, Bucket: detailString(e.Details, "bucket")}
-	if s, err := strconv.Atoi(strings.TrimSpace(h.Get("retry-after"))); err == nil && s >= 0 {
-		r.RetryAfter = time.Duration(s) * time.Second
+	header := map[string]string{"ip": "ratelimit", "account": "x-ratelimit-account"}[r.Bucket]
+	if e.Code != "GatewayRateLimited" || header == "" {
+		return fmt.Errorf("dexosv1: 429 不是网关限流的形状(code %q,details.bucket %q): %w", e.Code, r.Bucket, e)
 	}
-	if v := h.Get("ratelimit"); v != "" {
-		kv := map[string]int{}
-		for _, part := range strings.Split(v, ",") {
-			k, val, ok := strings.Cut(strings.TrimSpace(part), "=")
-			if n, err := strconv.Atoi(val); ok && err == nil {
-				kv[k] = n
-			}
-		}
-		limit, okL := kv["limit"]
-		remaining, okR := kv["remaining"]
-		reset, okS := kv["reset"]
-		if okL && okR && okS {
-			r.HasRateLimit, r.Limit, r.Remaining, r.Reset = true, limit, remaining, time.Duration(reset)*time.Second
+	s, err := strconv.Atoi(strings.TrimSpace(h.Get("retry-after")))
+	if err != nil || s < 0 {
+		return fmt.Errorf("dexosv1: 429 的 retry-after %q 不对: %w", h.Get("retry-after"), e)
+	}
+	r.RetryAfter = time.Duration(s) * time.Second
+	kv := map[string]int{}
+	for _, part := range strings.Split(h.Get(header), ",") {
+		k, val, ok := strings.Cut(strings.TrimSpace(part), "=")
+		if n, err := strconv.Atoi(val); ok && err == nil {
+			kv[k] = n
 		}
 	}
+	limit, okL := kv["limit"]
+	remaining, okR := kv["remaining"]
+	reset, okS := kv["reset"]
+	if !okL || !okR || !okS {
+		return fmt.Errorf("dexosv1: %s 桶的 429 缺 %s 头(得到 %q): %w", r.Bucket, header, h.Get(header), e)
+	}
+	r.Limit, r.Remaining, r.Reset = limit, remaining, time.Duration(reset)*time.Second
 	return r
 }
 

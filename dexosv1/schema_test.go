@@ -244,6 +244,11 @@ var fixtureSchemas = []struct {
 	{"err422_unknown_agent.json", "", "", "Error"},
 	{"err401_sig.json", "", "", "Error"},
 	{"err429_account.json", "", "", "Error"},
+	{"prices.json", "/v1/prices", "200", ""},
+	{"candles.json", "/v1/markets/{symbol}/candles", "200", ""},
+	{"portfolio.json", "/v1/account/portfolio", "200", ""},
+	{"agent_grants.json", "/v1/agents/{address}", "200", ""},
+	{"my_vaults.json", "/v1/account/vaults", "200", ""},
 }
 
 // postFixtureSchemas 写接口回执的 fixture(形状照原生 v1 的 v1_write.rs 整理)。
@@ -305,6 +310,8 @@ func TestDecodedFieldsExistInPinnedSpec(t *testing.T) {
 	props := func(s map[string]any) map[string]any { return obj(deref(spec, s)["properties"]) }
 	schema := func(name string) map[string]any { return props(componentSchema(t, spec, name)) }
 	exchange := schema("Exchange")
+	portfolio := schema("Portfolio")
+	myVault := schema("MyVaultPosition")
 	cases := []struct {
 		name  string
 		typ   reflect.Type
@@ -323,6 +330,17 @@ func TestDecodedFieldsExistInPinnedSpec(t *testing.T) {
 		{"Exchange", reflect.TypeFor[Exchange](), exchange},
 		{"Exchange.domain", reflect.TypeFor[Exchange]().Field(1).Type, props(obj(exchange["domain"]))},
 		{"Exchange.deposit.tokens[]", reflect.TypeFor[Token](), props(obj(obj(props(obj(exchange["deposit"]))["tokens"])["items"]))},
+		{"Account.groups[]", reflect.TypeFor[RiskGroup](), props(obj(obj(schema("Account")["groups"])["items"]))},
+		{"Price", reflect.TypeFor[wirePrice](), schema("Price")},
+		{"prices.window24h", reflect.TypeFor[Window24h](), props(obj(obj(responseSchema(t, spec, "/v1/prices", "200")["properties"])["window24h"]))},
+		{"Candle", reflect.TypeFor[wireCandle](), schema("Candle")},
+		{"Portfolio", reflect.TypeFor[Portfolio](), portfolio},
+		{"PortfolioScope", reflect.TypeFor[PortfolioScope](), schema("PortfolioScope")},
+		{"PortfolioPoint", reflect.TypeFor[PortfolioPoint](), schema("PortfolioPoint")},
+		{"Portfolio.gaps[]", reflect.TypeFor[PortfolioGap](), props(obj(obj(portfolio["gaps"])["items"]))},
+		{"AgentGrant", reflect.TypeFor[AgentGrant](), schema("AgentGrant")},
+		{"MyVaultPosition", reflect.TypeFor[VaultPosition](), myVault},
+		{"MyVaultPosition.withdrawable", reflect.TypeFor[VaultPosition]().Field(11).Type, props(obj(myVault["withdrawable"]))},
 	}
 	for _, c := range cases {
 		if c.props == nil {
