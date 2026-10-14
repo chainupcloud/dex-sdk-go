@@ -1,0 +1,1 @@
+{"address":"0x1111111111111111111111111111111111111111","epoch":"k1-1","fills":[{"fee":"-0.0249","feeToken":"USDC","id":"34186500-0-3","orderId":null,"price":"2492.6","role":"taker","seq":34186500,"side":"sell","size":"0.1","symbol":"ETH-USD","ts":null}],"finality":"raft_committed","hasMore":false,"next":"34186500-0-3","subaccount":0,"upper":"231461888-65535-4294967295"}

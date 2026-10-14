@@ -1,0 +1,1 @@
+{"error":{"code":"GatewayUnavailable","details":{"status":"history_unavailable","gaps":[{"first":100,"last":200}]},"message":"history_unavailable: account range intersects a gap","num":10503}}
