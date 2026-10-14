@@ -1,0 +1,1 @@
+{"error":{"code":"NonceMismatch","num":20044,"message":"nonce mismatch: re-read GET /v1/account/nonce and sign again"}}

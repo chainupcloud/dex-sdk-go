@@ -37,6 +37,9 @@ func (e *Error) Error() string {
 // 本包不重试也不等待:同一个进程里往往有多个币对共用额度,退让多久、暂停哪个币对只有调用方知道。
 type RateLimitedError struct {
 	Err *Error
+	// Bucket 扣光的是哪个桶(v1.1 §4.1 的 `details.bucket`):"ip" | "account";"" = 服务端没给。
+	// 账户桶满说明这个账户的写太密,IP 桶满说明同一台机器上的总量太大 —— 两者的退让对象不同。
+	Bucket string
 	// RetryAfter 服务端 `retry-after` 给的等待时长;0 = 响应没带这个头。
 	RetryAfter time.Duration
 	// Limit / Remaining / Reset 来自 `ratelimit: limit=…, remaining=…, reset=…`(IETF 限流头);
@@ -103,7 +106,7 @@ func parseError(status int, header http.Header, raw []byte) error {
 }
 
 func rateLimited(e *Error, h http.Header) *RateLimitedError {
-	r := &RateLimitedError{Err: e}
+	r := &RateLimitedError{Err: e, Bucket: detailString(e.Details, "bucket")}
 	if s, err := strconv.Atoi(strings.TrimSpace(h.Get("retry-after"))); err == nil && s >= 0 {
 		r.RetryAfter = time.Duration(s) * time.Second
 	}

@@ -20,7 +20,8 @@ import (
 //   - 本包解码用到的每个 json 字段都必须是 schema 里有的属性 —— 字段名拼错、读了规格外的字段,在这里红。
 //
 // 校验器只实现规格里实际用到的 JSON Schema 子集:$ref、type(含类型数组)、required、properties、
-// items、prefixItems、enum、const、pattern。
+// items、prefixItems、enum、const、pattern、allOf、oneOf(按「至少一支通过」判:规格里的分支都是
+// 没有 additionalProperties 限制的宽松对象,严格的「恰好一支」会把合法响应判错)。
 
 func loadSpec(t testing.TB) map[string]any {
 	t.Helper()
@@ -121,10 +122,50 @@ func typeOK(want any, got string) bool {
 	return true
 }
 
+// requestSchema POST <path> 的请求体 schema。
+func requestSchema(t testing.TB, spec map[string]any, path string) map[string]any {
+	t.Helper()
+	op := obj(obj(obj(spec["paths"])[path])["post"])
+	s := obj(obj(obj(obj(op["requestBody"])["content"])["application/json"])["schema"])
+	if s == nil {
+		t.Fatalf("规格里没有 POST %s 的请求体 schema", path)
+	}
+	return s
+}
+
+// postResponseSchema POST <path> 的 <status> 响应体 schema。
+func postResponseSchema(t testing.TB, spec map[string]any, path, status string) map[string]any {
+	t.Helper()
+	op := obj(obj(obj(spec["paths"])[path])["post"])
+	s := obj(obj(obj(obj(obj(op["responses"])[status])["content"])["application/json"])["schema"])
+	if s == nil {
+		t.Fatalf("规格里没有 POST %s 的 %s 响应 schema", path, status)
+	}
+	return s
+}
+
 // validate 返回全部违反处(空 = 通过)。
 func validate(spec, schema map[string]any, v any, at string) []string {
 	s := deref(spec, schema)
 	var errs []string
+	for _, sub := range asSlice(s["allOf"]) {
+		errs = append(errs, validate(spec, obj(sub), v, at)...)
+	}
+	if alts := asSlice(s["oneOf"]); len(alts) > 0 {
+		var why []string
+		ok := false
+		for i, sub := range alts {
+			e := validate(spec, obj(sub), v, at)
+			if len(e) == 0 {
+				ok = true
+				break
+			}
+			why = append(why, fmt.Sprintf("分支 %d: %s", i, strings.Join(e, "; ")))
+		}
+		if !ok {
+			errs = append(errs, fmt.Sprintf("%s: oneOf 没有一支通过(%s)", at, strings.Join(why, " | ")))
+		}
+	}
 	if want, ok := s["type"]; ok && !typeOK(want, jsonType(v)) {
 		return []string{fmt.Sprintf("%s: 类型应为 %v,实为 %s", at, want, jsonType(v))}
 	}
@@ -195,6 +236,31 @@ var fixtureSchemas = []struct {
 	{"err409_epoch.json", "", "", "Error"},
 	{"err503_gaps.json", "", "", "Error"},
 	{"request_not_found.json", "", "", "Error"},
+	{"w_agents.json", "/v1/account/agents", "200", ""},
+	{"w_nonce_agent.json", "/v1/account/nonce", "200", ""},
+	{"w_nonce_account.json", "/v1/account/nonce", "200", ""},
+	{"err422_margin.json", "", "", "Error"},
+	{"err422_nonce.json", "", "", "Error"},
+	{"err422_unknown_agent.json", "", "", "Error"},
+	{"err401_sig.json", "", "", "Error"},
+	{"err429_account.json", "", "", "Error"},
+}
+
+// postFixtureSchemas 写接口回执的 fixture(形状照原生 v1 的 v1_write.rs 整理)。
+// status 为空表示规格没给这个响应的 body schema(目前只有 202),没有可校验的对象。
+var postFixtureSchemas = []struct {
+	file, path, status string
+}{
+	{"w_batch_place.json", "/v1/orders", "200"},
+	{"w_order.json", "/v1/orders", "200"},
+	{"w_batch_cancel.json", "/v1/orders/cancel", "200"},
+	{"w_cancel_one.json", "/v1/orders/cancel", "200"},
+	{"w_replace.json", "/v1/orders/replace", "200"},
+	{"w_cancel_all.json", "/v1/orders/cancel-all", "200"},
+	{"w_schedule.json", "/v1/orders/schedule-cancel", "200"},
+	{"w_leverage.json", "/v1/account/leverage", "200"},
+	{"w_approve.json", "/v1/account/agents/approve", "200"},
+	{"w_sequenced_202.json", "/v1/orders", ""},
 }
 
 func TestFixturesConformToPinnedSpec(t *testing.T) {
@@ -209,6 +275,15 @@ func TestFixturesConformToPinnedSpec(t *testing.T) {
 			schema = responseSchema(t, spec, f.path, f.status)
 		}
 		if errs := validate(spec, schema, loadJSON(t, filepath.Join("testdata", "fixtures", f.file)), f.file); len(errs) > 0 {
+			t.Errorf("%s 不符合规格:\n  %s", f.file, strings.Join(errs, "\n  "))
+		}
+	}
+	for _, f := range postFixtureSchemas {
+		seen[f.file] = true
+		if f.status == "" {
+			continue
+		}
+		if errs := validate(spec, postResponseSchema(t, spec, f.path, f.status), loadJSON(t, filepath.Join("testdata", "fixtures", f.file)), f.file); len(errs) > 0 {
 			t.Errorf("%s 不符合规格:\n  %s", f.file, strings.Join(errs, "\n  "))
 		}
 	}

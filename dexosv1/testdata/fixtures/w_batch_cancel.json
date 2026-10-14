@@ -1,0 +1,1 @@
+{"status":"ok","items":[{"index":0,"kind":"cancel","status":"canceled","symbol":"BTC-USD","orderId":"101","canceled":"0.5"},{"index":1,"kind":"cancel","status":"rejected","symbol":"BTC-USD","orderId":"999999","code":"UnknownOrder"}],"seq":501,"sub":0}

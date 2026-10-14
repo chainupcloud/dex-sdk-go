@@ -1,0 +1,1 @@
+{"status":"ok","items":[{"index":0,"kind":"place","status":"accepted","symbol":"BTC-USD","orderId":"101","filled":"0","resting":true},{"index":1,"kind":"place","status":"rejected","symbol":"BTC-USD","code":"InsufficientMargin"}],"seq":500,"sub":0}

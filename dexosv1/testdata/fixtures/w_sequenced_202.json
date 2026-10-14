@@ -1,0 +1,1 @@
+{"status":"sequenced","message":"sequenced but not yet folded; do not resend — poll GET /v1/requests/{requestId} or the account","seq":509,"sub":0}
