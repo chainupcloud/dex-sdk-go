@@ -20,9 +20,9 @@ type Exchange struct {
 		Tokens []Token `json:"tokens"`
 	} `json:"deposit"`
 	ServerTime int64 `json:"serverTime"`
-	// FundingTickSec 资金费结算周期(秒)。全局:所有永续市场同一个周期(v1.1 §4.9-12)。
-	// nil = 节点刚启动、读模型还没就绪,稍后重读;不要拿缺省值顶。
-	FundingTickSec *uint64 `json:"fundingTickSec"`
+	// FundingTickSec 资金费结算周期(秒,≥ 1)。全局:所有永续市场同一个周期(v1.1 §4.9-12)。
+	// 节点刚启动、还不知道它时整个响应是 503 GatewayUnavailable,稍后重读。
+	FundingTickSec uint64 `json:"fundingTickSec"`
 	// Version 网关的版本指纹。CodecVer 是它认的规范命令编码版本,与 dexos.CodecVersion 不同就签不出它认的命令。
 	Version struct {
 		CodecVer uint32 `json:"codecVer"`

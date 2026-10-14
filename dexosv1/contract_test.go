@@ -51,8 +51,8 @@ func TestContractReadOnly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Exchange: %v", err)
 	}
-	if ex.FundingTickSec == nil || *ex.FundingTickSec == 0 {
-		t.Errorf("fundingTickSec 应是正整数秒: %v", ex.FundingTickSec)
+	if ex.FundingTickSec == 0 {
+		t.Error("fundingTickSec 应是正整数秒")
 	}
 	conforms("/v1/exchange", nil, "/v1/exchange")
 

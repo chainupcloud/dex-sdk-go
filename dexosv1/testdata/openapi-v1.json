@@ -43,7 +43,7 @@
           "Exchange"
         ],
         "summary": "Connection parameters and conventions",
-        "description": "The single entry point for integrators: the EIP-712 domain, chainId, deposit system address, token table, version fingerprint, `serverTime` and the numeric conventions. **Never hard-code the domain**: after a chain change or a contract redeployment every signature fails with 401 while every read-only call keeps working.",
+        "description": "The single entry point for integrators: the EIP-712 domain, chainId, deposit system address, token table, version fingerprint, `serverTime`, the funding settlement period `fundingTickSec` and the numeric conventions. **Never hard-code the domain**: after a chain change or a contract redeployment every signature fails with 401 while every read-only call keeps working.",
         "operationId": "v1_exchange",
         "parameters": [],
         "responses": {
@@ -56,6 +56,9 @@
                 }
               }
             }
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
           }
         }
       }
@@ -5313,11 +5316,9 @@
             "description": "Unix time in milliseconds"
           },
           "fundingTickSec": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "description": "Funding settlement period in seconds. Global: every perpetual market settles on the same period (the matcher's funding configuration, carried in the snapshot; same value as `/config`). Spot markets have no funding. null only while this node's read model has not assembled its first generation (startup) — retry, never assume a default"
+            "type": "integer",
+            "description": "Funding settlement period in seconds. Global: every perpetual market settles on the same period (the matcher's funding configuration, carried in the snapshot; same value as `/config`). Spot markets have no funding. Never null: while this node does not know it yet (its read model has not assembled its first generation, right after startup) the whole response is 503 `GatewayUnavailable` — retry",
+            "minimum": 1
           },
           "version": {
             "type": "object",
