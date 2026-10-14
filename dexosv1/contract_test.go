@@ -74,8 +74,15 @@ func TestContractReadOnly(t *testing.T) {
 		t.Errorf("Book %s 的 depth = %d,问的是 5", m.Symbol, b.Depth)
 	}
 	conforms("/v1/markets/"+url.PathEscape(m.Symbol)+"/book", url.Values{"depth": {"5"}}, "/v1/markets/{symbol}/book")
-	if _, err := c.Prices(ctx, cat); err != nil {
+	ps, err := c.Prices(ctx, cat)
+	if err != nil {
 		t.Fatalf("Prices: %v", err)
+	}
+	for _, p := range ps.Prices {
+		// 下次结算时刻 = 上次 + 全局结算周期
+		if p.LastFundingMs != nil && (p.NextFundingMs == nil || *p.NextFundingMs != *p.LastFundingMs+int64(ex.FundingTickSec)*1000) {
+			t.Errorf("%s 的资金费时间表对不上周期 %ds: last %d next %v", p.Symbol, ex.FundingTickSec, *p.LastFundingMs, p.NextFundingMs)
+		}
 	}
 	conforms("/v1/prices", nil, "/v1/prices")
 	if _, err := c.Tickers(ctx, cat); err != nil {

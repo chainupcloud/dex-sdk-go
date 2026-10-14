@@ -163,7 +163,9 @@ func positionsFrom(cat *Catalog, in []wirePosition) ([]Position, error) {
 	return out, nil
 }
 
-// Order 一张在簿挂单。OrderID 是执行层订单序号(与 dexos 包的订单 seq 同一个数)。
+// Order 一张挂单:在簿的限价单,或待触发的条件单(Trigger 非 nil;止损 / 止盈,含仓位 TP/SL 腿)。
+// 条件单的 Side / Price / Lots / TIF 是触发后子单的,Status 同样是 open,也能按 OrderID 撤(v1.1 §4.10-7)。
+// OrderID 是执行层订单序号(与 dexos 包的订单 seq 同一个数)。
 type Order struct {
 	OrderID uint64
 	// ClientOrderID nil = 没有(只有带 clientOrderId 且等结论下单的单才有映射)。
@@ -175,6 +177,21 @@ type Order struct {
 	FilledLots    uint64
 	RemainingLots uint64
 	Status        string
+	// TIF "gtc" | "ioc" | "alo" | "fok",只有条件单有;nil = 在簿挂单(执行层不保留簿上单的 tif,`alo` 进簿后同 `gtc`)。
+	TIF *string
+	// ReduceOnly nil = 账户的挂单台账里没有这张单的记录。
+	ReduceOnly *bool
+	// Trigger nil = 在簿挂单。
+	Trigger *OrderTrigger
+}
+
+// OrderTrigger 条件单的触发条件:预言机价越过 Price 时,子单按限价(Order 的 Side / Price / Lots / TIF)进簿。
+type OrderTrigger struct {
+	Price uint32
+	// Above true = 预言机价 ≥ Price 时触发;false = ≤ Price 时触发。
+	Above bool
+	// PositionTpsl 仓位级 TP/SL:仓位归零时自动撤。
+	PositionTpsl bool
 }
 
 type wireOrder struct {
@@ -187,9 +204,19 @@ type wireOrder struct {
 	Filled        string  `json:"filled"`
 	Remaining     string  `json:"remaining"`
 	Status        string  `json:"status"`
+	TIF           *string `json:"tif"`
+	ReduceOnly    *bool   `json:"reduceOnly"`
+	// Trigger 条件单的触发条件;在簿挂单为 null
+	Trigger *wireOrderTrigger `json:"trigger"`
 }
 
-// Orders 账户的在簿挂单;symbol 为空 = 全市场。
+type wireOrderTrigger struct {
+	Price        string `json:"price"`
+	Above        bool   `json:"above"`
+	PositionTpsl bool   `json:"positionTpsl"`
+}
+
+// Orders 账户的挂单(含待触发的条件单,按 Order.Trigger 区分);symbol 为空 = 全市场。
 func (c *Client) Orders(ctx context.Context, cat *Catalog, ref AccountRef, symbol string) ([]Order, error) {
 	q, err := ref.values()
 	if err != nil {
@@ -221,7 +248,7 @@ func (w wireOrder) order(cat *Catalog) (Order, error) {
 	if err != nil {
 		return Order{}, err
 	}
-	o := Order{ClientOrderID: w.ClientOrderID, Symbol: w.Symbol, Side: w.Side, Status: w.Status}
+	o := Order{ClientOrderID: w.ClientOrderID, Symbol: w.Symbol, Side: w.Side, Status: w.Status, TIF: w.TIF, ReduceOnly: w.ReduceOnly}
 	if o.OrderID, err = strconv.ParseUint(w.OrderID, 10, 64); err != nil {
 		return Order{}, fmt.Errorf("dexosv1: 挂单 orderId %q: %w", w.OrderID, err)
 	}
@@ -235,6 +262,12 @@ func (w wireOrder) order(cat *Catalog) (Order, error) {
 	}{{"size", w.Size, &o.Lots}, {"filled", w.Filled, &o.FilledLots}, {"remaining", w.Remaining, &o.RemainingLots}} {
 		if *f.out, err = m.Scale.Lots(f.in); err != nil {
 			return Order{}, fmt.Errorf("dexosv1: 挂单 %s %s: %w", w.OrderID, f.name, err)
+		}
+	}
+	if w.Trigger != nil {
+		o.Trigger = &OrderTrigger{Above: w.Trigger.Above, PositionTpsl: w.Trigger.PositionTpsl}
+		if o.Trigger.Price, err = m.Scale.Ticks(w.Trigger.Price); err != nil {
+			return Order{}, fmt.Errorf("dexosv1: 挂单 %s trigger.price: %w", w.OrderID, err)
 		}
 	}
 	return o, nil

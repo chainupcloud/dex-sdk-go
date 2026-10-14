@@ -240,6 +240,7 @@ type wireOrderEvent struct {
 // SubscribeOrders 在挂单(`orders`)。订阅即推全市场挂单快照,之后每个下单 / 成交 / 撤单 / 过期一帧;
 // 本包维护在挂单集合:快照整体替换,status 为 open 即在挂、否则移除。帧与本地集合对不上、帧缺 status /
 // remaining 时不猜,退订重订换一帧新快照(期间 Syncing)。服务端自己算不出某帧时会直接重发快照。
+// 待触发的条件单也在集合里(Order.Trigger 非 nil):它被下单、触发、拒绝、自动撤时服务端重发快照,被撤时推 canceled 帧。
 func (st *Stream) SubscribeOrders(ref AccountRef, fn func(OrdersUpdate)) (*Subscription, error) {
 	sub, err := accountSub("orders", ref, true)
 	if err != nil {

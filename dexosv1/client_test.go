@@ -187,9 +187,18 @@ func TestAccountReads(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(orders) != 2 || orders[0].OrderID != 2240412712968 || *orders[0].ClientOrderID != "mm-1" || orders[0].Price != 24905 ||
+	if len(orders) != 3 || orders[0].OrderID != 2240412712968 || *orders[0].ClientOrderID != "mm-1" || orders[0].Price != 24905 ||
 		orders[0].Lots != 50 || orders[0].FilledLots != 10 || orders[0].RemainingLots != 40 || orders[1].ClientOrderID != nil || orders[1].Price != 84000 {
 		t.Fatalf("挂单不对: %+v", orders)
+	}
+	// 在簿挂单没有 tif / trigger;reduceOnly 台账里没有记录时为 null
+	if orders[0].TIF != nil || orders[0].Trigger != nil || orders[0].ReduceOnly == nil || *orders[0].ReduceOnly || orders[1].ReduceOnly != nil {
+		t.Fatalf("在簿挂单的 tif / reduceOnly / trigger 不对: %+v", orders[:2])
+	}
+	// 待触发的条件单(仓位止损):价量方向是子单的,触发价换成 tick
+	if o := orders[2]; o.Trigger == nil || *o.Trigger != (OrderTrigger{Price: 80500, Above: false, PositionTpsl: true}) ||
+		o.TIF == nil || *o.TIF != "gtc" || o.ReduceOnly == nil || !*o.ReduceOnly || o.Price != 80000 || o.Lots != 184 || o.Status != "open" {
+		t.Fatalf("条件单不对: %+v", o)
 	}
 
 	f.routes["/v1/account/agents"] = serve(t, 200, "agents.json")
@@ -244,6 +253,11 @@ func TestMarketDataReads(t *testing.T) {
 	}
 	if *e.BestBid != 24926 || *e.Mark != 24931 || e.Oracle != nil || e.PrevDayPrice != nil || *e.Volume24h != 0 {
 		t.Fatalf("ETH 价格不对: %+v", e)
+	}
+	// 资金费时间表:结算过的有指数与上次 / 下次时刻;还没结算过的时刻为 null
+	if *b.FundingIndex != "-1250" || *b.LastFundingMs != 1791884400012 || *b.NextFundingMs != 1791888000012 ||
+		*e.FundingIndex != "0" || e.LastFundingMs != nil || e.NextFundingMs != nil {
+		t.Fatalf("资金费时间表不对: BTC %+v / ETH %+v", b, e)
 	}
 
 	f.routes["/v1/markets/BTC-USD/candles"] = serve(t, 200, "candles.json")

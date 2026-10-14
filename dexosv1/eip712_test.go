@@ -131,14 +131,6 @@ func TestEIP712GoldenVectors(t *testing.T) {
 	}
 }
 
-// typeStringDeviations 钉住的规格里写错的类型串(本包按 dex-os crates/auth 的实际结构体签):路径 → 规格里的错写法。
-// 规格改好、同步副本后测试会红,提醒删掉条目。
-//   - /v1/vaults:规格写 `uint64 withdrawWindowS,uint64 withdrawDurationS`,auth 的 CREATE_MANAGED_VAULT_TYPE 是 uint32
-//     (旧 web/openapi.json 也是 uint32);按规格签会被 401。
-var typeStringDeviations = map[string]string{
-	"/v1/vaults": "CreateManagedVault(address owner,uint32 accountId,address manager,uint32 profitSharePpm,uint64 depositMinDurationMs,uint32 managerMinPortionPpm,uint32 managerLiqPortionPpm,uint64 withdrawWindowS,uint64 withdrawDurationS,uint128 depositCap,uint128 seedAmount,bytes32 depositorWhitelistHash,uint64 nonce)",
-}
-
 // 类型串与钉住的 OpenAPI `x-eip712.typeString` 逐字一致:服务端改了结构体而这里没跟,签名会被拒且只报 401。
 func TestEIP712TypeStringsMatchPinnedSpec(t *testing.T) {
 	spec := loadSpec(t)
@@ -158,13 +150,7 @@ func TestEIP712TypeStringsMatchPinnedSpec(t *testing.T) {
 		"/v1/vaults/{id}/config":     vaultConfigChangeType,
 	} {
 		got := obj(obj(obj(obj(spec["paths"])[path])["post"])["x-eip712"])["typeString"]
-		dev, known := typeStringDeviations[path]
-		switch {
-		case known && got == want:
-			t.Errorf("POST %s 的 typeString 已经改对,从 typeStringDeviations 里删掉", path)
-		case known && got != dev:
-			t.Errorf("POST %s 的 typeString 是 %v,登记的错写法是 %s,本包签 %s", path, got, dev, want)
-		case !known && got != want:
+		if got != want {
 			t.Errorf("POST %s 的 typeString 是 %v,本包签 %s", path, got, want)
 		}
 	}

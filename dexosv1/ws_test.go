@@ -571,7 +571,7 @@ func TestStreamOrdersStateMachine(t *testing.T) {
 	conn.push(t, "orders", orderFrame(map[string]any{"orderId": "5", "event": "canceled", "status": "canceled", "remaining": "0"}), 10, testEpoch, false)
 	conn.push(t, "orders", jsonObj(t, fixture(t, "orders.json"), nil), 11, testEpoch, true)
 	u := recv(t, ups)
-	if !u.Snapshot || u.Event != nil || len(u.Open) != 2 || u.Open[0].OrderID != 2240412712968 || *u.Open[0].ClientOrderID != "mm-1" ||
+	if !u.Snapshot || u.Event != nil || len(u.Open) != 3 || u.Open[0].OrderID != 2240412712968 || *u.Open[0].ClientOrderID != "mm-1" ||
 		u.Open[0].RemainingLots != 40 || u.Seq != 11 {
 		t.Fatalf("快照不对: %+v", u)
 	}
@@ -602,20 +602,34 @@ func TestStreamOrdersStateMachine(t *testing.T) {
 	// 协议代下的单(强平 / 金库熔断扫簿)成交:orderId 0、filled、余量 0,集合不变
 	conn.push(t, "orders", orderFrame(map[string]any{"orderId": "0", "event": "fill", "fillId": "14-0-0",
 		"lastFilled": "0.1", "remaining": "0", "status": "filled"}), 14, testEpoch, false)
-	if u = recv(t, ups); len(u.Open) != 3 || u.Event.OrderID != 0 || u.Event.Status != "filled" || u.Event.RemainingLots != 0 {
+	if u = recv(t, ups); len(u.Open) != 4 || u.Event.OrderID != 0 || u.Event.Status != "filled" || u.Event.RemainingLots != 0 {
 		t.Fatalf("协议代下单的成交不该改集合: %+v", u)
 	}
 	// 没挂上的下单结论(吃满):不进集合
 	conn.push(t, "orders", orderFrame(map[string]any{"orderId": "2240412712971", "event": "accepted", "status": "filled",
 		"side": "buy", "price": "2493.4", "size": "0.1", "filled": "0.1", "remaining": "0"}), 14, testEpoch, false)
-	if u = recv(t, ups); len(u.Open) != 3 {
+	if u = recv(t, ups); len(u.Open) != 4 {
 		t.Fatalf("吃满的单不该进集合: %+v", u)
 	}
 	// 撤单:移除
 	conn.push(t, "orders", orderFrame(map[string]any{"orderId": "2240412712969", "symbol": "BTC-USD", "event": "canceled", "status": "canceled",
 		"remaining": "0.002"}), 15, testEpoch, false)
-	if u = recv(t, ups); len(u.Open) != 2 || open(u)[2240412712969].OrderID != 0 {
+	if u = recv(t, ups); len(u.Open) != 3 || open(u)[2240412712969].OrderID != 0 {
 		t.Fatalf("撤单没移除: %+v", u)
+	}
+	// 撤待触发的条件单:canceled 帧,移除
+	conn.push(t, "orders", orderFrame(map[string]any{"orderId": "2240412712975", "symbol": "BTC-USD", "event": "canceled", "status": "canceled",
+		"remaining": "0.184"}), 15, testEpoch, false)
+	if u = recv(t, ups); len(u.Open) != 2 || open(u)[2240412712975].OrderID != 0 {
+		t.Fatalf("条件单撤了没移除: %+v", u)
+	}
+	// 下了 / 触发了条件单:服务端不推增量(事件不带价量方向),推一帧新快照整体替换
+	cond := map[string]any{"orderId": "2240412712976", "clientOrderId": nil, "symbol": "ETH-USD", "side": "buy", "price": "2400", "size": "0.5",
+		"filled": "0", "remaining": "0.5", "tif": "ioc", "reduceOnly": false, "trigger": map[string]any{"price": "2410", "above": true, "positionTpsl": false},
+		"status": "open"}
+	conn.push(t, "orders", map[string]any{"address": testAddr, "subaccount": 0, "orders": []any{cond}}, 15, testEpoch, true)
+	if u = recv(t, ups); !u.Snapshot || len(u.Open) != 1 || u.Open[0].Trigger == nil || u.Open[0].Trigger.Price != 24100 || !u.Open[0].Trigger.Above {
+		t.Fatalf("条件单的新快照不对: %+v", u)
 	}
 	// 对不上(说在挂、本地没有):不猜,退订重订换快照
 	conn.push(t, "orders", orderFrame(map[string]any{"orderId": "999", "event": "fill", "fillId": "16-0-0", "lastFilled": "0.1",

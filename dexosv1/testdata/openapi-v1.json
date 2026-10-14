@@ -183,7 +183,7 @@
           "Market data"
         ],
         "summary": "Price snapshot for all markets",
-        "description": "last / mark / oracle / best bid and ask / funding rate / open interest, plus rolling 24h statistics (`prevDayPrice`, `change24h`, `high24h`, `low24h`, `volume24h`, `quoteVolume24h`).\n\nThe 24h window is anchored at the latest block the analytics projection has seen (`BlockBegun{now_ms}`, the same clock as the candles), not the host wall clock: it is the 1440 one-minute buckets ending with the anchor's bucket, so every 24h field equals a hand calculation over the same window of 1-minute candles. Statistics are cached for at most 5 s. When they are unavailable (analytics store unreachable, or no block projected yet) `window24h` is null and all six 24h fields are null; the live price fields are unaffected.",
+        "description": "last / mark / oracle / best bid and ask / funding rate and schedule (`fundingIndex`, `lastFundingMs`, `nextFundingMs`) / open interest, plus rolling 24h statistics (`prevDayPrice`, `change24h`, `high24h`, `low24h`, `volume24h`, `quoteVolume24h`).\n\nThe 24h window is anchored at the latest block the analytics projection has seen (`BlockBegun{now_ms}`, the same clock as the candles), not the host wall clock: it is the 1440 one-minute buckets ending with the anchor's bucket, so every 24h field equals a hand calculation over the same window of 1-minute candles. Statistics are cached for at most 5 s. When they are unavailable (analytics store unreachable, or no block projected yet) `window24h` is null and all six 24h fields are null; the live price fields are unaffected.",
         "operationId": "v1_prices",
         "parameters": [
           {
@@ -903,7 +903,7 @@
           "Account"
         ],
         "summary": "Open orders",
-        "description": "All markets in one read-model query (one consistent view); `symbol` filters. `clientOrderId` is resolved from the execution history when only the sequence position was recorded (`ack=sequenced`); if that history is missing the whole request answers 503 instead of silently dropping the id.",
+        "description": "All markets in one read-model query (one consistent view); `symbol` filters. `clientOrderId` is resolved from the execution history when only the sequence position was recorded (`ack=sequenced`); if that history is missing the whole request answers 503 instead of silently dropping the id. Pending conditional orders are listed too (status `open`, with `trigger`; price / size / side are the child order's) and can be cancelled by `orderId` with `POST /v1/orders/cancel` (specification v1.1 §4.10-7).",
         "operationId": "v1_open_orders",
         "parameters": [
           {
@@ -2280,6 +2280,77 @@
         }
       }
     },
+    "/v1/account/pnl": {
+      "get": {
+        "tags": [
+          "Account"
+        ],
+        "summary": "Perpetual PnL composition",
+        "description": "Net inflow, realized / unrealized PnL and accrued funding per risk group, from one read-model view with the ledger totalled over the same log prefix (the same computation as the legacy `GET /equity`, which this replaces). Before answering the server checks Σ ledger entries == balances and the equity identity per group, and answers 500 rather than a self-contradictory snapshot. 503 while the read model has no complete generation yet or the execution history cannot be read; a non-USDC token without display metadata is 500 (amounts are never scaled by a guessed number of decimals).",
+        "operationId": "v1_account_pnl",
+        "parameters": [
+          {
+            "name": "address",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "pattern": "^0x[0-9a-f]{40}$",
+              "description": "EVM address (always lower-case in responses; case-insensitive in requests)"
+            },
+            "description": "Main wallet address (required unless `vault` is given)"
+          },
+          {
+            "name": "subaccount",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0
+            },
+            "description": "Subaccount index (0 = main account; in creation order)"
+          },
+          {
+            "name": "vault",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "description": "Vault id: read the vault's own account instead of a wallet's (specification v1.1 §4.3). Mutually exclusive with `address` / `subaccount` (400); an unknown vault is 404. The response then shows `vault` instead of `address` / `subaccount`."
+          },
+          {
+            "$ref": "#/components/parameters/MinSeq"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AccountPnl"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "412": {
+            "$ref": "#/components/responses/ReplicaBehind"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
     "/v1/requests/{requestId}": {
       "get": {
         "tags": [
@@ -2797,7 +2868,7 @@
           }
         },
         "x-eip712": {
-          "typeString": "CreateManagedVault(address owner,uint32 accountId,address manager,uint32 profitSharePpm,uint64 depositMinDurationMs,uint32 managerMinPortionPpm,uint32 managerLiqPortionPpm,uint64 withdrawWindowS,uint64 withdrawDurationS,uint128 depositCap,uint128 seedAmount,bytes32 depositorWhitelistHash,uint64 nonce)"
+          "typeString": "CreateManagedVault(address owner,uint32 accountId,address manager,uint32 profitSharePpm,uint64 depositMinDurationMs,uint32 managerMinPortionPpm,uint32 managerLiqPortionPpm,uint32 withdrawWindowS,uint32 withdrawDurationS,uint128 depositCap,uint128 seedAmount,bytes32 depositorWhitelistHash,uint64 nonce)"
         }
       }
     },
@@ -2928,7 +2999,7 @@
           "Trading"
         ],
         "summary": "Place order (single or batch)",
-        "description": "Limit / market / conditional orders. The **main wallet** signs `Order` (for a market order `price` is the protective price `mark × (1 ± slippage)` rounded away from the taker, as an integer; conditional orders sign `Conditional`). An **API wallet** (`signer`) signs `AgentExec` over the canonical-bytes hash of the inner `BatchPlace{account, orders, nowMs}`, and the envelope carries `nowMs`. An array body is a batch; only API wallets can batch (per-item `items[]`, always 200). `clientOrderId` is not part of the signature; it is accepted on both paths, reserved atomically before sequencing (a duplicate within the account is 409) and consumed once sequenced; look up and cancel by it. Results carry this command's taker fills (`fills[]`, `avgPrice`).",
+        "description": "Limit / market / conditional orders. The **main wallet** signs `Order` (for a market order `price` is the protective price `mark × (1 ± slippage)` rounded away from the taker, as an integer; conditional orders sign `Conditional`). An **API wallet** (`signer`) signs `AgentExec` over the canonical-bytes hash of the inner `BatchPlace{account, orders, nowMs}` (a conditional type: `PlaceConditional{account, market, side, price, lots, tif, reduceOnly, goodTilMs: 0, triggerPrice, triggerAbove, nowMs}`, never batched), and the envelope carries `nowMs`. An array body is a batch; only API wallets can batch (per-item `items[]`, always 200). `clientOrderId` is not part of the signature; it is accepted on both paths, reserved atomically before sequencing (a duplicate within the account is 409) and consumed once sequenced; look up and cancel by it. Results carry this command's taker fills (`fills[]`, `avgPrice`).",
         "operationId": "v1_place_order",
         "parameters": [
           {
@@ -3621,7 +3692,7 @@
           "Trading"
         ],
         "summary": "TWAP",
-        "description": "The parent order is split into `slices`, one every `intervalMs`; `priceTolerance` is a decimal relative to mark (`0.005` = 0.5%). Signed by the main wallet.",
+        "description": "The parent order is split into `slices`, one every `intervalMs`; `priceTolerance` is a decimal relative to mark (`0.005` = 0.5%). The main wallet signs `Twap`. An **API wallet** (`signer`) signs `AgentExec(keccak(canonical bytes), nonce)` over the inner `PlaceTwap{account, market, side, totalLots, slices, intervalMs, priceTolerancePpm, reduceOnly, nowMs}` instead, with the API wallet's own nonce (`GET /v1/account/nonce?signer=`); same precheck as API-wallet orders (specification v1.1 §4.10-10); the envelope carries `nowMs`. Not available as a vault (403).",
         "operationId": "v1_twap",
         "parameters": [
           {
@@ -3762,7 +3833,7 @@
           "Trading"
         ],
         "summary": "Position take-profit / stop-loss",
-        "description": "OCO: when one leg triggers the other is cancelled; with `positionTpsl=true` both are cancelled automatically when the position reaches zero. `closeSide` is the closing side; `limitPrice` defaults to the trigger price. Returns `orderIds` (both legs).",
+        "description": "OCO: when one leg triggers the other is cancelled; with `positionTpsl=true` both are cancelled automatically when the position reaches zero. `closeSide` is the closing side; `limitPrice` defaults to the trigger price. Returns `orderIds` (both legs). The main wallet signs `TpslPair`. An **API wallet** (`signer`) signs `AgentExec(keccak(canonical bytes), nonce)` over the inner `PlaceTpslPair{account, market, closeSide, lots, tpTrigger, tpPrice, slTrigger, slPrice, positionTpsl, parent: none, nowMs}` instead, with the API wallet's own nonce (`GET /v1/account/nonce?signer=`); same precheck as API-wallet orders (specification v1.1 §4.10-10); the envelope carries `nowMs`. Not available as a vault (403).",
         "operationId": "v1_tpsl",
         "parameters": [
           {
@@ -3937,7 +4008,7 @@
           "Account"
         ],
         "summary": "Set leverage",
-        "description": "An integer multiple; it can only be lowered (anything above the market default is `InvalidLeverage`).",
+        "description": "An integer multiple; it can only be lowered (anything above the market default is `InvalidLeverage`). The main wallet signs `Leverage`. An **API wallet** (`signer`) signs `AgentExec(keccak(canonical bytes), nonce)` over the inner `SetLeverage{account, market, customImfPpm}` instead, with the API wallet's own nonce (`GET /v1/account/nonce?signer=`); same precheck as API-wallet orders (specification v1.1 §4.10-10) (no `nowMs`).",
         "operationId": "v1_leverage",
         "parameters": [
           {
@@ -5685,6 +5756,30 @@
             "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
             "description": "Decimal string"
           },
+          "fundingIndex": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "pattern": "^-?[0-9]+$",
+            "description": "Cumulative funding index after the latest settlement, as an integer string (the same value as `fundingIndex` in `/v1/markets` and the `index` of the funding channel); null for spot"
+          },
+          "lastFundingMs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Block time of the latest funding settlement (Unix ms); null for spot and before the first settlement"
+          },
+          "nextFundingMs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "When the next funding settlement is due: `lastFundingMs + fundingTickSec × 1000` (`fundingTickSec` from `GET /v1/exchange`). Settlement happens at the first block whose time reaches it, so the actual time can be a block later. null for spot and before the first settlement"
+          },
           "openInterest": {
             "type": [
               "string",
@@ -6306,6 +6401,54 @@
             "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
             "description": "Decimal string"
           },
+          "tif": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "gtc",
+              "ioc",
+              "alo",
+              "fok",
+              null
+            ],
+            "description": "Time in force. Pending conditional orders: the child order's. Orders resting on the book: null — the execution layer's canonical state does not keep it once the order rests (a resting `alo` order behaves like `gtc`)"
+          },
+          "reduceOnly": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Reduce-only. Resting orders read it from the account's open-order ledger; null only if that ledger has no entry for the order"
+          },
+          "trigger": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "Pending conditional order (stop / take-profit, including position TP/SL legs): the order enters the book as a limit order (`price`, `size`, `side`, `tif`) when the oracle price crosses `price`. null for orders on the book",
+            "required": [
+              "price",
+              "above",
+              "positionTpsl"
+            ],
+            "properties": {
+              "price": {
+                "type": "string",
+                "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
+                "description": "Decimal string"
+              },
+              "above": {
+                "type": "boolean",
+                "description": "true = triggers when the oracle price is at or above `price`; false = at or below"
+              },
+              "positionTpsl": {
+                "type": "boolean",
+                "description": "Position-level TP/SL: cancelled automatically when the position reaches zero"
+              }
+            }
+          },
           "status": {
             "type": "string",
             "enum": [
@@ -6741,7 +6884,7 @@
           "nowMs": {
             "type": "integer",
             "format": "int64",
-            "description": "**Required on the API-wallet path**: the timestamp of the inner `BatchPlace` / `BatchReplace` command, part of the signed hash"
+            "description": "**Required on the API-wallet path** wherever the inner command carries a timestamp (`BatchPlace` / `BatchReplace` / `PlaceConditional` / `PlaceTwap` / `PlaceTpslPair` / `ScheduleCancel`): it is part of the signed hash"
           },
           "signature": {
             "type": "string",
@@ -6886,6 +7029,26 @@
               "rejected",
               "autocanceled"
             ]
+          },
+          "side": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "buy",
+              "sell",
+              null
+            ],
+            "description": "Order side, given on `accepted`, `fill` (this account's side of the fill) and `placed` (the conditional order's child side) rows; null on the others, whose events carry no side — take it from the order's earlier rows"
+          },
+          "ts": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Ledger time of the block the event happened in (Unix ms, the same clock as fills' `ts`); null when unknown (no block before it, or a history gap in between)"
           },
           "price": {
             "type": "string",
@@ -8247,6 +8410,83 @@
             "type": "boolean"
           }
         }
+      },
+      "AccountPnl": {
+        "type": "object",
+        "description": "Perpetual PnL composition per risk group at one watermark (specification v1.1 §4.10-6): the parts of the legacy `GET /equity` a client shows. Amounts are decimal strings in the group's collateral token. Identity: `equity = netInflow + realizedPnl + unrealizedPnl + accruedFunding + Σ other ledger entries` (fees, rebates, settled funding, liquidations, …)",
+        "required": [
+          "epoch",
+          "asOfSeq",
+          "groups"
+        ],
+        "properties": {
+          "address": {
+            "type": "string",
+            "pattern": "^0x[0-9a-f]{40}$",
+            "description": "EVM address (always lower-case in responses; case-insensitive in requests)"
+          },
+          "subaccount": {
+            "type": "integer"
+          },
+          "vault": {
+            "type": "integer",
+            "description": "Present instead of `address` / `subaccount` when the request addressed a vault (`vault=<id>`, specification v1.1 §4.3)"
+          },
+          "epoch": {
+            "type": "string",
+            "description": "Ledger epoch"
+          },
+          "asOfSeq": {
+            "type": "integer",
+            "format": "uint64",
+            "description": "Log position the snapshot covers: balances and positions come from the read-model view at it and the ledger entries are totalled up to it"
+          },
+          "groups": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "token",
+                "equity",
+                "netInflow",
+                "realizedPnl",
+                "unrealizedPnl",
+                "accruedFunding"
+              ],
+              "properties": {
+                "token": {
+                  "type": "string",
+                  "description": "Collateral token symbol of the risk group"
+                },
+                "equity": {
+                  "type": "string",
+                  "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
+                  "description": "Net equity of the group"
+                },
+                "netInflow": {
+                  "type": "string",
+                  "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
+                  "description": "Σ external entries: deposits, withdrawals, transfers, vault flows"
+                },
+                "realizedPnl": {
+                  "type": "string",
+                  "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
+                  "description": "Σ position consideration (trades, liquidation trades, ADL, settlement) + Σ cost basis of open positions"
+                },
+                "unrealizedPnl": {
+                  "type": "string",
+                  "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
+                  "description": "Σ(position value at the mark price − cost basis)"
+                },
+                "accruedFunding": {
+                  "type": "string",
+                  "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
+                  "description": "Funding accrued but not yet applied to the balance (settled when the position is touched)"
+                }
+              }
+            }
+          }
+        }
       }
     }
   },
@@ -8294,10 +8534,16 @@
       "error": {
         "channel": "error",
         "data": {
-          "code": "GatewayBadRequest",
-          "message": "unknown channel …"
+          "code": "GatewayNotFound",
+          "message": "no such subscription on this connection",
+          "method": "unsubscribe",
+          "subscription": {
+            "channel": "book",
+            "symbol": "BTC-USD",
+            "depth": 50
+          }
         },
-        "id": 7
+        "id": 2
       },
       "lagged": {
         "channel": "lagged",
@@ -8317,8 +8563,9 @@
       }
     },
     "rules": [
-      "Snapshot channels (book / bbo / prices / account / positions / orders) send one frame with `isSnapshot:true` on subscribe. book / bbo / prices / account / positions are then coalesced per block: events only mark them, and at each block boundary (`BlockBegun`, about once a second) each is read once and pushed only if its data changed (`isSnapshot:false`). account / positions of an account that holds positions are also re-read when marks or funding move.",
-      "orders: the snapshot is all open orders across markets; after it every accept / fill / cancel / expiry is one frame with `clientOrderId` (if any) and `status` (open / filled / canceled / expired). Apply frames idempotently by `orderId`: a snapshot replaces the set, any other frame keeps the order if `status` is `open` and removes it otherwise. Order events already covered by the snapshot's view are not sent. `status` and `remaining` are always present: a taker's fill frames repeat the order's state at the end of the command (the same as its `accepted` frame); fills of protocol orders (liquidation, vault halt; `orderId` `\"0\"`, no `accepted`) are `filled` with `remaining` 0. When the connection cannot work them out it sends a fresh `isSnapshot:true` frame instead of an incomplete one.",
+      "Snapshot channels (book / bbo / prices / account / positions / orders) send one frame with `isSnapshot:true` on subscribe. book / bbo / prices / account / positions are then coalesced per block: events only mark them, and at each block boundary (`BlockBegun`, about once a second) each is read once and pushed only if its data changed (`isSnapshot:false`). account / positions of an account that holds positions are also re-read when marks or funding move, and those of any account whose ledger moved in the block (from the execution history's per-account ledger index — e.g. a vault redemption, whose events do not name the vault) are re-read at the block boundary (specification v1.1 §4.10-4).",
+      "Error frames answering a `subscribe` / `unsubscribe` carry the request `id` (when the request had one), `data.method` and `data.subscription` (the request's `params` verbatim), so a client can tell which request was refused. Unsubscribing a subscription the connection does not have is an error (`GatewayNotFound`), not `unsubscribed`. Error frames without `id` or `subscription` only answer malformed frames (specification v1.1 §4.10-3).",
+      "orders: the snapshot is all open orders across markets; after it every accept / fill / cancel / expiry is one frame with `clientOrderId` (if any) and `status` (open / filled / canceled / expired). Apply frames idempotently by `orderId`: a snapshot replaces the set, any other frame keeps the order if `status` is `open` and removes it otherwise. Order events already covered by the snapshot's view are not sent. `status` and `remaining` are always present: a taker's fill frames repeat the order's state at the end of the command (the same as its `accepted` frame); fills of protocol orders (liquidation, vault halt; `orderId` `\"0\"`, no `accepted`) are `filled` with `remaining` 0. When the connection cannot work them out it sends a fresh `isSnapshot:true` frame instead of an incomplete one. Pending conditional orders are part of the snapshot (rows with `trigger`); when one is placed, triggered, rejected or auto-cancelled a fresh snapshot is sent (those events carry no side / price / size), and cancelling one sends a `canceled` frame.",
       "The candles channel sends one frame per fill with **the latest state of the current bar** (o/h/l/c/v accumulated; clients keep the last frame); a new bar starts automatically when the interval rolls over.",
       "Time-series channels (trades / fills / ledger / events) carry `seq`; trades / fills / events send one frame per event with `data.id`, ledger one frame per command with `data.entries[]`. The fills `data.id`, and the last `data.entries[].id` of a ledger frame, are the `after` cursors of `/v1/account/fills` and `/v1/account/ledger`.",
       "Resume: the subscribe ack carries the ledger `epoch` and the start position `seq`: every event after `seq` is sent on the subscription (unless a `lagged` follows); backfill time series up to `upper=<seq>-65535-4294967295` over REST and de-duplicate by `id` to join without gaps. Private frames carry `epoch` and `seq`, public book / bbo frames carry `seq`. `lagged{dropped, epoch, upper, reason}` means frames were not sent: `reason: buffer` = the server-side broadcast fell behind and `dropped` events were dropped; `reason: render` = the connection could not render time-series frames (execution history unreadable, market metadata missing; `dropped` is 0). **Frames not sent are never resent**. Right after it every snapshot subscription receives one `isSnapshot:true` frame, and fills / ledger frames at or before `upper` are no longer sent: backfill them with `after=<last id received>&epoch=<epoch>&upper=<upper>` (retry later on 400 `GatewayHistoryIncomplete`); the two parts join without gaps or duplicates. If `epoch` changed after a reconnect, rebuild state instead of resuming old cursors.",

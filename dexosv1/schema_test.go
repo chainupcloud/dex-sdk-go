@@ -334,6 +334,7 @@ func TestDecodedFieldsExistInPinnedSpec(t *testing.T) {
 		{"Account.leverage[]", reflect.TypeFor[MarketLeverage](), props(obj(obj(schema("Account")["leverage"])["items"]))},
 		{"Position", reflect.TypeFor[wirePosition](), schema("Position")},
 		{"Order", reflect.TypeFor[wireOrder](), schema("Order")},
+		{"Order.trigger", reflect.TypeFor[wireOrderTrigger](), props(obj(schema("Order")["trigger"]))},
 		{"Fill", reflect.TypeFor[wireFill](), schema("Fill")},
 		{"LedgerEntry", reflect.TypeFor[LedgerEntry](), schema("LedgerEntry")},
 		{"Nonce", reflect.TypeFor[Nonce](), schema("Nonce")},

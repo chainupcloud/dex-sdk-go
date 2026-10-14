@@ -328,6 +328,13 @@ type Price struct {
 	BestAsk      *uint32
 	FundingRate  *string
 	OpenInterest *uint64
+	// FundingIndex 最近一次结算后的累计资金费指数(整数串,与 `/v1/markets` 的 fundingIndex 同值);nil = 现货。
+	FundingIndex *string
+	// LastFundingMs 最近一次资金费结算的区块时间(Unix 毫秒);NextFundingMs 下一次应结的时刻
+	// (LastFundingMs + Exchange.FundingTickSec×1000,在第一个时间到点的区块结,实际可能晚一个块)。
+	// nil = 现货或还没结算过。
+	LastFundingMs *int64
+	NextFundingMs *int64
 	// PrevDayPrice / High24h / Low24h 滚动 24h 窗口的起点价、最高、最低。
 	PrevDayPrice *uint32
 	High24h      *uint32
@@ -347,6 +354,9 @@ type wirePrice struct {
 	BestBid        *string `json:"bestBid"`
 	BestAsk        *string `json:"bestAsk"`
 	FundingRate    *string `json:"fundingRate"`
+	FundingIndex   *string `json:"fundingIndex"`
+	LastFundingMs  *int64  `json:"lastFundingMs"`
+	NextFundingMs  *int64  `json:"nextFundingMs"`
 	OpenInterest   *string `json:"openInterest"`
 	PrevDayPrice   *string `json:"prevDayPrice"`
 	Change24h      *string `json:"change24h"`
@@ -392,7 +402,8 @@ func (w wirePrices) prices(cat *Catalog) (*Prices, error) {
 		if err != nil {
 			return nil, err
 		}
-		p := Price{Symbol: wp.Symbol, FundingRate: wp.FundingRate, Change24h: wp.Change24h, QuoteVolume24h: wp.QuoteVolume24h}
+		p := Price{Symbol: wp.Symbol, FundingRate: wp.FundingRate, FundingIndex: wp.FundingIndex, LastFundingMs: wp.LastFundingMs,
+			NextFundingMs: wp.NextFundingMs, Change24h: wp.Change24h, QuoteVolume24h: wp.QuoteVolume24h}
 		if p.Last, err = m.Scale.Ticks(wp.Last); err != nil {
 			return nil, fmt.Errorf("dexosv1: %s last: %w", wp.Symbol, err)
 		}
