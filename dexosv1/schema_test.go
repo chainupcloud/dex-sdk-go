@@ -249,6 +249,7 @@ var fixtureSchemas = []struct {
 	{"portfolio.json", "/v1/account/portfolio", "200", ""},
 	{"agent_grants.json", "/v1/agents/{address}", "200", ""},
 	{"my_vaults.json", "/v1/account/vaults", "200", ""},
+	{"subaccounts.json", "/v1/account/subaccounts", "200", ""},
 	{"vault.json", "/v1/vaults/{id}", "200", ""},
 	{"vaults.json", "/v1/vaults", "200", ""},
 	{"account_vault.json", "/v1/account", "200", ""},
@@ -334,6 +335,7 @@ func TestDecodedFieldsExistInPinnedSpec(t *testing.T) {
 		{"Agent", reflect.TypeFor[Agent](), schema("Agent")},
 		{"Exchange", reflect.TypeFor[Exchange](), exchange},
 		{"Exchange.domain", reflect.TypeFor[Exchange]().Field(1).Type, props(obj(exchange["domain"]))},
+		{"Exchange.version", reflect.TypeFor[Exchange]().Field(4).Type, props(obj(exchange["version"]))},
 		{"Exchange.deposit.tokens[]", reflect.TypeFor[Token](), props(obj(obj(props(obj(exchange["deposit"]))["tokens"])["items"]))},
 		{"Account.groups[]", reflect.TypeFor[RiskGroup](), props(obj(obj(schema("Account")["groups"])["items"]))},
 		{"Price", reflect.TypeFor[wirePrice](), schema("Price")},
@@ -346,6 +348,8 @@ func TestDecodedFieldsExistInPinnedSpec(t *testing.T) {
 		{"AgentGrant", reflect.TypeFor[AgentGrant](), schema("AgentGrant")},
 		{"MyVaultPosition", reflect.TypeFor[VaultPosition](), myVault},
 		{"MyVaultPosition.withdrawable", reflect.TypeFor[VaultPosition]().Field(11).Type, props(obj(myVault["withdrawable"]))},
+		{"Market.fees", reflect.TypeFor[MarketFees](), props(obj(schema("Market")["fees"]))},
+		{"Subaccount", reflect.TypeFor[Subaccount](), schema("Subaccount")},
 	}
 	for _, c := range cases {
 		if c.props == nil {

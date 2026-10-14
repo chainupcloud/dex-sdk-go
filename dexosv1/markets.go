@@ -20,6 +20,10 @@ type Exchange struct {
 		Tokens []Token `json:"tokens"`
 	} `json:"deposit"`
 	ServerTime int64 `json:"serverTime"`
+	// Version 网关的版本指纹。CodecVer 是它认的规范命令编码版本,与 dexos.CodecVersion 不同就签不出它认的命令。
+	Version struct {
+		CodecVer uint32 `json:"codecVer"`
+	} `json:"version"`
 }
 
 // Token 一个资产。Token 是签名结构体里的数字 id(Withdrawal / Transfer 用),Decimals 是金额的小数位:
@@ -66,26 +70,38 @@ type Market struct {
 	OpenInterest *uint64
 	// FundingRate 当前小时资金费率(十进制,`0.0001` = 0.01%);nil = 现货。
 	FundingRate *string
+	// Fees 本市场的费率;nil = 服务端没给。RateSource 为 "market" 时 taker / maker 按这里收,
+	// 为 "tier" 时按账户档位([Account] 的 TakerFee / MakerFee)收。
+	Fees *MarketFees
+}
+
+// MarketFees 市场的费率(十进制比例,maker 为负 = 返佣)。
+type MarketFees struct {
+	// RateSource "market" | "tier"。
+	RateSource string `json:"rateSource"`
+	TakerRate  string `json:"takerRate"`
+	MakerRate  string `json:"makerRate"`
 }
 
 // wireMarket `components.schemas.Market` 的线上形状。
 type wireMarket struct {
-	Symbol          string  `json:"symbol"`
-	SigningMarketID uint16  `json:"signingMarketId"`
-	Kind            string  `json:"kind"`
-	Status          string  `json:"status"`
-	MarginMode      string  `json:"marginMode"`
-	PriceDecimals   uint8   `json:"priceDecimals"`
-	SizeDecimals    uint8   `json:"sizeDecimals"`
-	MinNotional     string  `json:"minNotional"`
-	MaxLeverage     *uint32 `json:"maxLeverage"`
-	LastPrice       string  `json:"lastPrice"`
-	OraclePrice     *string `json:"oraclePrice"`
-	MarkPrice       *string `json:"markPrice"`
-	BestBid         *string `json:"bestBid"`
-	BestAsk         *string `json:"bestAsk"`
-	OpenInterest    *string `json:"openInterest"`
-	FundingRate     *string `json:"fundingRate"`
+	Symbol          string      `json:"symbol"`
+	SigningMarketID uint16      `json:"signingMarketId"`
+	Kind            string      `json:"kind"`
+	Status          string      `json:"status"`
+	MarginMode      string      `json:"marginMode"`
+	PriceDecimals   uint8       `json:"priceDecimals"`
+	SizeDecimals    uint8       `json:"sizeDecimals"`
+	MinNotional     string      `json:"minNotional"`
+	MaxLeverage     *uint32     `json:"maxLeverage"`
+	LastPrice       string      `json:"lastPrice"`
+	OraclePrice     *string     `json:"oraclePrice"`
+	MarkPrice       *string     `json:"markPrice"`
+	BestBid         *string     `json:"bestBid"`
+	BestAsk         *string     `json:"bestAsk"`
+	OpenInterest    *string     `json:"openInterest"`
+	FundingRate     *string     `json:"fundingRate"`
+	Fees            *MarketFees `json:"fees"`
 }
 
 func (w wireMarket) market() (Market, error) {
@@ -99,6 +115,7 @@ func (w wireMarket) market() (Market, error) {
 		MinNotional:     w.MinNotional,
 		MaxLeverage:     w.MaxLeverage,
 		FundingRate:     w.FundingRate,
+		Fees:            w.Fees,
 	}
 	if w.Symbol == "" {
 		return Market{}, fmt.Errorf("dexosv1: 市场缺 symbol")

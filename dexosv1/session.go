@@ -64,6 +64,7 @@ type nonceGuard struct {
 //   - 422 执行层拒绝:NonceMismatch → 锁(本地计数器不可信);preConsume 里的其余拒因 → 不动,不锁;
 //     其余(InsufficientMargin 等业务拒绝)→ ++,不锁。都是终局结论,锁住只会让一笔保证金不足停掉整个做市进程。
 //   - ErrPending(202)、ErrIncompleteBatch、传输失败、5xx、回执解析失败:结论未知或本地看不全 → 锁定。
+//   - 写前日志自身失败([ReplaceJournal]):不论场所的结论,本地没记下来 → 锁定。
 func (g *nonceGuard) run(ctx context.Context, f func(nonce uint64) (*RequestIdentity, error)) error {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -78,11 +79,12 @@ func (g *nonceGuard) run(ctx context.Context, f func(nonce uint64) (*RequestIden
 		g.nonce++
 		return nil
 	}
-	if errors.Is(err, errNotSent) {
+	var je *journalError
+	if errors.Is(err, errNotSent) && !errors.As(err, &je) {
 		return err
 	}
 	var e *Error
-	if errors.As(err, &e) && e.Code != "NonceMismatch" {
+	if !errors.As(err, &je) && errors.As(err, &e) && e.Code != "NonceMismatch" {
 		switch {
 		case beforeSequencing[e.Status]:
 			return err
