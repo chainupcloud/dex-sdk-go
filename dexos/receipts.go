@@ -221,7 +221,7 @@ func (r *RequestReceipt) CheckReplace(req ReplaceRequest) error {
 }
 
 // RequestID 服务端对这次请求的身份:keccak256(代理地址 ‖ SigningHash)。
-// 与 dex-os crates/kernel/src/engine/authn.rs `SignedRequest::request_id` 同一定义。
+// 与 dex-os crates/core/src/engine/authn.rs `SignedRequest::request_id` 同一定义。
 func (id AgentRequestIdentity) RequestID() (string, error) {
 	digest, err := decodeHash32(id.SigningHash)
 	if err != nil {

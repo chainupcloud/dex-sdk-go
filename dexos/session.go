@@ -267,7 +267,7 @@ func (s *Session) Resync(ctx context.Context) error {
 //   - 成功:nonce 已消耗 → 本地 ++。
 //   - *RejectedError(nonce 之后的业务拒绝,如 InsufficientMargin / MarketNotTrading):
 //     内核按 验签 → 归属 → 注册 → scope → 有效期 → nonce → 业务 检查
-//     (crates/kernel/src/engine/authn.rs),拒在业务这一步时计数器已写入且 apply 不回滚
+//     (dex-os crates/core/src/engine/authn.rs),拒在业务这一步时计数器已写入且 apply 不回滚
 //     → 本地 ++,**不锁**:结论是终局的,没有未决风险,锁住只会让一笔保证金不足停掉整个做市进程。
 //   - *RejectedError(nonce 之前的拒绝,如 AgentScopeViolation / UnknownAgent):
 //     计数器没动 → 本地不变,**不锁**:同样是终局结论。
