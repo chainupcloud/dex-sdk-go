@@ -101,12 +101,12 @@ func (e *RejectedError) Error() string {
 // ReasonNonceMismatch 认证层的 nonce 不符。
 const ReasonNonceMismatch = "NonceMismatch"
 
-// rejectedBeforeNonce 这些拒因发生在内核写入 agent nonce **之前**
-// (crates/kernel/src/engine/authn.rs:验签 → 归属 → 注册 → scope → 有效期 → nonce),
-// 所以计数器没有前进;其余拒因都在 nonce 写入之后、apply 不回滚,计数器已前进。
-// Session 靠这条边界决定本地 nonce 要不要 ++。
+// rejectedBeforeNonce 这些拒因发生在内核写入 nonce **之前**,所以计数器没有前进;
+// 其余拒因都在 nonce 写入之后、apply 不回滚,计数器已前进。Session 靠这条边界决定本地 nonce 要不要 ++。
+// 逐项对齐 dex-os crates/core/src/engine/authn.rs `AuthState::PRE_CONSUME_REJECTIONS`。
 var rejectedBeforeNonce = map[string]bool{
-	"BadSignature": true, "SignatureExpired": true, "UnboundSigner": true,
-	"UnknownAgent": true, "AgentExpired": true, "AgentScopeViolation": true,
-	"AgentMasterMismatch": true, "AuthUnavailable": true, ReasonNonceMismatch: true,
+	"SignatureExpired": true, "BadSignature": true, "AuthUnavailable": true,
+	"UnboundSigner": true, "UnknownAgent": true, "AgentScopeViolation": true,
+	"AgentExpired": true, ReasonNonceMismatch: true,
+	"VaultNoManager": true, // 金库主账户没有 manager:绑定那一步就拒
 }

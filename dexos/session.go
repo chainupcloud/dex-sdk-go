@@ -35,6 +35,8 @@ type Session struct {
 	mu      sync.Mutex
 	nonce   uint64
 	blocked error
+	// manager 以金库身份交易时授权所在的 manager 账户;普通会话为 nil,授权就在 Account 上。
+	manager *uint32
 }
 
 // ErrSessionBlocked 表示上次写入尚未核对，禁止继续消耗 nonce。
@@ -71,6 +73,8 @@ type Option func(*newOpts)
 type newOpts struct {
 	account    uint32
 	hasAccount bool
+	vault      uint16
+	hasVault   bool
 }
 
 // ForAccount 指明这次会话代哪个账户。
@@ -79,6 +83,24 @@ type newOpts struct {
 // 只是给抄错留位置。被多个账户授权时则必须用,否则 New 返回 ErrAmbiguousAccount。
 func ForAccount(id uint32) Option {
 	return func(o *newOpts) { o.account, o.hasAccount = id, true }
+}
+
+// ForVault 以金库身份交易:会话账户是金库主账户,这把 key 的授权要批在 manager 账户上。
+//
+// 金库主账户没有 owner,也授权不了 API 钱包 —— 对它批的授权会被接受,但永远用不上。
+// dex-os 代执行时把主账户解析成 manager 账户,按 (agent, manager 账户) 查授权;
+// agent 的 nonce 照旧按 agent 地址计。
+//
+//	s, err := dexos.New(ctx, url, apiKey, dexos.ForVault(3))
+//	s.Account // 金库主账户;下单、换单、撤单都签它
+//
+// New 读一次 /vaults/:id 取主账户与 manager 地址,manager 账户取该地址的主账户
+// (与 /account/by-address 同口径;网关只给 manager 地址、不给账户号,用子账户认领的金库
+// 在这里会被当成主账户来核授权)。金库未认领返回 ErrVaultUnclaimed,不存在返回
+// ErrVaultNotFound;manager 账户没授权或授权过期时报错,口径同 ForAccount。
+// 金库熔断(TradingHalt)不拦:会话照开,读和撤单照常,下单由 dex-os 拒。与 ForAccount 互斥。
+func ForVault(id uint16) Option {
+	return func(o *newOpts) { o.vault, o.hasVault = id, true }
 }
 
 // New 初始化一个交易会话。**这是大多数接入方唯一需要调用的构造函数。**
@@ -105,6 +127,9 @@ func New(ctx context.Context, baseURL, apiKeyHex string, opts ...Option) (*Sessi
 	for _, f := range opts {
 		f(&o)
 	}
+	if o.hasAccount && o.hasVault {
+		return nil, errors.New("dexos: ForAccount 与 ForVault 只能选一个 —— 以金库身份交易时会话账户就是金库主账户")
+	}
 	agent, err := NewSigner(apiKeyHex)
 	if err != nil {
 		return nil, fmt.Errorf("dexos: API 钱包私钥无法解析:%w", err)
@@ -117,8 +142,25 @@ func New(ctx context.Context, baseURL, apiKeyHex string, opts ...Option) (*Sessi
 	if err != nil {
 		return nil, err
 	}
+	var vault *Vault
+	if o.hasVault {
+		if vault, err = c.Vault(ctx, o.vault); err != nil {
+			return nil, err
+		}
+		if vault.Manager == nil {
+			return nil, fmt.Errorf("%w: 金库 %d", ErrVaultUnclaimed, o.vault)
+		}
+		ref, err := c.AccountByAddress(ctx, vault.Manager.Hex())
+		if err != nil {
+			return nil, fmt.Errorf("dexos: 金库 %d 的 manager %s 查不到账户: %w", o.vault, vault.Manager.Hex(), err)
+		}
+		o.account, o.hasAccount = ref.AccountID, true
+	}
 	g, err := pick(resp.Grants, o)
 	if err != nil {
+		if vault != nil {
+			return nil, fmt.Errorf("%w(金库 %d 的授权要批在 manager 账户 %d 上)", err, o.vault, o.account)
+		}
 		return nil, err
 	}
 	until, err := strconv.ParseUint(g.ValidUntilMs, 10, 64)
@@ -128,14 +170,18 @@ func New(ctx context.Context, baseURL, apiKeyHex string, opts ...Option) (*Sessi
 	if until != 0 && uint64(time.Now().UnixMilli()) >= until {
 		return nil, ErrAgentExpired
 	}
-	return &Session{
+	s := &Session{
 		Client:       c,
 		Config:       cfg,
 		Agent:        agent,
 		Account:      g.Master,
 		ValidUntilMs: until,
 		nonce:        resp.NextNonce,
-	}, nil
+	}
+	if vault != nil {
+		s.Account, s.manager = vault.MainAccount, &g.Master
+	}
+	return s, nil
 }
 
 // pick 从授权列表里选出这次会话代哪个账户。
@@ -202,7 +248,11 @@ func (s *Session) Resync(ctx context.Context) error {
 	if s.blocked != nil {
 		return s.blocked
 	}
-	n, err := s.Client.AgentNonce(ctx, s.Account, s.Agent.Address())
+	master := s.Account
+	if s.manager != nil {
+		master = *s.manager // 金库主账户名下没有授权,agent 登记在 manager 账户上
+	}
+	n, err := s.Client.AgentNonce(ctx, master, s.Agent.Address())
 	if err != nil {
 		return err
 	}
@@ -217,7 +267,7 @@ func (s *Session) Resync(ctx context.Context) error {
 //   - 成功:nonce 已消耗 → 本地 ++。
 //   - *RejectedError(nonce 之后的业务拒绝,如 InsufficientMargin / MarketNotTrading):
 //     内核按 验签 → 归属 → 注册 → scope → 有效期 → nonce → 业务 检查
-//     (crates/kernel/src/engine/authn.rs),拒在业务这一步时计数器已写入且 apply 不回滚
+//     (dex-os crates/core/src/engine/authn.rs),拒在业务这一步时计数器已写入且 apply 不回滚
 //     → 本地 ++,**不锁**:结论是终局的,没有未决风险,锁住只会让一笔保证金不足停掉整个做市进程。
 //   - *RejectedError(nonce 之前的拒绝,如 AgentScopeViolation / UnknownAgent):
 //     计数器没动 → 本地不变,**不锁**:同样是终局结论。

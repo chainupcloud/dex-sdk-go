@@ -202,6 +202,28 @@ Go SDK:`s.Fills(ctx, dexos.FillQuery{After: lastSeenID, Epoch: lastEpoch})` **�
 视图领先于持久历史时得到 `ErrHistoryUpperIncomplete`,稍后用同一上界重读。`/ledger` 同一套,另有 `external=true`
 只要入金、出金、转账、金库等外部资金往来(`LedgerQuery.External`,与 `kind` 互斥)。
 
+### `GET /vaults/:id` · `GET /vaults`
+
+单个金库详情 / 全部金库(`{"vaults":[…]}`,每行与详情同形)。SDK 的 `Client.Vault` / `Client.Vaults`
+只取以金库身份交易和做准入要用的字段:
+
+```json
+{"vault":6,"name":"…","mainAccount":29,"manager":"0x…","hasManager":true,"tradingHalt":false,
+ "whitelist":null,"blacklist":[],"maxLeverages":[{"market":0,"symbol":"BTC-USD","maxLeverage":5}],
+ "depositorWhitelist":["0x…"],"config":{"managerLiqPortionPpm":null, …}, …}
+```
+
+- `mainAccount` 是金库主账户:以金库身份交易时,下单、换单、撤单签的就是它。它没有 owner,
+  代它签名、被 agent 代执行时都解析成 manager 账户。
+- `manager` 是 manager 账户 owner 的**地址**,不是账户号;待认领(fresh)金库为 `null`,`hasManager` 为 `false`。
+- `tradingHalt` 为 `true` 时金库熔断:dex-os 已撤光挂单并强平,新单被拒。
+- `whitelist` 为 `null` 是不限市场;是数组时只许其中的市场,删空后的 `[]` 是哪个市场都不许
+  (SDK:`HasWhitelist` + `Whitelist`)。`blacklist` 是禁止的市场,`maxLeverages` 是各市场杠杆上限(倍数)。
+- `depositorWhitelist` 为空表是不限出资人。`config.managerLiqPortionPpm` 是熔断线,`null` = 永不熔断,建库后不可改。
+- 以上字段缺失或自相矛盾时 SDK 一律报错,不补默认值;列表里一行不合格整次报错。
+- 不存在回 404 `unknown vault`(SDK:`ErrVaultNotFound`)。这两个接口每次调用都在分析库里扫事件,
+  只在开会话、导入、准入这类低频场合读,不要轮询。
+
 ### 其他
 
 `GET /account/:id` · `/account/by-address/:addr` · `/account/by-owner/:addr` ·
@@ -217,6 +239,11 @@ Go SDK:`s.Fills(ctx, dexos.FillQuery{After: lastSeenID, Epoch: lastEpoch})` **�
 `/vault*`)与行情 / 账本读面(`GET /trades` `/candles` `/withdrawals/mine` `/state-root` `/proof/:id`
 `/liquidity-tiers` `/account/:id`),不在 SDK 里 —— 提款、转账、金库是主账号在前端 / 自己的签名代码里
 做的事,放进跑策略的机器等于把主钥匙放上去。完整端点清单看节点自带的交互式文档 `GET /docs`。
+
+建库、认领、存取和改金库配置仍不进 SDK;**以 API 钱包代金库交易**是交易,在范围内:
+`dexos.New(ctx, url, apiKey, dexos.ForVault(id))` 开出的会话账户是金库主账户,这把 key 的授权批在
+manager 账户上(dex-os 按 (agent, manager 账户) 查授权,agent nonce 照旧按 agent 地址计)。
+对金库主账户批授权会被接受,但永远用不上。manager 名下的 agent 能交易他管理的**所有**金库,dex-os 无法按金库限定。
 
 ## 主账号签名(管理 API 钱包)
 
