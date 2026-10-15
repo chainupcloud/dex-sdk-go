@@ -1,5 +1,7 @@
 # REST 接口参考
 
+> **本文写于旧接口客户端时期**(`dexos` 包的 `Client` / `Session`)。那套客户端走 dex-os 的旧公开端点,dex-os 正在退役它们,入口已标 Deprecated。新接入用 `dexosv1`,代码以 [README](../README.md)、`dexosv1` 的文档注释与 `examples/` 为准;本文的概念部分(账号体系、原子换单、读一致性、拒因、做市完整性边界)仍然适用。
+
 网关默认监听 `:8080`。所有价格为 tick、数量为 lot、金额为 quote quantum(字符串)。
 
 > 金额字段一律是**字符串**:内核用 i128,JSON number 装不下,转 float 会在大额上悄悄丢精度。

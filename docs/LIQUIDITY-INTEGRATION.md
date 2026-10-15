@@ -1,5 +1,7 @@
 # 做市接入的完整性边界
 
+> **本文写于旧接口客户端时期**(`dexos` 包的 `Client` / `Session`)。那套客户端走 dex-os 的旧公开端点,dex-os 正在退役它们,入口已标 Deprecated。新接入用 `dexosv1`,代码以 [README](../README.md)、`dexosv1` 的文档注释与 `examples/` 为准;本文的概念部分(账号体系、原子换单、读一致性、拒因、做市完整性边界)仍然适用。
+
 源码核查基线：dex-os `1ff707ba523f356901bbd1a7ddf30a96e61d2db8`。软件测试使用进程内 HTTP/WS，不是已执行真实交易的证据。
 
 ## 连接与身份
@@ -117,7 +119,7 @@ base `444ca6a`。`GOWORK=off go test -race -count=1 -timeout=90s ./...` 与 `go 
 - `ReceiptOf` 的纪元必须在**发送前**取得：发送后才取，碰上换纪元仍会把「已执行」读成 not_found。
 - 请求日志(`ReplaceWithJournal` 的 `BeforeSend`/`AfterReceive`)失败时一律锁会话、nonce 不动，优先于终局拒绝与部分成功：结论只在内存里，没有落到持久层。
 
-真节点验证:`examples/contracts` 对本机全新纪元 dex-node 走一遍(两个新账户挂单吃单、逐项全成功与部分成功、原请求回执、not_found、成交翻页与续拉、纪元不符、Σ流水 == 权益快照余额、事件补拉),全部 PASS。同一节点上旧版 `Fills`(每页 1 笔)第二页即 `HTTP 400: resume requires epoch and upper from the first page`。
+真节点验证(当时的 `examples/contracts`,已随旧客户端移除;v1 的对应物是 `dexosv1` 的契约测试):对本机全新纪元 dex-node 走一遍(两个新账户挂单吃单、逐项全成功与部分成功、原请求回执、not_found、成交翻页与续拉、纪元不符、Σ流水 == 权益快照余额、事件补拉),全部 PASS。同一节点上旧版 `Fills`(每页 1 笔)第二页即 `HTTP 400: resume requires epoch and upper from the first page`。
 
 新增风险断言的真实缺陷红(2026-09-24,注入后逐字节还原并整包复绿):
 

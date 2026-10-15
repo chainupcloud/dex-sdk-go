@@ -1,5 +1,7 @@
 # 做市接入
 
+> **本文写于旧接口客户端时期**(`dexos` 包的 `Client` / `Session`)。那套客户端走 dex-os 的旧公开端点,dex-os 正在退役它们,入口已标 Deprecated。新接入用 `dexosv1`,代码以 [README](../README.md)、`dexosv1` 的文档注释与 `examples/` 为准;本文的概念部分(账号体系、原子换单、读一致性、拒因、做市完整性边界)仍然适用。
+
 完整接入需要成交、订单恢复、实际费用和资金流闭环。当前软件及服务端前置见 [做市完整性边界](LIQUIDITY-INTEGRATION.md)。
 
 ## 换单与逐项结果

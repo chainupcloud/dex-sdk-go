@@ -24,6 +24,8 @@ import (
 //
 // nonce 由会话自己维护。它是 **agent 地址自己的**计数器,与 master 的 nonce
 // 无关 —— 这是接入时最常见的坑,所以干脆不暴露。
+//
+// Deprecated: Session 走旧公开端点,dex-os 正在退役它们(public-api-v1.md §9)。改用 [github.com/chainupcloud/dex-sdk-go/dexosv1.Session]。
 type Session struct {
 	Client  *Client
 	Config  *Config
@@ -122,6 +124,8 @@ func ForVault(id uint16) Option {
 //	s, err := dexos.New(ctx, url, apiKey, dexos.ForAccount(subAccountID))
 //
 // 不指明会得到 ErrAmbiguousAccount —— 这里刻意不挑一个默认值。
+//
+// Deprecated: 走旧公开端点,dex-os 正在退役它们(public-api-v1.md §9)。改用 [github.com/chainupcloud/dex-sdk-go/dexosv1.NewSession]。
 func New(ctx context.Context, baseURL, apiKeyHex string, opts ...Option) (*Session, error) {
 	var o newOpts
 	for _, f := range opts {

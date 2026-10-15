@@ -208,6 +208,9 @@ func TestExchangeVersionSubaccountsAndMarketFees(t *testing.T) {
 	if ex.FundingTickSec != 3600 {
 		t.Fatalf("资金费结算周期: %d", ex.FundingTickSec)
 	}
+	if ex.Deposit.SystemGateway != "0x5e3448d7bd75cbc2d31acd8357f711f952195d68" {
+		t.Fatalf("入金系统地址: %q", ex.Deposit.SystemGateway)
+	}
 	cat, err := c.Catalog(context.Background())
 	if err != nil {
 		t.Fatal(err)
