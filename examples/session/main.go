@@ -3,8 +3,9 @@
 //	go run ./examples/session -url http://127.0.0.1:17807 -api-key 0x…
 //
 // 要交易的账户不用带外告知:按 API 钱包地址反查它被授权的账户(`GET /v1/agents/{address}`)。
-// 同一把钥匙被几个账户授权时,用 -owner / -subaccount 或 -vault 指明 —— 这里不替你挑:
-// 挑错的表现是订单落到另一个账户上,而且没有任何报错。
+// 同一把钥匙被几个账户授权时,用 -owner / -subaccount 指明 —— 这里不替你挑:
+// 挑错的表现是订单落到另一个账户上,而且没有任何报错。以金库身份交易用 -vault(授权挂在 manager 的账户上,
+// 建会话时核对)。
 package main
 
 import (
@@ -67,6 +68,9 @@ func main() {
 // pickAccount 从这把 API 钱包的授权里挑出要交易的账户。过期的授权先剔除;
 // 剩下不止一个又没指明时报错并列出候选,不挑默认值。
 func pickAccount(ctx context.Context, c *dexosv1.Client, agent dexos.Address, owner string, sub uint32, vault int) (dexosv1.AccountRef, error) {
+	if vault >= 0 {
+		return dexosv1.VaultAccount(uint16(vault)), nil
+	}
 	grants, err := c.AgentGrants(ctx, agent)
 	if err != nil {
 		return dexosv1.AccountRef{}, err
@@ -75,10 +79,6 @@ func pickAccount(ctx context.Context, c *dexosv1.Client, agent dexos.Address, ow
 	for _, g := range grants {
 		switch {
 		case g.Expired:
-		case vault >= 0:
-			if g.Vault != nil && int(*g.Vault) == vault {
-				hit = append(hit, g)
-			}
 		case owner != "":
 			if g.Vault == nil && strings.EqualFold(g.Address, owner) && g.Subaccount != nil && *g.Subaccount == sub {
 				hit = append(hit, g)
@@ -92,7 +92,7 @@ func pickAccount(ctx context.Context, c *dexosv1.Client, agent dexos.Address, ow
 		for _, g := range grants {
 			all = append(all, describe(g))
 		}
-		return dexosv1.AccountRef{}, fmt.Errorf("匹配到 %d 个可用授权(全部授权:%s);用 -owner/-subaccount 或 -vault 指明", len(hit), strings.Join(all, ";"))
+		return dexosv1.AccountRef{}, fmt.Errorf("匹配到 %d 个可用授权(全部授权:%s);用 -owner/-subaccount 指明", len(hit), strings.Join(all, ";"))
 	}
 	g := hit[0]
 	if g.Vault != nil {

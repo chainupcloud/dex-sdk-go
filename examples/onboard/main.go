@@ -9,11 +9,9 @@ package main
 
 import (
 	"context"
-	"errors"
 	"flag"
 	"fmt"
 	"log"
-	"net/http"
 	"strings"
 
 	"github.com/chainupcloud/dex-sdk-go/dexos"
@@ -53,14 +51,13 @@ func main() {
 
 	// ── 3) 找账户:首次入金才开户,没有注册接口 ──
 	subs, err := c.Subaccounts(ctx, me.Address())
-	var apiErr *dexosv1.Error
-	if errors.As(err, &apiErr) && apiErr.Status == http.StatusNotFound {
+	must(err, "读账户表")
+	if len(subs) == 0 {
 		fmt.Printf("\n%s 还没有账户。\n", me.Address().Hex())
 		fmt.Printf("往 %s 打一笔 USDC(裸 transfer,没有 deposit 方法),\n", ex.Deposit.SystemGateway)
 		fmt.Println("中继观察到之后自动开户 —— 付钱即开户。")
 		return
 	}
-	must(err, "读账户表")
 	fmt.Println()
 	for _, s := range subs {
 		fmt.Printf("子账户 %d(主账户=%v)\n", s.Subaccount, s.IsMain)

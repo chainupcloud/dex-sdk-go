@@ -156,7 +156,7 @@ func main() {
 	r.must("vault", err)
 	isManager := v.Manager != nil && strings.EqualFold(*v.Manager, manager.Address().Hex()) && v.ManagerSubaccount != nil && *v.ManagerSubaccount == 0
 	r.check("vault", isManager && !v.TradingHalt,
-		fmt.Sprintf("vault=%d manager=%v/%v tradingHalt=%v depositorWhitelist=%v", vaultID, v.Manager, v.ManagerSubaccount, v.TradingHalt, v.DepositorWhitelist))
+		fmt.Sprintf("vault=%d manager 是本钱包的主账户:%v tradingHalt=%v depositorWhitelist=%v", vaultID, isManager, v.TradingHalt, v.DepositorWhitelist))
 	vs, err := c.Vaults(ctx)
 	r.must("vaults", err)
 	listed := slices.ContainsFunc(vs, func(x dexosv1.Vault) bool { return x.Vault == vaultID })
@@ -193,11 +193,12 @@ func main() {
 	res, err := s.Place(ctx, dexosv1.OrderRequest{Market: m, Side: dexos.Buy, Price: price, Lots: lots, TIF: dexos.PostOnly})
 	r.must("place", err)
 	it := res.Items[0]
-	r.check("place", it.Status == "accepted" && it.OrderID != nil, fmt.Sprintf("%s %s × %s → %+v", m.Symbol, m.Scale.Price(price), m.Scale.Size(lots), it))
-	if it.OrderID == nil {
+	if it.Status != "accepted" || it.OrderID == nil {
+		r.check("place", false, fmt.Sprintf("%s %s × %s → %s %s", m.Symbol, m.Scale.Price(price), m.Scale.Size(lots), it.Status, it.Code))
 		os.Exit(1)
 	}
 	id := *it.OrderID
+	r.check("place", true, fmt.Sprintf("%s %s × %s → 订单 %d", m.Symbol, m.Scale.Price(price), m.Scale.Size(lots), id))
 
 	// ── 7. 挂单在金库主账户上,不在 manager 账户上 ──
 	has := func(ref dexosv1.AccountRef) (bool, error) {
@@ -211,7 +212,7 @@ func main() {
 
 	// ── 8. 撤单 ──
 	cr, err := s.Cancel(ctx, m, id)
-	r.check("cancel", err == nil && cr.Items[0].Status == "canceled", fmt.Sprintf("订单 %d → %v", id, err))
+	r.check("cancel", err == nil && cr.Items[0].Status == "canceled", fmt.Sprintf("订单 %d(%v)", id, err))
 	left, err := has(vaultRef)
 	r.check("orders-after-cancel", err == nil && !left, fmt.Sprintf("撤单后金库主账户上还有订单 %d:%v(%v)", id, left, err))
 

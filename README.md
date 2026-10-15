@@ -172,12 +172,11 @@ me, _ := dexos.GenerateSigner()          // 本地生成,私钥不出本进程
 > **这一步 SDK 做不了。** 本 SDK 只管交易所 API,不含 EVM 能力(不签链上交易、不发 ERC20 transfer)。
 > 用前端页面、钱包,或 `go-ethereum` 自己发。
 
-**3. 确认开户** —— 入金之前问会得到 404,那是正常起点,不是错误:
+**3. 确认开户** —— 入金之前账户表是空的(账户类读取答 404),那是正常起点,不是错误:
 
 ```go
-subs, err := c.Subaccounts(ctx, me.Address())
-var e *dexosv1.Error
-if errors.As(err, &e) && e.Status == http.StatusNotFound {
+subs, _ := c.Subaccounts(ctx, me.Address())
+if len(subs) == 0 {
     // 还没入金
 }
 acct, _ := c.Account(ctx, dexosv1.AccountRef{Address: me.Address()})
@@ -210,7 +209,7 @@ go run ./examples/quickstart -url http://127.0.0.1:17807 -master-key 0x…
 
 ### 三个容易踩的
 
-- **没入金就下单** → 没有账户就没有可授权、可交易的对象,`Subaccounts` 回 404。
+- **没入金就下单** → 没有账户就没有可授权、可交易的对象:`Subaccounts` 答空表,账户类读取答 404。
 - **入金到账时间随终局性配置变化**:`head` 是秒级,`finalized` 要等两个 epoch(Sepolia 约 13 分钟)。
   别把「还没到账」当成「入金失败」。
 - **偶发的 412 不是故障。** 生产是读写分层的(写打 Raft voter,读打只读副本),412 表示副本还没追上

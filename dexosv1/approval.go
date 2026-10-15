@@ -76,7 +76,7 @@ type Subaccount struct {
 	SigningAccountID uint32 `json:"signingAccountId"`
 }
 
-// Subaccounts 主钱包名下的全部账户(含主账户,子账户序号 0)。没开户的地址服务端回 404([*Error])。
+// Subaccounts 主钱包名下的全部账户(含主账户,子账户序号 0)。没开户的地址答空表,不是 404。
 func (c *Client) Subaccounts(ctx context.Context, owner dexos.Address) ([]Subaccount, error) {
 	var resp struct {
 		Address     string       `json:"address"`
