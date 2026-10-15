@@ -5,6 +5,13 @@
 // 跑策略的机器上只放 API 钱包私钥,被摸进去的最坏后果是被代为交易,
 // 不是资产清零。
 //
+// # 旧接口退役
+//
+// 本包的 HTTP 客户端([Client]、[Session]、[Connect]、[Discover])走 dex-os 的旧公开端点
+// (`/config`、`/markets`、`/risk/{id}` …),dex-os 正在退役它们(public-api-v1.md §9),
+// 这几个入口已标 Deprecated。新接入一律用 [github.com/chainupcloud/dex-sdk-go/dexosv1]。
+// 签名([Signer]、[Domain])、地址、规范编码与回执类型不调接口,dexosv1 照常用它们,不在退役之列。
+//
 // # 两类写操作
 //
 // 签名主体不同,这个分界就是账号体系的全部:

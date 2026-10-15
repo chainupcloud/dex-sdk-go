@@ -22,6 +22,8 @@ import (
 // 这个分界就是账号体系的全部:主账号密钥留在冷处,API 钱包密钥放在跑策略的机器上。
 // API 钱包**动不了钱**(提款/转账不在 STF 的 agent scope 白名单内),
 // 所以策略机被攻破的最坏后果是被代为交易,而不是资产被提走。
+//
+// Deprecated: Client 走旧公开端点,dex-os 正在退役它们(public-api-v1.md §9)。改用 [github.com/chainupcloud/dex-sdk-go/dexosv1.Client]。
 type Client struct {
 	BaseURL string
 	Domain  Domain
@@ -60,6 +62,8 @@ func (c *Client) ObserveSeq(v uint64) {
 
 // NewClient baseURL 形如 http://127.0.0.1:8080。chainID 必须与节点一致
 // (可用 Version() 核对),否则 EIP-712 域分隔符不同,签名一律被拒。
+//
+// Deprecated: 走旧公开端点,dex-os 正在退役它们(public-api-v1.md §9)。改用 [github.com/chainupcloud/dex-sdk-go/dexosv1.NewClient]。
 func NewClient(baseURL string, chainID uint64) *Client {
 	return &Client{
 		BaseURL: baseURL,

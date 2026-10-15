@@ -1,35 +1,40 @@
-// onboard 演示开发者从零接入的完整路径:生成地址 → 找账户 → 连接 → 交易。
+// onboard 演示开发者从零接入:只知道网关地址 → 连接参数 → 钱包地址 → 账户 →(可选)用 API 钱包交易。
 //
-//	go run ./examples/onboard -url http://127.0.0.1:17807             # 只看参数与新地址
-//	go run ./examples/onboard -url … -key 0x… -api-key 0x…            # 已有账户与 API 钱包
+//	go run ./examples/onboard -url http://127.0.0.1:17807                    # 看连接参数,生成一个新地址
+//	go run ./examples/onboard -url … -key 0x…                               # 已有钱包:查账户
+//	go run ./examples/onboard -url … -key 0x… -api-key 0x…                  # 再用 API 钱包挂一张单、撤掉
+//
+// v1 按**主钱包地址 + 子账户序号**寻址,不用、也拿不到内核账户号。
 package main
 
 import (
 	"context"
-	"errors"
 	"flag"
 	"fmt"
 	"log"
+	"strings"
 
 	"github.com/chainupcloud/dex-sdk-go/dexos"
+	"github.com/chainupcloud/dex-sdk-go/dexosv1"
 )
 
 func main() {
 	url := flag.String("url", "", "网关地址 —— 唯一需要被告知的参数")
 	key := flag.String("key", "", "你的钱包私钥(留空则生成一个新的)")
-	apiKey := flag.String("api-key", "", "API 钱包私钥(前端授权时拿到的)")
+	apiKey := flag.String("api-key", "", "API 钱包私钥(主钱包授权过的那把)")
 	flag.Parse()
 	ctx := context.Background()
+	c := dexosv1.NewClient(strings.TrimRight(*url, "/"))
 
-	// ── 1) 连接:参数自动发现 ──
-	c, cfg, err := dexos.Connect(ctx, *url)
-	if err != nil {
-		log.Fatal(err)
+	// ── 1) 连接参数:链、EIP-712 域、入金地址、token 表都由网关给,不抄进配置 ──
+	ex, err := c.Exchange(ctx)
+	must(err, "读连接参数")
+	if ex.Version.CodecVer != dexos.CodecVersion {
+		log.Fatalf("网关的命令编码是 v%d,本 SDK 实现 v%d —— 签出来的命令它不认,先升级 SDK", ex.Version.CodecVer, dexos.CodecVersion)
 	}
-	fmt.Printf("链 %d · 入金地址 %s · 终局性 %s\n",
-		cfg.ChainID, cfg.Deposit.SystemGateway, cfg.FinalityMode)
-	for _, t := range cfg.Deposit.Tokens {
-		fmt.Printf("token %d = %s\n", t.Token, t.ERC20)
+	fmt.Printf("链 %d · 入金系统地址 %s\n", ex.ChainID, ex.Deposit.SystemGateway)
+	for _, t := range ex.Deposit.Tokens {
+		fmt.Printf("token %d = %s(%d 位小数)@ %s\n", t.Token, t.Symbol, t.Decimals, t.ERC20)
 	}
 
 	// ── 2) 地址:要么用你已有的,要么本地生成一个 ──
@@ -39,52 +44,74 @@ func main() {
 	} else {
 		me, err = dexos.GenerateSigner()
 		if err == nil {
-			fmt.Printf("\n新钱包 %s\n  私钥 %s\n  (自己保存;交易所永远不会知道它)\n",
-				me.Address().Hex(), me.PrivateKeyHex())
+			fmt.Printf("\n新钱包 %s\n  私钥 %s\n  (自己保存;交易所永远不会知道它)\n", me.Address().Hex(), me.PrivateKeyHex())
 		}
 	}
-	if err != nil {
-		log.Fatal(err)
-	}
+	must(err, "准备钱包")
 
-	// ── 3) 找账户:钱包地址 ≠ 内核账户号,只能查 ──
-	acc, err := c.AccountByAddress(ctx, me.Address().Hex())
-	if errors.Is(err, dexos.ErrNotRegistered) {
-		fmt.Printf("\n%s 还没有内核账户。\n", me.Address().Hex())
-		fmt.Printf("去打一笔 USDC 到 %s(裸 transfer,没有 deposit 方法),\n",
-			cfg.Deposit.SystemGateway)
-		fmt.Printf("中继观察到之后内核会自动开户 —— 没有注册接口,付钱即开户。\n")
+	// ── 3) 找账户:首次入金才开户,没有注册接口 ──
+	subs, err := c.Subaccounts(ctx, me.Address())
+	must(err, "读账户表")
+	if len(subs) == 0 {
+		fmt.Printf("\n%s 还没有账户。\n", me.Address().Hex())
+		fmt.Printf("往 %s 打一笔 USDC(裸 transfer,没有 deposit 方法),\n", ex.Deposit.SystemGateway)
+		fmt.Println("中继观察到之后自动开户 —— 付钱即开户。")
 		return
 	}
-	if err != nil {
-		log.Fatal(err)
+	fmt.Println()
+	for _, s := range subs {
+		fmt.Printf("子账户 %d(主账户=%v)\n", s.Subaccount, s.IsMain)
 	}
-	fmt.Printf("\n内核账户 %d · 抵押 %s · 下一个 nonce %d\n",
-		acc.AccountID, acc.Collateral, acc.NextNonce)
+	ref := dexosv1.AccountRef{Address: me.Address()}
+	acct, err := c.Account(ctx, ref)
+	must(err, "读主账户")
+	fmt.Printf("主账户:抵押 %s USDC · 可提 %s · 持仓 %d 个\n", acct.Collateral, acct.AvailableToWithdraw, acct.PositionsCount)
 
-	// ── 4) 用 API 钱包交易 ──
+	// ── 4) 用 API 钱包交易。主钱包私钥到这里就可以收起来了 ──
 	if *apiKey == "" {
-		fmt.Println("\n给 -api-key 可继续演示下单(在前端「API 钱包」里生成并授权)")
+		fmt.Println("\n给 -api-key 可继续演示下单(在前端「API 钱包」里生成并授权,或见 examples/quickstart)")
 		return
 	}
-	api, err := dexos.NewSigner(*apiKey)
+	agent, err := dexos.NewSigner(*apiKey)
+	must(err, "解析 API 钱包私钥")
+	s, err := dexosv1.NewSession(ctx, c, agent, ref)
+	must(err, "建会话(这把 API 钱包授权给这个账户了吗?)")
+	cat, err := c.Catalog(ctx)
+	must(err, "读市场目录")
+	m, price, lots, err := farBid(cat)
+	must(err, "挑市场")
+	res, err := s.Place(ctx, dexosv1.OrderRequest{Market: m, Side: dexos.Buy, Price: price, Lots: lots, TIF: dexos.PostOnly})
+	must(err, "下单")
+	it := res.Items[0]
+	if it.Status != "accepted" || it.OrderID == nil {
+		log.Fatalf("没挂上:%+v", it)
+	}
+	fmt.Printf("%s 挂买 %s × %s → 订单 %d\n", m.Symbol, m.Scale.Price(price), m.Scale.Size(lots), *it.OrderID)
+	_, err = s.Cancel(ctx, m, *it.OrderID)
+	must(err, "撤单")
+	fmt.Println("已撤单")
+}
+
+// farBid 挑一个有标记价的永续,给出远离市价的买单:价格是标记价的一半(不会成交),
+// 数量取满足最小名义额的最小值再加 1 手(名义额 = ticks × lots / 10^(priceDecimals+sizeDecimals))。
+func farBid(cat *dexosv1.Catalog) (*dexosv1.Market, uint32, uint64, error) {
+	for i := range cat.Markets() {
+		m := &cat.Markets()[i]
+		if m.Kind != "perp" || m.Status != "Active" || m.MarkPrice == nil || *m.MarkPrice < 2 {
+			continue
+		}
+		price := *m.MarkPrice / 2
+		minN, err := dexosv1.ParseFixed(m.MinNotional, m.Scale.PriceDecimals+m.Scale.SizeDecimals)
+		if err != nil {
+			return nil, 0, 0, err
+		}
+		return m, price, minN.Uint64()/uint64(price) + 1, nil
+	}
+	return nil, 0, 0, fmt.Errorf("目录里没有带标记价的活跃永续")
+}
+
+func must(err error, what string) {
 	if err != nil {
-		log.Fatal(err)
+		log.Fatalf("%s 失败:%v", what, err)
 	}
-	n, err := c.AgentNonce(ctx, acc.AccountID, api.Address())
-	if err != nil {
-		log.Fatal("读 agent nonce 失败(这把 API 钱包授权给这个账户了吗?):", err)
-	}
-	m, err := c.Markets(ctx)
-	if err != nil || len(m) == 0 {
-		log.Fatal("读不到市场")
-	}
-	ev, err := c.BatchPlace(ctx, api, acc.AccountID, []dexos.BatchOrder{{
-		Market: m[0].Market, Side: dexos.Buy, Price: m[0].Oracle - 3000,
-		Lots: 1, TIF: dexos.GTC,
-	}}, n)
-	if err != nil {
-		log.Fatal("下单失败:", err)
-	}
-	fmt.Printf("下单回执:%s\n", ev[0].Kind)
 }

@@ -17,7 +17,10 @@ type Exchange struct {
 		VerifyingContract string `json:"verifyingContract"`
 	} `json:"domain"`
 	Deposit struct {
-		Tokens []Token `json:"tokens"`
+		// SystemGateway 入金系统地址:往它裸 transfer 已链接的 ERC20 即入金(中继按 from 记账,首次入金即开户)。
+		// 空 = 节点没配。
+		SystemGateway string  `json:"systemGateway"`
+		Tokens        []Token `json:"tokens"`
 	} `json:"deposit"`
 	ServerTime int64 `json:"serverTime"`
 	// FundingTickSec 资金费结算周期(秒,≥ 1)。全局:所有永续市场同一个周期(v1.1 §4.9-12)。

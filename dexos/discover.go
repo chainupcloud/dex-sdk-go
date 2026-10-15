@@ -59,6 +59,8 @@ type TokenInfo struct {
 //
 //	cfg, err := dexos.Discover(ctx, "http://node.example:17807")
 //	c, err := dexos.NewClientFromConfig("http://node.example:17807", cfg)
+//
+// Deprecated: 读 `/config`,走旧公开端点,dex-os 正在退役它们(public-api-v1.md §9)。改用 [github.com/chainupcloud/dex-sdk-go/dexosv1.Client.Exchange]。
 func Discover(ctx context.Context, baseURL string) (*Config, error) {
 	c := &Client{BaseURL: baseURL, HTTP: &http.Client{Timeout: 15 * time.Second}}
 	var cfg Config
@@ -76,6 +78,8 @@ func Discover(ctx context.Context, baseURL string) (*Config, error) {
 // verifyingContract 目前恒为零地址(域里保留该字段是为了与 EVM 侧的 EIP-712
 // 习惯一致),真值仍以 /config 为准而不是这里写死 —— 将来它变成真合约地址时,
 // 老客户端不会因为"自己记得是零地址"而全线签名失败。
+//
+// Deprecated: 走旧公开端点,dex-os 正在退役它们(public-api-v1.md §9)。改用 [github.com/chainupcloud/dex-sdk-go/dexosv1.NewClient]。
 func NewClientFromConfig(baseURL string, cfg *Config) (*Client, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, err
@@ -114,6 +118,8 @@ func (cfg *Config) Validate() error {
 // 比对的是 [CodecVersion] —— **本 SDK 自己实现的那个版本**,不需要调用方传。
 // 让调用方填一个 SDK 已经知道的数字,只会把魔数抄进每份接入文档,
 // 而抄错的后果恰恰就是这个函数要防的那件事。
+//
+// Deprecated: 走旧公开端点,dex-os 正在退役它们(public-api-v1.md §9)。改用 [github.com/chainupcloud/dex-sdk-go/dexosv1.NewClient]。
 func Connect(ctx context.Context, baseURL string) (*Client, *Config, error) {
 	cfg, err := Discover(ctx, baseURL)
 	if err != nil {
@@ -133,6 +139,8 @@ func Connect(ctx context.Context, baseURL string) (*Client, *Config, error) {
 //
 // 只在你**明确知道**版本不同但仍要连接时用(例如只读行情,不签任何东西)。
 // 要签名就别用它 —— 编码对不上时每一笔都会被拒,而错误信息只有 401。
+//
+// Deprecated: 走旧公开端点,dex-os 正在退役它们(public-api-v1.md §9)。改用 [github.com/chainupcloud/dex-sdk-go/dexosv1.NewClient]。
 func ConnectUnchecked(ctx context.Context, baseURL string) (*Client, *Config, error) {
 	cfg, err := Discover(ctx, baseURL)
 	if err != nil {
