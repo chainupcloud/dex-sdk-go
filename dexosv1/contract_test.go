@@ -319,8 +319,22 @@ func TestContractWrites(t *testing.T) {
 	if _, err := s.ScheduleCancel(ctx, time.Time{}); err != nil {
 		t.Fatalf("ScheduleCancel 清除: %v", err)
 	}
+	// 实际挂一张远离市价的哨兵单，等待撤全部跨过块边界，才把共享账户交给后续测试。
+	// 空集合不能证明撤单已触发，否则下一条 Stream 的新挂单仍可能被撤。
+	sentinel, err := s.Place(ctx, o)
+	if err != nil {
+		t.Fatalf("CancelAll 哨兵挂单: %v", err)
+	}
+	if it := sentinel.Items[0]; it.Status != "accepted" || it.OrderID == nil || it.Resting == nil || !*it.Resting {
+		t.Fatalf("CancelAll 哨兵没有挂上: %+v", it)
+	}
 	if _, err := s.CancelAll(ctx); err != nil {
 		t.Fatalf("CancelAll: %v", err)
+	}
+	boundaryCtx, boundaryCancel := context.WithTimeout(ctx, 30*time.Second)
+	defer boundaryCancel()
+	if err := waitContractCancelBoundary(boundaryCtx, c, cat, w.Account, *sentinel.Items[0].OrderID); err != nil {
+		t.Fatalf("CancelAll 未确认块边界撤单: %v", err)
 	}
 	if _, err := w.SetLeverage(ctx, m, 0); err != nil {
 		t.Fatalf("SetLeverage(0 = 市场缺省): %v", err)
