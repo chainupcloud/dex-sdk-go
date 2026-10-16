@@ -60,10 +60,10 @@ type nonceGuard struct {
 // run 串行执行一次签名写入。f 用给定的 nonce 签名并发送,返回请求身份(签名之后恒非 nil)。
 //
 //   - 成功:nonce 已消耗 → 本地 ++。
-//   - 没发出(errNotSent)或定序前的拒绝(beforeSequencing):命令没进日志 → 不动,不锁。
+//   - 没发出(ErrNotSent,含连接没建起来)或定序前的拒绝(beforeSequencing):命令没进日志 → 不动,不锁。
 //   - 422 执行层拒绝:NonceMismatch → 锁(本地计数器不可信);preConsume 里的其余拒因 → 不动,不锁;
 //     其余(InsufficientMargin 等业务拒绝)→ ++,不锁。都是终局结论,锁住只会让一笔保证金不足停掉整个做市进程。
-//   - ErrPending(202)、ErrIncompleteBatch、传输失败、5xx、回执解析失败:结论未知或本地看不全 → 锁定。
+//   - ErrPending(202)、ErrIncompleteBatch、连上之后的传输失败、5xx、回执解析失败:结论未知或本地看不全 → 锁定。
 //   - 写前日志自身失败([ReplaceJournal]):不论场所的结论,本地没记下来 → 锁定。
 func (g *nonceGuard) run(ctx context.Context, f func(nonce uint64) (*RequestIdentity, error)) error {
 	g.mu.Lock()
@@ -80,7 +80,7 @@ func (g *nonceGuard) run(ctx context.Context, f func(nonce uint64) (*RequestIden
 		return nil
 	}
 	var je *journalError
-	if errors.Is(err, errNotSent) && !errors.As(err, &je) {
+	if errors.Is(err, ErrNotSent) && !errors.As(err, &je) {
 		return err
 	}
 	var e *Error

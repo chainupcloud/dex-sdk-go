@@ -107,7 +107,8 @@ API 钱包私钥从前端拿:`/app` →「API 钱包」→ 生成 → 主钱包�
 |---|---|---|
 | `*dexosv1.Error` | 业务拒绝或网关拒绝(`Code` 是拒因,如 `InsufficientMargin`) | 终局结论,会话不锁,改参数再发 |
 | `*dexosv1.RateLimitedError` | 429:扣光的是 IP 桶还是账户桶、`RetryAfter` | SDK 不重试;怎么退让(例如只暂停一个币对)由你定 |
-| `dexosv1.ErrPending` | 已定序,结论未知(202 / 传输失败 / 5xx) | **不要重发**。会话已锁,用 `s.Pending()` 的请求身份查 `c.Request`,核对后新建会话 |
+| `dexosv1.ErrNotSent` | 请求没发出(本地校验失败、连接没建起来) | 确定没发出,会话不锁、nonce 不动,可以原样重发 |
+| `dexosv1.ErrPending` | 已定序,结论未知(202 / 连上之后的传输失败 / 5xx) | **不要重发**。会话已锁,用 `s.Pending()` 的请求身份查 `c.Request`,核对后新建会话 |
 | `dexosv1.ErrIncompleteBatch` | 批量回执的逐项结局对不上请求 | 批次已执行但说不清哪些成了:先按账户读取核对 |
 | `dexosv1.ErrSessionBlocked` | 上一次写入结论未知,会话禁止继续消耗 nonce | 同 `ErrPending` |
 

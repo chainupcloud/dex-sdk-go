@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"reflect"
 	"sort"
@@ -521,6 +522,35 @@ func TestSessionNonceOutcomes(t *testing.T) {
 			}
 		})
 	}
+}
+
+// 连接没建起来(连接被拒):请求一个字节都没发出,报 ErrNotSent,nonce 不动、会话不锁;连上之后同一会话照常写。
+func TestSessionDialFailureIsNotSent(t *testing.T) {
+	f, s, _ := newTestSession(t)
+	gateway := s.Client.BaseURL
+	s.Client.BaseURL = "http://" + refusingAddr(t)
+	if _, err := s.CancelAll(context.Background()); !errors.Is(err, ErrNotSent) || errors.Is(err, ErrSessionBlocked) || s.Nonce() != 41 || s.Pending() != nil {
+		t.Fatalf("连接被拒应报 ErrNotSent、不锁、nonce 不动: %v, nonce %d", err, s.Nonce())
+	}
+	s.Client.BaseURL = gateway
+	f.answer(t, "/v1/orders/cancel-all", 200, "w_cancel_all.json")
+	if _, err := s.CancelAll(context.Background()); err != nil || s.Nonce() != 42 {
+		t.Fatalf("连上之后应照常写: %v, nonce %d", err, s.Nonce())
+	}
+}
+
+// refusingAddr 是本机一个没人监听的地址:连过去即被拒。
+func refusingAddr(t *testing.T) string {
+	t.Helper()
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := l.Addr().String()
+	if err := l.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return addr
 }
 
 func TestBatchReceiptMustCoverEveryItem(t *testing.T) {

@@ -152,6 +152,18 @@ func TestReplaceJournaledOutcomes(t *testing.T) {
 	}
 }
 
+// 连接没建起来:AfterReceive 看到 ErrNotSent(据此撤回这条记录),不锁、nonce 不动。
+func TestReplaceJournaledDialFailure(t *testing.T) {
+	f, s, cat := newTestSession(t)
+	btc, _ := cat.Market("BTC-USD")
+	s.Client.BaseURL = "http://" + refusingAddr(t)
+	j := &recordJournal{f: f}
+	_, err := s.ReplaceJournaled(context.Background(), btc, []uint64{101}, nil, j)
+	if !errors.Is(err, ErrNotSent) || !errors.Is(j.sendErr, ErrNotSent) || j.afterCalls != 1 || errors.Is(err, ErrSessionBlocked) || s.Nonce() != 41 || s.Pending() != nil {
+		t.Fatalf("连接被拒应交给日志 ErrNotSent、不锁、nonce 不动: %v / %v, nonce %d", err, j.sendErr, s.Nonce())
+	}
+}
+
 func errorsJoin(sentinel, cause error) error { return errors.Join(sentinel, cause) }
 
 // 浏览器钱包签好的授权:提交时不经 nonce 计数器,请求身份按主钱包与签名摘要算,与网关核对。
