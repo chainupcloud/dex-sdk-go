@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -178,11 +179,11 @@ func validCID(s string) bool {
 // 2xx 返回原始响应;非 2xx 解析成类型化错误。
 func (c *Client) post(ctx context.Context, path string, body any) (int, []byte, error) {
 	if c.AckWait < 0 || c.AckWait > maxAckWait {
-		return 0, nil, fmt.Errorf("%w: AckWait %s 超出 0..%s", errNotSent, c.AckWait, maxAckWait)
+		return 0, nil, fmt.Errorf("%w: AckWait %s 超出 0..%s", ErrNotSent, c.AckWait, maxAckWait)
 	}
 	raw, err := json.Marshal(body)
 	if err != nil {
-		return 0, nil, fmt.Errorf("%w: %w", errNotSent, err)
+		return 0, nil, fmt.Errorf("%w: %w", ErrNotSent, err)
 	}
 	u := c.BaseURL + path + "?ack=result"
 	if c.AckWait > 0 {
@@ -190,7 +191,7 @@ func (c *Client) post(ctx context.Context, path string, body any) (int, []byte, 
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, bytes.NewReader(raw))
 	if err != nil {
-		return 0, nil, fmt.Errorf("%w: %w", errNotSent, err)
+		return 0, nil, fmt.Errorf("%w: %w", ErrNotSent, err)
 	}
 	req.Header.Set("content-type", "application/json")
 	// 带上见过的最大位号:刚授权就写时,网关的预检在这个位号之后的视图上查(v1.1 §4.1)。
@@ -199,6 +200,12 @@ func (c *Client) post(ctx context.Context, path string, body any) (int, []byte, 
 	}
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
+		// 连接没建起来(连接被拒、地址不可达、域名解析不了):一个字节都没发出,结论是确定的。连上之后的失败(连接被重置、
+		// 读超时)仍是结论未知。
+		var op *net.OpError
+		if errors.As(err, &op) && op.Op == "dial" {
+			return 0, nil, fmt.Errorf("%w: %w", ErrNotSent, err)
+		}
 		return 0, nil, err
 	}
 	defer resp.Body.Close()
@@ -217,8 +224,9 @@ func (c *Client) post(ctx context.Context, path string, body any) (int, []byte, 
 	return resp.StatusCode, out.Bytes(), nil
 }
 
-// errNotSent 请求在发出之前就失败了(配置错误、编码失败):服务端什么都没收到,nonce 没动,结论是确定的。
-var errNotSent = errors.New("dexosv1: 请求没有发出")
+// ErrNotSent 写请求在发出之前就失败了(配置错误、编码失败、连接没建起来):服务端什么都没收到,nonce 没动、会话不锁,
+// 结论是确定的,可以原样重发。[Session.ReplaceJournaled] 的 AfterReceive 收到它即可撤回这一条记录。
+var ErrNotSent = errors.New("dexosv1: 请求没有发出")
 
 // maxAckWait 服务端 `waitMs` 的上限。
 const maxAckWait = 5 * time.Second

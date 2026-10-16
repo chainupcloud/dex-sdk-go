@@ -32,7 +32,8 @@ type SignedApproval struct {
 }
 
 // SubmitApproval 提交一份已签好的授权。签名在签好之后被别的写用掉了 nonce 时,服务端拒因是 NonceMismatch
-// (422 [*Error]):这份签名已作废,只能重签。结论未知(传输失败、5xx、202)原样返回错误,由调用方先读回授权再决定。
+// (422 [*Error]):这份签名已作废,只能重签。连接没建起来报 [ErrNotSent](没发出,可原样重提);结论未知(连上之后的
+// 传输失败、5xx、202)原样返回错误,由调用方先读回授权再决定。
 func (c *Client) SubmitApproval(ctx context.Context, a SignedApproval) (*Receipt, error) {
 	if !strings.HasPrefix(a.Signature, "0x") || len(a.Signature) != 132 {
 		return nil, fmt.Errorf("dexosv1: 授权签名应为 0x + 130 位十六进制,得到 %d 个字符", len(a.Signature))

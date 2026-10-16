@@ -42,8 +42,8 @@ type ReplaceIntent struct {
 //   - BeforeSend 必须先把 intent 提交到本地存储再返回 nil。返回其他错误即锁定会话(本地可能已留下记录,
 //     结论要经回执核对);唯一例外是包着 [ErrRequestDeclined] 的错误,见它的说明。
 //   - AfterReceive 记下结论:result 非 nil 时 err 为 nil;err 是发送的错误(类型化的 [*Error]、
-//     [*RateLimitedError]、[ErrPending] 等,与 [Session.Replace] 返回的相同)。AfterReceive 返回错误即锁定会话
-//     (结论只在内存里),nonce 不推进。
+//     [*RateLimitedError]、[ErrPending]、请求没发出的 [ErrNotSent] 等,与 [Session.Replace] 返回的相同)。
+//     AfterReceive 返回错误即锁定会话(结论只在内存里),nonce 不推进。
 type ReplaceJournal interface {
 	BeforeSend(ctx context.Context, intent ReplaceIntent) error
 	AfterReceive(ctx context.Context, intent ReplaceIntent, result *BatchResult, err error) error
@@ -90,7 +90,7 @@ func (s *Session) ReplaceJournaled(ctx context.Context, m *Market, cancels []uin
 			Cancels: append([]uint64{}, cancels...), Orders: append([]dexos.BatchOrder{}, batch...)}
 		if err := journal.BeforeSend(ctx, intent); err != nil {
 			if errors.Is(err, ErrRequestDeclined) {
-				return nil, fmt.Errorf("%w: %w", errNotSent, err)
+				return nil, fmt.Errorf("%w: %w", ErrNotSent, err)
 			}
 			return id, &journalError{err: err}
 		}
