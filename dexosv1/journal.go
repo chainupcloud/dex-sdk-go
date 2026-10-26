@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strconv"
 
 	"github.com/chainupcloud/dex-sdk-go/dexos"
 )
@@ -33,8 +32,11 @@ type ReplaceIntent struct {
 	Market *Market
 	// Cancels 要撤的订单号(v1 的 orderId,即订单序号),顺序即撤单项的 index。
 	Cancels []uint64
-	// Orders 新单的执行层参数,顺序即下单项的 index。
+	// Orders 新单的执行层参数,顺序即下单项的 index。配对项只有 Price / Lots / TIF / ReduceOnly 进命令。
 	Orders []dexos.BatchOrder
+	// Pairs 每个下单项替换的撤单项下标(nil = 不配对),与 Orders 等长;没有任何配对时整个为 nil,
+	// 命令是 BatchReplace,否则是 BatchReplacePaired([dexos.EncodeBatchReplacePaired])。
+	Pairs []*uint32
 }
 
 // ReplaceJournal 原子换单的写前日志。两个回调都在会话的写锁里调用,不要在回调里再用本会话写。
@@ -61,33 +63,22 @@ func (s *Session) ReplaceJournaled(ctx context.Context, m *Market, cancels []uin
 	if journal == nil {
 		return nil, errors.New("dexosv1: 缺写前日志")
 	}
-	if err := sameMarket(m, orders); err != nil {
+	p, err := prepareReplace(m, cancels, orders)
+	if err != nil {
 		return nil, err
 	}
-	ids := make([]dexos.OrderID, len(cancels))
-	wireCancels := make([]string, len(cancels))
-	for i, seq := range cancels {
-		ids[i] = dexos.NewOrderID(m.SigningMarketID, seq)
-		wireCancels[i] = strconv.FormatUint(seq, 10)
-	}
-	items := make([]wireOrderReq, len(orders))
-	batch := make([]dexos.BatchOrder, len(orders))
-	for i, o := range orders {
-		w, err := o.wire(nil)
-		if err != nil {
-			return nil, err
-		}
-		items[i], batch[i] = w, o.batchOrder()
-	}
 	var out *BatchResult
-	err := s.write(ctx, func(nonce uint64) (*RequestIdentity, error) {
+	err = s.write(ctx, func(nonce uint64) (*RequestIdentity, error) {
 		now := nowMs()
-		cmd := dexos.EncodeBatchReplace(s.signingID, now, ids, batch)
+		cmd := p.command(s.signingID, now)
 		agent := s.Agent.Address()
 		digest := s.domain.AgentExecHash(cmd, nonce)
 		id := newIdentity(agent, "agent:"+agent.Hex(), nonce, digest, dexos.Keccak256(cmd))
 		intent := ReplaceIntent{Request: id, SigningAccountID: s.signingID, NowMs: now, Domain: s.domain, Market: m,
-			Cancels: append([]uint64{}, cancels...), Orders: append([]dexos.BatchOrder{}, batch...)}
+			Cancels: append([]uint64{}, cancels...), Orders: append([]dexos.BatchOrder{}, p.batch...)}
+		if p.pairs != nil {
+			intent.Pairs = append([]*uint32{}, p.pairs...)
+		}
 		if err := journal.BeforeSend(ctx, intent); err != nil {
 			if errors.Is(err, ErrRequestDeclined) {
 				return nil, fmt.Errorf("%w: %w", ErrNotSent, err)
@@ -97,7 +88,7 @@ func (s *Session) ReplaceJournaled(ctx context.Context, m *Market, cancels []uin
 		// exec 按同一 nonce 与命令重算出同一个请求身份(确定性签名),发出去的就是日志里那一条。
 		_, status, raw, sendErr := s.exec(ctx, nonce, cmd, "/v1/orders/replace", func(env *envelope) any {
 			env.NowMs = now
-			return wireReplaceReq{envelope: env, Symbol: m.Symbol, Cancels: wireCancels, Orders: items}
+			return wireReplaceReq{envelope: env, Symbol: m.Symbol, Cancels: p.wireCancels, Orders: p.items}
 		})
 		if sendErr == nil {
 			var r Receipt

@@ -126,6 +126,11 @@ type OrderRequest struct {
 	ReduceOnly bool
 	// ClientOrderID 可选,`^[A-Za-z0-9._:/-]{1,36}$`,账户内唯一;**不进签名**。
 	ClientOrderID string
+	// Replaces 只用于 [Session.Replace] / [Session.ReplaceJournaled]:非 nil 时这张单与 cancels[*Replaces] 配成一对
+	// (带配对的原子换单,dex-os#256)。这一对在执行层是一次改单:旧单已成交 / 已撤 / 不是本人则两项都 UnknownOrder、
+	// 不挂新单;新单被拒则旧单一并撤。方向从旧单继承,Side 不上线、不进签名。有任一项配对时整条签 BatchReplacePaired。
+	// 下单([Session.Place] / [Wallet.PlaceOrder])带它是错误。
+	Replaces *int
 }
 
 func (o OrderRequest) batchOrder() dexos.BatchOrder {
@@ -136,6 +141,9 @@ func (o OrderRequest) batchOrder() dexos.BatchOrder {
 func (o OrderRequest) wire(env *envelope) (wireOrderReq, error) {
 	if o.Market == nil {
 		return wireOrderReq{}, errors.New("dexosv1: 订单缺市场")
+	}
+	if o.Replaces != nil {
+		return wireOrderReq{}, errors.New("dexosv1: Replaces 只用于换单(Session.Replace / ReplaceJournaled)")
 	}
 	tif, ok := tifWire[o.TIF]
 	if !ok {
@@ -154,6 +162,46 @@ func (o OrderRequest) wire(env *envelope) (wireOrderReq, error) {
 		envelope:      env,
 		Symbol:        o.Market.Symbol,
 		Side:          o.Side.String(),
+		Type:          "limit",
+		Price:         o.Market.Scale.Price(o.Price),
+		Size:          o.Market.Scale.Size(o.Lots),
+		TIF:           tif,
+		ReduceOnly:    o.ReduceOnly,
+		ClientOrderID: o.ClientOrderID,
+	}, nil
+}
+
+// wirePairedReq 换单里的配对项:不带方向(从被替换的旧单继承),`replaces` 是撤单项下标。
+type wirePairedReq struct {
+	Replaces      int    `json:"replaces"`
+	Type          string `json:"type"`
+	Price         string `json:"price"`
+	Size          string `json:"size"`
+	TIF           string `json:"tif"`
+	ReduceOnly    bool   `json:"reduceOnly"`
+	ClientOrderID string `json:"clientOrderId,omitempty"`
+}
+
+// paired 校验配对项并换成线上形状;cancels = 撤单项数。
+func (o OrderRequest) paired(cancels int) (wirePairedReq, error) {
+	if o.Market == nil {
+		return wirePairedReq{}, errors.New("dexosv1: 订单缺市场")
+	}
+	if *o.Replaces < 0 || *o.Replaces >= cancels {
+		return wirePairedReq{}, fmt.Errorf("dexosv1: Replaces %d 不在撤单项下标 [0, %d) 内", *o.Replaces, cancels)
+	}
+	tif, ok := tifWire[o.TIF]
+	if !ok {
+		return wirePairedReq{}, fmt.Errorf("dexosv1: 未知的 TIF %d", o.TIF)
+	}
+	if o.Price == 0 || o.Lots == 0 {
+		return wirePairedReq{}, fmt.Errorf("dexosv1: %s 价格与数量都必须大于 0", o.Market.Symbol)
+	}
+	if o.ClientOrderID != "" && !validCID(o.ClientOrderID) {
+		return wirePairedReq{}, fmt.Errorf("dexosv1: clientOrderId %q 不符合 ^[A-Za-z0-9._:/-]{1,36}$", o.ClientOrderID)
+	}
+	return wirePairedReq{
+		Replaces:      *o.Replaces,
 		Type:          "limit",
 		Price:         o.Market.Scale.Price(o.Price),
 		Size:          o.Market.Scale.Size(o.Lots),

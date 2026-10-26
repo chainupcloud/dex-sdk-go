@@ -180,9 +180,25 @@ func gatewayRequestID(t *testing.T, cat *Catalog, path string, body any) string 
 			for _, c := range env["cancels"].([]any) {
 				ids = append(ids, orderID(env["symbol"], c))
 			}
-			var orders []dexos.BatchOrder
+			// 与网关一致:任一项带 replaces 就整条编成 BatchReplacePaired(dex-os v1_write.rs replace)
+			var items []dexos.ReplaceItem
+			paired := false
 			for _, o := range env["orders"].([]any) {
-				orders = append(orders, gatewayOrder(t, cat, m(o)))
+				if r, ok := m(o)["replaces"]; ok {
+					paired = true
+					j := uint32(num(t, r))
+					items = append(items, dexos.ReplaceItem{Order: gatewayPaired(t, market(env["symbol"]), m(o)), Replaces: &j})
+					continue
+				}
+				items = append(items, dexos.ReplaceItem{Order: gatewayOrder(t, cat, m(o))})
+			}
+			if paired {
+				cmd = dexos.EncodeBatchReplacePaired(acct, num(t, env["nowMs"]), ids, items)
+				break
+			}
+			orders := make([]dexos.BatchOrder, len(items))
+			for i, it := range items {
+				orders[i] = it.Order
 			}
 			cmd = dexos.EncodeBatchReplace(acct, num(t, env["nowMs"]), ids, orders)
 		case "/v1/orders/cancel-all":
@@ -274,6 +290,25 @@ func num(t *testing.T, v any) uint64 {
 		t.Fatal(err)
 	}
 	return n
+}
+
+// gatewayPaired 按网关的做法把换单里的配对项换回执行层参数:不带方向与符号(从旧单继承),只有价量、tif、只减仓。
+func gatewayPaired(t *testing.T, mk *Market, item map[string]any) dexos.BatchOrder {
+	t.Helper()
+	if _, has := item["side"]; has {
+		t.Fatalf("配对项不该带方向: %v", item)
+	}
+	price, err := mk.Scale.Ticks(item["price"].(string))
+	if err != nil {
+		t.Fatal(err)
+	}
+	lots, err := mk.Scale.Lots(item["size"].(string))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tif := map[string]dexos.TimeInForce{"gtc": dexos.GTC, "ioc": dexos.IOC, "alo": dexos.PostOnly, "fok": dexos.FOK}[item["tif"].(string)]
+	ro, _ := item["reduceOnly"].(bool)
+	return dexos.BatchOrder{Price: price, Lots: lots, TIF: tif, ReduceOnly: ro}
 }
 
 // gatewayOrder 按网关的做法把线上的一张单换回执行层参数(符号 → 市场号,十进制 → tick / lot)。

@@ -316,38 +316,95 @@ func (s *Session) Cancel(ctx context.Context, m *Market, orderIDs ...uint64) (*B
 
 type wireReplaceReq struct {
 	*envelope
-	Symbol  string         `json:"symbol"`
-	Cancels []string       `json:"cancels"`
-	Orders  []wireOrderReq `json:"orders"`
+	Symbol  string   `json:"symbol"`
+	Cancels []string `json:"cancels"`
+	// 每项是 wireOrderReq(普通下单项)或 wirePairedReq(配对项)
+	Orders []any `json:"orders"`
+}
+
+// replaceParts 一次换单在签名之前就确定的部分:线上形状与规范编码的要素。
+type replaceParts struct {
+	ids         []dexos.OrderID
+	wireCancels []string
+	items       []any
+	batch       []dexos.BatchOrder
+	// pairs 每个下单项替换的撤单项下标;没有任何配对时为 nil(命令是 BatchReplace)
+	pairs []*uint32
+}
+
+// prepareReplace 校验并组好一次换单。所有本地能判的错都在这里报,签名之前、不碰 nonce。
+func prepareReplace(m *Market, cancels []uint64, orders []OrderRequest) (*replaceParts, error) {
+	if err := sameMarket(m, orders); err != nil {
+		return nil, err
+	}
+	p := &replaceParts{
+		ids:         make([]dexos.OrderID, len(cancels)),
+		wireCancels: make([]string, len(cancels)),
+		items:       make([]any, len(orders)),
+		batch:       make([]dexos.BatchOrder, len(orders)),
+	}
+	for i, seq := range cancels {
+		p.ids[i] = dexos.NewOrderID(m.SigningMarketID, seq)
+		p.wireCancels[i] = strconv.FormatUint(seq, 10)
+	}
+	pairs := make([]*uint32, len(orders))
+	taken := make(map[int]bool)
+	for i, o := range orders {
+		p.batch[i] = o.batchOrder()
+		if o.Replaces == nil {
+			w, err := o.wire(nil)
+			if err != nil {
+				return nil, err
+			}
+			p.items[i] = w
+			continue
+		}
+		w, err := o.paired(len(cancels))
+		if err != nil {
+			return nil, err
+		}
+		if taken[w.Replaces] {
+			return nil, fmt.Errorf("dexosv1: 撤单项 %d 被配对了两次", w.Replaces)
+		}
+		taken[w.Replaces] = true
+		j := uint32(w.Replaces)
+		p.items[i], pairs[i] = w, &j
+	}
+	if len(taken) > 0 {
+		p.pairs = pairs
+	}
+	return p, nil
+}
+
+// command 规范编码:有配对时是 BatchReplacePaired,否则是 BatchReplace(与没有配对能力之前一字不差)。
+func (p *replaceParts) command(account uint32, now uint64) []byte {
+	if p.pairs == nil {
+		return dexos.EncodeBatchReplace(account, now, p.ids, p.batch)
+	}
+	items := make([]dexos.ReplaceItem, len(p.batch))
+	for i := range p.batch {
+		items[i] = dexos.ReplaceItem{Order: p.batch[i], Replaces: p.pairs[i]}
+	}
+	return dexos.EncodeBatchReplacePaired(account, now, p.ids, items)
 }
 
 // Replace **原子换单**:撤旧挂新落在同一个状态机转移里,没有无报价的中间窗口。做市刷新报价用它。
 // 逐项仍尽力而为(一张保证金不足不废掉整轮)。新单可以带 clientOrderId,规则同批量下单。
+//
+// 下单项带 [OrderRequest.Replaces] 即与那条撤单项配成一对,这一对是一次改单(旧单已成交就不挂新单,
+// 新单被拒旧单一并撤),回执里两项各自按 (kind, index) 出现。一项都不带时与此前完全相同。
+// 整条没有产生任何事件(例如每一对的旧单都已不在、也没有别的项)时网关整条回 422,这时 nonce 已消费。
 func (s *Session) Replace(ctx context.Context, m *Market, cancels []uint64, orders []OrderRequest) (*BatchResult, error) {
-	if err := sameMarket(m, orders); err != nil {
+	p, err := prepareReplace(m, cancels, orders)
+	if err != nil {
 		return nil, err
 	}
-	ids := make([]dexos.OrderID, len(cancels))
-	wireCancels := make([]string, len(cancels))
-	for i, seq := range cancels {
-		ids[i] = dexos.NewOrderID(m.SigningMarketID, seq)
-		wireCancels[i] = strconv.FormatUint(seq, 10)
-	}
-	items := make([]wireOrderReq, len(orders))
-	batch := make([]dexos.BatchOrder, len(orders))
-	for i, o := range orders {
-		w, err := o.wire(nil)
-		if err != nil {
-			return nil, err
-		}
-		items[i], batch[i] = w, o.batchOrder()
-	}
 	var out *BatchResult
-	err := s.write(ctx, func(nonce uint64) (*RequestIdentity, error) {
+	err = s.write(ctx, func(nonce uint64) (*RequestIdentity, error) {
 		now := nowMs()
-		id, status, raw, err := s.exec(ctx, nonce, dexos.EncodeBatchReplace(s.signingID, now, ids, batch), "/v1/orders/replace", func(env *envelope) any {
+		id, status, raw, err := s.exec(ctx, nonce, p.command(s.signingID, now), "/v1/orders/replace", func(env *envelope) any {
 			env.NowMs = now
-			return wireReplaceReq{envelope: env, Symbol: m.Symbol, Cancels: wireCancels, Orders: items}
+			return wireReplaceReq{envelope: env, Symbol: m.Symbol, Cancels: p.wireCancels, Orders: p.items}
 		})
 		if err != nil {
 			return id, err
