@@ -46,6 +46,8 @@ const (
 	tagScheduleCancel    byte = 0x16
 	tagBatchPlace        byte = 0x31
 	tagBatchReplace      byte = 0x3E
+	// 带改单项的原子换单(dex-os#256,规格 dex-os docs/specs/batch-replace-modify.md)
+	tagBatchReplace2 byte = 0x88
 )
 
 // Side 买卖方向。取值必须与内核的 put_side 一致。
@@ -183,6 +185,51 @@ func EncodeBatchReplace(account uint32, nowMs uint64, cancels []OrderID, orders 
 	e.u32(uint32(len(cancels)))
 	for _, c := range cancels {
 		e.u64(uint64(c))
+	}
+	e.u32(uint32(len(orders)))
+	for _, o := range orders {
+		e.order(o)
+	}
+	return e.buf
+}
+
+// BatchModify 原子换单(Command::BatchReplace2)的一个改单项:把 Order 改成新价量,语义同单笔改单
+// (旧单不在则什么都不动,新单被拒则旧单一并撤)。不带方向 —— 从旧单继承,不进编码。
+type BatchModify struct {
+	Order      OrderID
+	Price      uint32
+	Lots       uint64
+	TIF        TimeInForce
+	ReduceOnly bool
+}
+
+// EncodeBatchReplace2 规范编码 Command::BatchReplace2(tag 0x88,带改单项的原子换单:撤单 → 改单 → 下单)。
+//
+// 布局同 BatchReplace,撤单段与下单段之间多一段改单项:
+//
+//	tag | account u32 | nowMs u64 | cancels len u32 | 每个 OrderId u64
+//	| modifies len u32 | 每项 OrderId u64, price u32, lots u64, tif u8, reduceOnly u8
+//	| orders len u32 | 每条订单
+//
+// 不进 testdata/golden.json(那份要求每份浏览器编码器都实现全部命令,前端不发这条);
+// 字节钉在 TestEncodeBatchReplace2Pinned,与 dex-os `batch_replace2_roundtrips_with_pinned_layout` 同一个字面量。
+func EncodeBatchReplace2(account uint32, nowMs uint64, cancels []OrderID, modifies []BatchModify, orders []BatchOrder) []byte {
+	e := &encoder{}
+	e.u8(codecVersion)
+	e.u8(tagBatchReplace2)
+	e.u32(account)
+	e.u64(nowMs)
+	e.u32(uint32(len(cancels)))
+	for _, c := range cancels {
+		e.u64(uint64(c))
+	}
+	e.u32(uint32(len(modifies)))
+	for _, m := range modifies {
+		e.u64(uint64(m.Order))
+		e.u32(m.Price)
+		e.u64(m.Lots)
+		e.u8(byte(m.TIF))
+		e.boolean(m.ReduceOnly)
 	}
 	e.u32(uint32(len(orders)))
 	for _, o := range orders {
