@@ -3422,7 +3422,7 @@
           "Trading"
         ],
         "summary": "Replace order",
-        "description": "Cancel the old order and place the new one in a single state transition (not atomic).",
+        "description": "Cancel the old order and place the new one in a single state transition (not atomic). Optional `modifies[]` (dex-os#256): each item is one modify with the semantics of `POST /v1/orders/modify` (the old order is gone → only that item is rejected `UnknownOrder` and no new order is placed; the new order is refused → that item is rejected and the old order is canceled anyway); items never affect each other. Records run cancels → modifies → orders, each in input order. With modifies the signed inner command is `BatchReplace2{account, cancels, modifies, orders, nowMs}` (tag 0x88); without (absent or empty) it stays `BatchReplace`, byte for byte. 400 when an orderId appears more than once across `cancels` and `modifies`. Each non-reduce-only modify passes the same `closeOnly` check as `POST /v1/orders/modify`; the rate weight counts cancels + modifies + orders.",
         "operationId": "v1_replace",
         "parameters": [
           {
@@ -3537,6 +3537,13 @@
                         "items": {
                           "$ref": "#/components/schemas/OrderItem"
                         }
+                      },
+                      "modifies": {
+                        "type": "array",
+                        "items": {
+                          "$ref": "#/components/schemas/ModifyItem"
+                        },
+                        "description": "Optional: orders to modify in place (see `ModifyItem`); omitted or empty keeps the request a plain `BatchReplace`"
                       },
                       "nowMs": {
                         "type": "integer",
@@ -7129,7 +7136,7 @@
       },
       "BatchResult": {
         "type": "object",
-        "description": "Per-item outcome of a batch (always 200 unless the whole command was rejected, then 422). In `/v1/orders/replace` cancels and orders are numbered separately from 0, so an item is identified by `(kind, index)`",
+        "description": "Per-item outcome of a batch (always 200 unless the whole command was rejected, then 422). In `/v1/orders/replace` cancels, modifies and orders are numbered separately from 0, so an item is identified by `(kind, index)`",
         "properties": {
           "status": {
             "type": "string",
@@ -7170,13 +7177,14 @@
               "properties": {
                 "index": {
                   "type": "integer",
-                  "description": "Position in the input (`orders[]` or `cancels[]` for replace)"
+                  "description": "Position in the input (`orders[]`, `cancels[]` or `modifies[]` for replace)"
                 },
                 "kind": {
                   "type": "string",
                   "enum": [
                     "place",
-                    "cancel"
+                    "cancel",
+                    "modify"
                   ]
                 },
                 "status": {
@@ -7195,7 +7203,12 @@
                   ]
                 },
                 "orderId": {
-                  "type": "string"
+                  "type": "string",
+                  "description": "Place items: the new order; cancel items: the order to cancel; modify items accepted: the new order"
+                },
+                "replacedOrderId": {
+                  "type": "string",
+                  "description": "Modify items: the order being modified"
                 },
                 "clientOrderId": {
                   "type": "string",
@@ -7208,16 +7221,16 @@
                 "filled": {
                   "type": "string",
                   "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
-                  "description": "Place items accepted: size filled within this command"
+                  "description": "Place / modify items accepted: size filled within this command"
                 },
                 "resting": {
                   "type": "boolean",
-                  "description": "Place items accepted: whether the remainder rests on the book"
+                  "description": "Place / modify items accepted: whether the remainder rests on the book"
                 },
                 "avgPrice": {
                   "type": "string",
                   "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
-                  "description": "Place items accepted: volume-weighted price of `fills[]`; absent when nothing filled"
+                  "description": "Place / modify items accepted: volume-weighted price of `fills[]`; absent when nothing filled"
                 },
                 "fills": {
                   "type": "array",
@@ -7228,7 +7241,7 @@
                 "canceled": {
                   "type": "string",
                   "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
-                  "description": "Cancel items canceled: size removed from the book"
+                  "description": "Cancel items canceled: size removed from the book; modify items: remaining size of the old order that was canceled (accepted, or rejected after the old order was removed — absent when the old order was not there)"
                 }
               }
             }
@@ -7586,6 +7599,46 @@
           }
         },
         "description": "An order without the signature envelope (the items of `/v1/orders/replace` `orders[]`, signed by the outer envelope)"
+      },
+      "ModifyItem": {
+        "type": "object",
+        "description": "One modify of `POST /v1/orders/replace` (`modifies[]`): the same semantics as `POST /v1/orders/modify` — one amend record that cancels `orderId` and places the new price / size with the side inherited from it. The old order is gone (filled / canceled / not yours) → the item is rejected `UnknownOrder` and nothing changes; the new order is refused → the item is rejected with the real code and the old order is canceled anyway. No `side`, `type`, `symbol` or `clientOrderId` (400)",
+        "required": [
+          "orderId",
+          "price",
+          "size"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "orderId": {
+            "type": "string",
+            "description": "The order to modify (decimal orderId on the request's `symbol`)"
+          },
+          "price": {
+            "type": "string",
+            "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
+            "description": "New limit price"
+          },
+          "size": {
+            "type": "string",
+            "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
+            "description": "New size (decimal string, > 0)"
+          },
+          "tif": {
+            "type": "string",
+            "enum": [
+              "gtc",
+              "ioc",
+              "alo",
+              "fok"
+            ],
+            "default": "gtc"
+          },
+          "reduceOnly": {
+            "type": "boolean",
+            "default": false
+          }
+        }
       },
       "AgentApproved": {
         "type": "object",
