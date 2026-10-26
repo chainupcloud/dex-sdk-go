@@ -3422,7 +3422,7 @@
           "Trading"
         ],
         "summary": "Replace order",
-        "description": "Cancel the old order and place the new one in a single state transition (not atomic).",
+        "description": "Cancel the old order and place the new one in a single state transition (not atomic). The new orders are attributed like `POST /v1/orders` (the top-level `builder`, else the entry domain) and pass the builder's catalog gate item by item; a replace that only cancels resolves no builder. An order item with `replaces` is paired with that cancel: the pair is one amend (`PairedOrderItem`, same semantics as `POST /v1/orders/modify`), so a pair whose old order was already filled places nothing; pairs and unpaired items are judged item by item. Malformed pairing (out of range, a cancel paired twice, a paired item with `side`) is 400 before sequencing.",
         "operationId": "v1_replace",
         "parameters": [
           {
@@ -3535,7 +3535,14 @@
                       "orders": {
                         "type": "array",
                         "items": {
-                          "$ref": "#/components/schemas/OrderItem"
+                          "oneOf": [
+                            {
+                              "$ref": "#/components/schemas/OrderItem"
+                            },
+                            {
+                              "$ref": "#/components/schemas/PairedOrderItem"
+                            }
+                          ]
                         }
                       },
                       "nowMs": {
@@ -7586,6 +7593,59 @@
           }
         },
         "description": "An order without the signature envelope (the items of `/v1/orders/replace` `orders[]`, signed by the outer envelope)"
+      },
+      "PairedOrderItem": {
+        "type": "object",
+        "required": [
+          "replaces",
+          "price",
+          "size"
+        ],
+        "description": "An order on `POST /v1/orders/replace` paired with one of the cancels: the pair is one amend with the semantics of `POST /v1/orders/modify` (the old order already gone → both items `UnknownOrder` and no new order; the new order rejected → the old order is canceled too). It takes the side, the market and the builder of the order it replaces, so it carries no `side`. Any paired item turns the whole replace into the `BatchReplacePaired` command (sign its canonical bytes); a replace without one is still `BatchReplace`",
+        "properties": {
+          "replaces": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Index into `cancels` (from 0) of the order this one replaces; each cancel is paired at most once"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "limit"
+            ],
+            "default": "limit"
+          },
+          "price": {
+            "type": "string",
+            "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
+            "description": "Limit price"
+          },
+          "size": {
+            "type": "string",
+            "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
+            "description": "Decimal string"
+          },
+          "tif": {
+            "type": "string",
+            "enum": [
+              "gtc",
+              "ioc",
+              "alo",
+              "fok"
+            ],
+            "default": "gtc"
+          },
+          "reduceOnly": {
+            "type": "boolean",
+            "default": false
+          },
+          "clientOrderId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:/-]{1,36}$",
+            "description": "Client order id, unique per account and **consumed once sequenced** (even if execution rejects the order). Accepted on the main-wallet path and on the API-wallet path (batch items, single `signer` orders, `/v1/orders/replace` orders). A duplicate is `409 GatewayDuplicateClientOrderId`; the gateway reserves it atomically before sequencing and releases it if the request fails before sequencing. Look the order up with `GET /v1/orders/client/{cid}` and cancel by it. **Not part of the signature**"
+          }
+        },
+        "additionalProperties": false
       },
       "AgentApproved": {
         "type": "object",

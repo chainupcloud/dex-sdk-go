@@ -270,6 +270,7 @@ var postFixtureSchemas = []struct {
 	{"w_batch_cancel.json", "/v1/orders/cancel", "200"},
 	{"w_cancel_one.json", "/v1/orders/cancel", "200"},
 	{"w_replace.json", "/v1/orders/replace", "200"},
+	{"w_replace_paired.json", "/v1/orders/replace", "200"},
 	{"w_cancel_all.json", "/v1/orders/cancel-all", "200"},
 	{"w_schedule.json", "/v1/orders/schedule-cancel", "200"},
 	{"w_leverage.json", "/v1/account/leverage", "200"},
