@@ -46,6 +46,8 @@ const (
 	tagScheduleCancel    byte = 0x16
 	tagBatchPlace        byte = 0x31
 	tagBatchReplace      byte = 0x3E
+	// 带配对的原子换单(dex-os#256,规格 dex-os docs/specs/batch-replace-paired.md)
+	tagBatchReplacePaired byte = 0x88
 )
 
 // Side 买卖方向。取值必须与内核的 put_side 一致。
@@ -187,6 +189,53 @@ func EncodeBatchReplace(account uint32, nowMs uint64, cancels []OrderID, orders 
 	e.u32(uint32(len(orders)))
 	for _, o := range orders {
 		e.order(o)
+	}
+	return e.buf
+}
+
+// ReplaceItem 带配对换单(Command::BatchReplacePaired)的一个下单项。
+//
+// Replaces 为 nil 是普通下单项,按 Order 全部字段编码(同 BatchReplace 的下单项);
+// 非 nil 是配对项:替换 cancels[*Replaces],这一对在执行层是一次改单(旧单已不在则什么都不做,
+// 新单被拒则旧单一并撤),只编 Order 的 Price / Lots / TIF / ReduceOnly —— 方向与市场从旧单继承。
+type ReplaceItem struct {
+	Order    BatchOrder
+	Replaces *uint32
+}
+
+// EncodeBatchReplacePaired 规范编码 Command::BatchReplacePaired(tag 0x88)。
+//
+// 布局同 BatchReplace,只是每个下单项前多一个子标签:
+//
+//	tag | account u32 | nowMs u64 | cancels len u32 | 每个 OrderId u64 | orders len u32 | 每项:
+//	  0 | market u16 | side u8 | price u32 | lots u64 | tif u8 | reduceOnly u8   (普通下单项)
+//	  1 | replaces u32 | price u32 | lots u64 | tif u8 | reduceOnly u8          (配对项)
+//
+// 不进 testdata/golden.json(那份要求每份浏览器编码器都实现全部命令,前端不发这条);
+// 字节钉在 TestEncodeBatchReplacePairedPinned,与 dex-os `paired_replace_roundtrips_with_pinned_layout` 同一个字面量。
+func EncodeBatchReplacePaired(account uint32, nowMs uint64, cancels []OrderID, orders []ReplaceItem) []byte {
+	e := &encoder{}
+	e.u8(codecVersion)
+	e.u8(tagBatchReplacePaired)
+	e.u32(account)
+	e.u64(nowMs)
+	e.u32(uint32(len(cancels)))
+	for _, c := range cancels {
+		e.u64(uint64(c))
+	}
+	e.u32(uint32(len(orders)))
+	for _, o := range orders {
+		if o.Replaces == nil {
+			e.u8(0)
+			e.order(o.Order)
+			continue
+		}
+		e.u8(1)
+		e.u32(*o.Replaces)
+		e.u32(o.Order.Price)
+		e.u64(o.Order.Lots)
+		e.u8(byte(o.Order.TIF))
+		e.boolean(o.Order.ReduceOnly)
 	}
 	return e.buf
 }

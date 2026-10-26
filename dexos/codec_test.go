@@ -122,3 +122,31 @@ func TestOrderIDPacking(t *testing.T) {
 		}
 	}
 }
+
+// 带配对的原子换单(tag 0x88)没进共享金样:同一个十六进制字面量钉在 dex-os
+// `crates/core/src/codec.rs` 的 `paired_replace_roundtrips_with_pinned_layout`,两边各自对着它,差一个字节就有一边红。
+func TestEncodeBatchReplacePairedPinned(t *testing.T) {
+	one := uint32(1)
+	got := EncodeBatchReplacePaired(4, 2003,
+		[]OrderID{OrderID(9), OrderID(7<<48 | 42)},
+		[]ReplaceItem{
+			{Order: BatchOrder{Price: 51000, Lots: 5, TIF: PostOnly, ReduceOnly: true}, Replaces: &one},
+			{Order: BatchOrder{Market: 7, Side: Sell, Price: 52000, Lots: 3, TIF: GTC}},
+		})
+	const want = "018804000000d3070000000000000200000009000000000000002a00000000000700" +
+		"02000000010100000038c70000050000000000000002010007000120cb00000300" +
+		"0000000000000000"
+	if h := hex.EncodeToString(got); h != want {
+		t.Fatalf("BatchReplacePaired 编码与 dex-os 不一致\n得到 %s\n应为 %s", h, want)
+	}
+	// 配对项不编方向与市场:改了它们字节不变
+	got2 := EncodeBatchReplacePaired(4, 2003,
+		[]OrderID{OrderID(9), OrderID(7<<48 | 42)},
+		[]ReplaceItem{
+			{Order: BatchOrder{Market: 99, Side: Sell, Price: 51000, Lots: 5, TIF: PostOnly, ReduceOnly: true}, Replaces: &one},
+			{Order: BatchOrder{Market: 7, Side: Sell, Price: 52000, Lots: 3, TIF: GTC}},
+		})
+	if hex.EncodeToString(got2) != want {
+		t.Fatal("配对项的方向 / 市场不该进编码")
+	}
+}
