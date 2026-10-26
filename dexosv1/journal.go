@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strconv"
 
 	"github.com/chainupcloud/dex-sdk-go/dexos"
 )
@@ -21,8 +20,8 @@ import (
 var ErrRequestDeclined = errors.New("dexosv1: 写前日志在落账前拒绝了这次请求")
 
 // ReplaceIntent 一次原子换单在发出之前就确定的全部内容。CommandHash / SigningHash(在 Request 里)
-// 由 SigningAccountID、NowMs、Market.SigningMarketID、Cancels、Orders 按规范编码与 Domain 唯一确定,
-// 调用方可以独立重算核对。
+// 由 SigningAccountID、NowMs、Market.SigningMarketID、Cancels、Modifies、Orders 按规范编码与 Domain 唯一确定,
+// 调用方可以独立重算核对(Modifies 为空 → [dexos.EncodeBatchReplace],否则 [dexos.EncodeBatchReplace2])。
 type ReplaceIntent struct {
 	Request *RequestIdentity
 	// SigningAccountID 签进命令的账户号(`/v1/account/nonce` 给的 signingAccountId)。
@@ -33,6 +32,8 @@ type ReplaceIntent struct {
 	Market *Market
 	// Cancels 要撤的订单号(v1 的 orderId,即订单序号),顺序即撤单项的 index。
 	Cancels []uint64
+	// Modifies 改单项的执行层参数,顺序即改单项的 index;没有改单项时为 nil。
+	Modifies []dexos.BatchModify
 	// Orders 新单的执行层参数,顺序即下单项的 index。
 	Orders []dexos.BatchOrder
 }
@@ -58,36 +59,30 @@ func (e *journalError) Unwrap() error { return e.err }
 // ReplaceJournaled 同 [Session.Replace],另在发送前、收到结论后各调一次 journal(见 [ReplaceJournal])。
 // nonce 只在请求进了日志且 AfterReceive 成功之后按 [Session.Replace] 的规则推进。
 func (s *Session) ReplaceJournaled(ctx context.Context, m *Market, cancels []uint64, orders []OrderRequest, journal ReplaceJournal) (*BatchResult, error) {
+	return s.ReplaceModifyJournaled(ctx, m, cancels, nil, orders, journal)
+}
+
+// ReplaceModifyJournaled 同 [Session.ReplaceModify],写前日志的规则同 [Session.ReplaceJournaled]。
+func (s *Session) ReplaceModifyJournaled(ctx context.Context, m *Market, cancels []uint64, modifies []ModifyRequest, orders []OrderRequest, journal ReplaceJournal) (*BatchResult, error) {
 	if journal == nil {
 		return nil, errors.New("dexosv1: 缺写前日志")
 	}
-	if err := sameMarket(m, orders); err != nil {
+	p, err := prepareReplace(m, cancels, modifies, orders)
+	if err != nil {
 		return nil, err
 	}
-	ids := make([]dexos.OrderID, len(cancels))
-	wireCancels := make([]string, len(cancels))
-	for i, seq := range cancels {
-		ids[i] = dexos.NewOrderID(m.SigningMarketID, seq)
-		wireCancels[i] = strconv.FormatUint(seq, 10)
-	}
-	items := make([]wireOrderReq, len(orders))
-	batch := make([]dexos.BatchOrder, len(orders))
-	for i, o := range orders {
-		w, err := o.wire(nil)
-		if err != nil {
-			return nil, err
-		}
-		items[i], batch[i] = w, o.batchOrder()
-	}
 	var out *BatchResult
-	err := s.write(ctx, func(nonce uint64) (*RequestIdentity, error) {
+	err = s.write(ctx, func(nonce uint64) (*RequestIdentity, error) {
 		now := nowMs()
-		cmd := dexos.EncodeBatchReplace(s.signingID, now, ids, batch)
+		cmd := p.command(s.signingID, now)
 		agent := s.Agent.Address()
 		digest := s.domain.AgentExecHash(cmd, nonce)
 		id := newIdentity(agent, "agent:"+agent.Hex(), nonce, digest, dexos.Keccak256(cmd))
 		intent := ReplaceIntent{Request: id, SigningAccountID: s.signingID, NowMs: now, Domain: s.domain, Market: m,
-			Cancels: append([]uint64{}, cancels...), Orders: append([]dexos.BatchOrder{}, batch...)}
+			Cancels: append([]uint64{}, cancels...), Orders: append([]dexos.BatchOrder{}, p.batch...)}
+		if len(p.mods) > 0 {
+			intent.Modifies = append([]dexos.BatchModify{}, p.mods...)
+		}
 		if err := journal.BeforeSend(ctx, intent); err != nil {
 			if errors.Is(err, ErrRequestDeclined) {
 				return nil, fmt.Errorf("%w: %w", ErrNotSent, err)
@@ -97,12 +92,12 @@ func (s *Session) ReplaceJournaled(ctx context.Context, m *Market, cancels []uin
 		// exec 按同一 nonce 与命令重算出同一个请求身份(确定性签名),发出去的就是日志里那一条。
 		_, status, raw, sendErr := s.exec(ctx, nonce, cmd, "/v1/orders/replace", func(env *envelope) any {
 			env.NowMs = now
-			return wireReplaceReq{envelope: env, Symbol: m.Symbol, Cancels: wireCancels, Orders: items}
+			return p.body(env, m)
 		})
 		if sendErr == nil {
 			var r Receipt
 			if r, sendErr = receipt(status, raw, id); sendErr == nil {
-				out, sendErr = batchResult(m, r, raw, len(orders), len(cancels))
+				out, sendErr = batchResult(m, r, raw, len(orders), len(cancels), len(modifies))
 			}
 		}
 		if sendErr != nil {
