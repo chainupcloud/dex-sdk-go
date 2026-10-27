@@ -1,5 +1,7 @@
 - `openapi-v1.json`:dex-os 开放 API v1.1 规格的副本,取自 chainupcloud/dex-os `web/openapi-v1.json`
-  @ `2c5d2c2`(main,含 v1.1 §4.9 补缺 PR 9b #83、§4.10 补缺 PR 9c-A #90 与 K 线 / tickers #82),逐字节相同。
+  @ `2c5d2c2`(main,含 v1.1 §4.9 补缺 PR 9b #83、§4.10 补缺 PR 9c-A #90 与 K 线 / tickers #82),逐字节相同;
+  另补了 dex-os#256 的换单改单项(`components.schemas.ModifyItem`、`/v1/orders/replace` 请求体的 `modifies` 与操作说明、
+  `BatchResult.items[]` 的 `modify` 种类与 `replacedOrderId`,取自 dex-os `web/openapi-v1.json` 同名段落)。整份重新同步会牵动大量既有样例,留待单独一次。
   dex-os 改了 v1 接口面就同步更新这份副本,再跑 `go test ./dexosv1/`;`write_test.go` 的 `specDeviations`
   登记已知的规格与实现差异,条目过期(规格已修好)测试会失败,提醒删掉。
 - `fixtures/`:假服务的响应样例。形状按开发环境的真实响应整理,地址换成了假地址;

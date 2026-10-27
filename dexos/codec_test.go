@@ -122,3 +122,24 @@ func TestOrderIDPacking(t *testing.T) {
 		}
 	}
 }
+
+// BatchReplace2(tag 0x88)不进共享金样:字面量与 dex-os `batch_replace2_roundtrips_with_pinned_layout` 相同,
+// 两边各自对着它,差一个字节就有一边红。
+func TestEncodeBatchReplace2Pinned(t *testing.T) {
+	got := EncodeBatchReplace2(4, 2003,
+		[]OrderID{9},
+		[]BatchModify{{Order: NewOrderID(7, 42), Price: 51000, Lots: 5, TIF: PostOnly, ReduceOnly: true}},
+		[]BatchOrder{{Market: 7, Side: Sell, Price: 52000, Lots: 3, TIF: GTC}},
+	)
+	const want = "018804000000d307000000000000010000000900000000000000010000002a00000000000700" +
+		"38c70000050000000000000002010100000007000120cb00000300000000000000" +
+		"0000"
+	if hex.EncodeToString(got) != want {
+		t.Fatalf("BatchReplace2 字节漂移:\n got %x\nwant %s", got, want)
+	}
+	// 没有改单项时仍是三个长度前缀,不会退化成 BatchReplace 的布局
+	empty := EncodeBatchReplace2(0, 0, nil, nil, nil)
+	if hex.EncodeToString(empty) != "0188"+"00000000"+"0000000000000000"+"00000000"+"00000000"+"00000000" {
+		t.Fatalf("空批: %x", empty)
+	}
+}

@@ -271,7 +271,7 @@ func (s *Session) Place(ctx context.Context, orders ...OrderRequest) (*BatchResu
 		if err != nil {
 			return id, err
 		}
-		out, err = batchResult(m, r, raw, len(orders), 0)
+		out, err = batchResult(m, r, raw, len(orders), 0, 0)
 		return id, err
 	})
 	return out, err
@@ -308,7 +308,7 @@ func (s *Session) Cancel(ctx context.Context, m *Market, orderIDs ...uint64) (*B
 		if err != nil {
 			return id, err
 		}
-		out, err = batchResult(m, r, raw, 0, len(orderIDs))
+		out, err = batchResult(m, r, raw, 0, len(orderIDs), 0)
 		return id, err
 	})
 	return out, err
@@ -316,38 +316,102 @@ func (s *Session) Cancel(ctx context.Context, m *Market, orderIDs ...uint64) (*B
 
 type wireReplaceReq struct {
 	*envelope
-	Symbol  string         `json:"symbol"`
-	Cancels []string       `json:"cancels"`
-	Orders  []wireOrderReq `json:"orders"`
+	Symbol  string   `json:"symbol"`
+	Cancels []string `json:"cancels"`
+	// 没有改单项时不出现,请求体与没有改单能力之前一字不差
+	Modifies []wireModifyReq `json:"modifies,omitempty"`
+	Orders   []wireOrderReq  `json:"orders"`
 }
 
-// Replace **原子换单**:撤旧挂新落在同一个状态机转移里,没有无报价的中间窗口。做市刷新报价用它。
-// 逐项仍尽力而为(一张保证金不足不废掉整轮)。新单可以带 clientOrderId,规则同批量下单。
-func (s *Session) Replace(ctx context.Context, m *Market, cancels []uint64, orders []OrderRequest) (*BatchResult, error) {
+// replaceParts 一次换单在签名之前就确定的部分:线上形状与规范编码的要素。
+type replaceParts struct {
+	ids         []dexos.OrderID
+	wireCancels []string
+	modifies    []wireModifyReq
+	mods        []dexos.BatchModify
+	items       []wireOrderReq
+	batch       []dexos.BatchOrder
+}
+
+// prepareReplace 校验并组好一次换单。所有本地能判的错都在这里报,签名之前、不碰 nonce。
+func prepareReplace(m *Market, cancels []uint64, modifies []ModifyRequest, orders []OrderRequest) (*replaceParts, error) {
 	if err := sameMarket(m, orders); err != nil {
 		return nil, err
 	}
-	ids := make([]dexos.OrderID, len(cancels))
-	wireCancels := make([]string, len(cancels))
-	for i, seq := range cancels {
-		ids[i] = dexos.NewOrderID(m.SigningMarketID, seq)
-		wireCancels[i] = strconv.FormatUint(seq, 10)
+	p := &replaceParts{
+		ids:         make([]dexos.OrderID, len(cancels)),
+		wireCancels: make([]string, len(cancels)),
+		items:       make([]wireOrderReq, len(orders)),
+		batch:       make([]dexos.BatchOrder, len(orders)),
 	}
-	items := make([]wireOrderReq, len(orders))
-	batch := make([]dexos.BatchOrder, len(orders))
+	for i, seq := range cancels {
+		p.ids[i] = dexos.NewOrderID(m.SigningMarketID, seq)
+		p.wireCancels[i] = strconv.FormatUint(seq, 10)
+	}
+	if len(modifies) > 0 {
+		// 与网关一致:同一张旧单在撤单项与改单项里合起来只许出现一次
+		seen := make(map[uint64]bool, len(cancels)+len(modifies))
+		for _, seq := range cancels {
+			seen[seq] = true
+		}
+		p.modifies = make([]wireModifyReq, len(modifies))
+		p.mods = make([]dexos.BatchModify, len(modifies))
+		for i, o := range modifies {
+			if seen[o.OrderID] {
+				return nil, fmt.Errorf("dexosv1: 订单 %d 在撤单项与改单项里出现了不止一次", o.OrderID)
+			}
+			seen[o.OrderID] = true
+			w, err := o.wire(m)
+			if err != nil {
+				return nil, err
+			}
+			p.modifies[i], p.mods[i] = w, o.batchModify(m)
+		}
+	}
 	for i, o := range orders {
 		w, err := o.wire(nil)
 		if err != nil {
 			return nil, err
 		}
-		items[i], batch[i] = w, o.batchOrder()
+		p.items[i], p.batch[i] = w, o.batchOrder()
+	}
+	return p, nil
+}
+
+// command 规范编码:有改单项时是 BatchReplace2,否则是 BatchReplace(与没有改单能力之前一字不差)。
+func (p *replaceParts) command(account uint32, now uint64) []byte {
+	if len(p.mods) == 0 {
+		return dexos.EncodeBatchReplace(account, now, p.ids, p.batch)
+	}
+	return dexos.EncodeBatchReplace2(account, now, p.ids, p.mods, p.batch)
+}
+
+func (p *replaceParts) body(env *envelope, m *Market) wireReplaceReq {
+	return wireReplaceReq{envelope: env, Symbol: m.Symbol, Cancels: p.wireCancels, Modifies: p.modifies, Orders: p.items}
+}
+
+// Replace **原子换单**:撤旧挂新落在同一个状态机转移里,没有无报价的中间窗口。做市刷新报价用它。
+// 逐项仍尽力而为(一张保证金不足不废掉整轮)。新单可以带 clientOrderId,规则同批量下单。
+func (s *Session) Replace(ctx context.Context, m *Market, cancels []uint64, orders []OrderRequest) (*BatchResult, error) {
+	return s.ReplaceModify(ctx, m, cancels, nil, orders)
+}
+
+// ReplaceModify 带改单项的原子换单(dex-os#256):撤单 → 改单 → 下单落在同一条命令里,一个签名、一个 nonce。
+// 每个改单项是一次单笔改单 —— 旧单已成交 / 已撤 / 不是本人则这一项 UnknownOrder、不挂新单;新单被拒则旧单一并撤
+// (回执里该项 CanceledLots 有值)。各项互不牵连,回执按 (Kind, Index) 逐项给出,改单项 Kind = "modify"。
+// modifies 为空时与 [Session.Replace] 完全相同(签 BatchReplace);否则签 BatchReplace2。
+// 整条一个事件都没出(例如只有一个改单项而旧单已不在)时网关整条回 422,这时 nonce 已消费。
+func (s *Session) ReplaceModify(ctx context.Context, m *Market, cancels []uint64, modifies []ModifyRequest, orders []OrderRequest) (*BatchResult, error) {
+	p, err := prepareReplace(m, cancels, modifies, orders)
+	if err != nil {
+		return nil, err
 	}
 	var out *BatchResult
-	err := s.write(ctx, func(nonce uint64) (*RequestIdentity, error) {
+	err = s.write(ctx, func(nonce uint64) (*RequestIdentity, error) {
 		now := nowMs()
-		id, status, raw, err := s.exec(ctx, nonce, dexos.EncodeBatchReplace(s.signingID, now, ids, batch), "/v1/orders/replace", func(env *envelope) any {
+		id, status, raw, err := s.exec(ctx, nonce, p.command(s.signingID, now), "/v1/orders/replace", func(env *envelope) any {
 			env.NowMs = now
-			return wireReplaceReq{envelope: env, Symbol: m.Symbol, Cancels: wireCancels, Orders: items}
+			return p.body(env, m)
 		})
 		if err != nil {
 			return id, err
@@ -356,7 +420,7 @@ func (s *Session) Replace(ctx context.Context, m *Market, cancels []uint64, orde
 		if err != nil {
 			return id, err
 		}
-		out, err = batchResult(m, r, raw, len(orders), len(cancels))
+		out, err = batchResult(m, r, raw, len(orders), len(cancels), len(modifies))
 		return id, err
 	})
 	return out, err

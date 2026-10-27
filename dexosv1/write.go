@@ -163,6 +163,49 @@ func (o OrderRequest) wire(env *envelope) (wireOrderReq, error) {
 	}, nil
 }
 
+// ModifyRequest 原子换单里的一个改单项([Session.ReplaceModify],dex-os#256):把本市场上的挂单 OrderID
+// 改成新价量(tick / lot),语义同单笔改单 —— 旧单已成交 / 已撤 / 不是本人则这一项 UnknownOrder、不挂新单;
+// 新单被拒则旧单一并撤。方向从旧单继承,不上线、不进签名;首版不收 clientOrderId。
+type ModifyRequest struct {
+	OrderID    uint64
+	Price      uint32
+	Lots       uint64
+	TIF        dexos.TimeInForce
+	ReduceOnly bool
+}
+
+// wireModifyReq 换单里一个改单项的请求形状(不带方向、符号、类型)。
+type wireModifyReq struct {
+	OrderID    string `json:"orderId"`
+	Price      string `json:"price"`
+	Size       string `json:"size"`
+	TIF        string `json:"tif"`
+	ReduceOnly bool   `json:"reduceOnly"`
+}
+
+// wire 校验并换成线上形状,同 [OrderRequest.wire]:签名之前、不碰 nonce。
+func (o ModifyRequest) wire(m *Market) (wireModifyReq, error) {
+	tif, ok := tifWire[o.TIF]
+	if !ok {
+		return wireModifyReq{}, fmt.Errorf("dexosv1: 未知的 TIF %d", o.TIF)
+	}
+	if o.Price == 0 || o.Lots == 0 {
+		return wireModifyReq{}, fmt.Errorf("dexosv1: 改单 %d 的价格与数量都必须大于 0", o.OrderID)
+	}
+	return wireModifyReq{
+		OrderID:    strconv.FormatUint(o.OrderID, 10),
+		Price:      m.Scale.Price(o.Price),
+		Size:       m.Scale.Size(o.Lots),
+		TIF:        tif,
+		ReduceOnly: o.ReduceOnly,
+	}, nil
+}
+
+func (o ModifyRequest) batchModify(m *Market) dexos.BatchModify {
+	return dexos.BatchModify{Order: dexos.NewOrderID(m.SigningMarketID, o.OrderID), Price: o.Price, Lots: o.Lots, TIF: o.TIF,
+		ReduceOnly: o.ReduceOnly}
+}
+
 func validCID(s string) bool {
 	if len(s) == 0 || len(s) > 36 {
 		return false
@@ -375,24 +418,27 @@ func orderResult(m *Market, r Receipt, raw []byte) (*OrderResult, error) {
 
 // BatchItem 批量(下单 / 撤单 / 换单)的一项结局。逐项独立判定:一项被拒不影响其余。
 type BatchItem struct {
-	// Kind "place" | "cancel";Index 是该项在**同类**输入里的下标(换单的撤单与新单各自从 0 数)。
+	// Kind "place" | "cancel" | "modify";Index 是该项在**同类**输入里的下标(换单的撤单、改单、新单各自从 0 数)。
 	Kind  string
 	Index int
-	// Status place → accepted | rejected;cancel → canceled | rejected。
+	// Status place / modify → accepted | rejected;cancel → canceled | rejected。
 	Status string
 	Symbol string
-	// OrderID 下单成功时是新单号;撤单项是被撤(或撤不到)的单号。
+	// OrderID 下单 / 改单成功时是新单号;撤单项是被撤(或撤不到)的单号。
 	OrderID *uint64
+	// ReplacedOrderID 改单项要改的旧单号。
+	ReplacedOrderID *uint64
 	// Code 被拒时的拒因(CoreError 变体名,如 InsufficientMargin / UnknownOrder)。
 	Code string
-	// FilledLots / Resting 下单项被接受时有:即时成交量、余量是否挂上了簿。
+	// FilledLots / Resting 下单 / 改单项被接受时有:即时成交量、余量是否挂上了簿。
 	FilledLots *uint64
 	Resting    *bool
-	// CanceledLots 撤单项成功时有:撤掉的剩余量。
+	// CanceledLots 撤单项成功时有:撤掉的剩余量。改单项在旧单确实被撤掉时有(被接受,或新单被拒但旧单已撤);
+	// 旧单本来就不在时没有。
 	CanceledLots *uint64
 	// ClientOrderID 下单项带了 clientOrderId 时回显。
 	ClientOrderID *string
-	// AvgPrice / Fills 下单项本命令里作为吃单方的成交;没有即时成交时为空。
+	// AvgPrice / Fills 下单 / 改单项的新单本命令里作为吃单方的成交;没有即时成交时为空。
 	AvgPrice *uint32
 	Fills    []ReceiptFill
 }
@@ -409,6 +455,7 @@ type wireBatchItem struct {
 	Status        string            `json:"status"`
 	Symbol        string            `json:"symbol"`
 	OrderID       *string           `json:"orderId"`
+	Replaced      *string           `json:"replacedOrderId"`
 	Code          string            `json:"code"`
 	Filled        *string           `json:"filled"`
 	Resting       *bool             `json:"resting"`
@@ -419,19 +466,19 @@ type wireBatchItem struct {
 }
 
 // batchResult 解析并核对逐项结局:每个 (kind, index) 恰好一项,项数与请求相同,符号是本市场。
-func batchResult(m *Market, r Receipt, raw []byte, places, cancels int) (*BatchResult, error) {
+func batchResult(m *Market, r Receipt, raw []byte, places, cancels, modifies int) (*BatchResult, error) {
 	var w struct {
 		Items []wireBatchItem `json:"items"`
 	}
 	if err := json.Unmarshal(raw, &w); err != nil {
 		return nil, fmt.Errorf("dexosv1: 批量回执解析失败: %w", err)
 	}
-	want := map[string]int{"place": places, "cancel": cancels}
+	want := map[string]int{"place": places, "cancel": cancels, "modify": modifies}
 	seen := map[string]bool{}
 	out := &BatchResult{Receipt: r, Items: make([]BatchItem, 0, len(w.Items))}
 	for _, wi := range w.Items {
 		if wi.Index == nil || *wi.Index < 0 || *wi.Index >= want[wi.Kind] {
-			return nil, fmt.Errorf("%w: 项 %+v 不在请求里(下单 %d 项,撤单 %d 项)", ErrIncompleteBatch, wi, places, cancels)
+			return nil, fmt.Errorf("%w: 项 %+v 不在请求里(下单 %d 项,撤单 %d 项,改单 %d 项)", ErrIncompleteBatch, wi, places, cancels, modifies)
 		}
 		key := wi.Kind + "/" + strconv.Itoa(*wi.Index)
 		if seen[key] {
@@ -447,8 +494,8 @@ func batchResult(m *Market, r Receipt, raw []byte, places, cancels int) (*BatchR
 		}
 		out.Items = append(out.Items, it)
 	}
-	if len(seen) != places+cancels {
-		return nil, fmt.Errorf("%w: 回了 %d 项,请求 %d 项", ErrIncompleteBatch, len(seen), places+cancels)
+	if len(seen) != places+cancels+modifies {
+		return nil, fmt.Errorf("%w: 回了 %d 项,请求 %d 项", ErrIncompleteBatch, len(seen), places+cancels+modifies)
 	}
 	return out, nil
 }
@@ -459,16 +506,23 @@ func (w wireBatchItem) item(m *Market) (BatchItem, error) {
 	switch {
 	case w.Status == "rejected" && w.Code == "":
 		return it, errors.New("被拒但没有拒因")
-	case w.Kind == "place" && w.Status != "accepted" && w.Status != "rejected",
+	case w.Kind != "cancel" && w.Status != "accepted" && w.Status != "rejected",
 		w.Kind == "cancel" && w.Status != "canceled" && w.Status != "rejected":
 		return it, fmt.Errorf("%s 项的状态 %q 不在契约内", w.Kind, w.Status)
 	}
-	if w.OrderID != nil {
-		id, err := strconv.ParseUint(*w.OrderID, 10, 64)
-		if err != nil {
-			return it, fmt.Errorf("orderId %q: %w", *w.OrderID, err)
+	orderID := func(s *string) (*uint64, error) {
+		if s == nil {
+			return nil, nil
 		}
-		it.OrderID = &id
+		id, err := strconv.ParseUint(*s, 10, 64)
+		return &id, err
+	}
+	var err error
+	if it.OrderID, err = orderID(w.OrderID); err != nil {
+		return it, fmt.Errorf("orderId %q: %w", *w.OrderID, err)
+	}
+	if it.ReplacedOrderID, err = orderID(w.Replaced); err != nil {
+		return it, fmt.Errorf("replacedOrderId %q: %w", *w.Replaced, err)
 	}
 	lots := func(s *string) (*uint64, error) {
 		if s == nil {
@@ -477,7 +531,6 @@ func (w wireBatchItem) item(m *Market) (BatchItem, error) {
 		n, err := m.Scale.Lots(*s)
 		return &n, err
 	}
-	var err error
 	if it.FilledLots, err = lots(w.Filled); err != nil {
 		return it, fmt.Errorf("filled: %w", err)
 	}

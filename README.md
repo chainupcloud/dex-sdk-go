@@ -237,6 +237,18 @@ res, err := s.Replace(ctx, btc, oldOrderIDs, newQuotes)
 「原子」的准确含义是**没有中间窗口**,不是「全成功或全回滚」:逐项仍尽力而为(撤不掉的跳过、挂不上的
 跳过),否则一张单的保证金不足会废掉整轮报价刷新 —— 那对做市商比部分成功更糟。
 
+**改单项**(dex-os#256):同一条命令里还可以带改单项,每项就是一次单笔改单 —— 旧单已成交就不挂新单、
+新单被拒旧单一并撤,所以每个改单项的旧单和新单最多只有一边能成交,顶格守仓位上限时不必先撤再挂:
+
+```go
+res, err := s.ReplaceModify(ctx, btc, cancelIDs,
+	[]dexosv1.ModifyRequest{{OrderID: bidID, Price: newBid, Lots: lots, TIF: dexos.PostOnly}},
+	newQuotes)
+```
+
+回执里改单项是 `Kind == "modify"`,`ReplacedOrderID` 是旧单、`OrderID` 是新单,旧单真的被撤掉时 `CanceledLots` 有值。
+不带改单项时与 `Replace` 完全相同;写前日志版是 `ReplaceModifyJournaled`。
+
 断线保护:`s.ScheduleCancel(ctx, time.Now().Add(30*time.Second))` 到点撤掉账户全部挂单,每轮报价顺手往后续
 一次;零值时间 = 清除。`s.CancelAll` 在下一个块边界生效,其间新挂的单同样会被撤。
 

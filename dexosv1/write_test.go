@@ -184,6 +184,16 @@ func gatewayRequestID(t *testing.T, cat *Catalog, path string, body any) string 
 			for _, o := range env["orders"].([]any) {
 				orders = append(orders, gatewayOrder(t, cat, m(o)))
 			}
+			// 与网关一致:带了非空 modifies 就整条编成 BatchReplace2(dex-os v1_write.rs replace)
+			if mods, _ := env["modifies"].([]any); len(mods) > 0 {
+				mk, _ := cat.Market(env["symbol"].(string))
+				var modifies []dexos.BatchModify
+				for _, x := range mods {
+					modifies = append(modifies, gatewayModify(t, mk, m(x)))
+				}
+				cmd = dexos.EncodeBatchReplace2(acct, num(t, env["nowMs"]), ids, modifies, orders)
+				break
+			}
 			cmd = dexos.EncodeBatchReplace(acct, num(t, env["nowMs"]), ids, orders)
 		case "/v1/orders/cancel-all":
 			cmd = dexos.EncodeScheduleCancel(acct, num(t, env["nowMs"]), num(t, env["nowMs"]))
@@ -274,6 +284,32 @@ func num(t *testing.T, v any) uint64 {
 		t.Fatal(err)
 	}
 	return n
+}
+
+// gatewayModify 按网关的做法把换单里的一个改单项换回执行层参数:不带方向与符号(方向从旧单继承),
+// 订单号落在请求的市场上。
+func gatewayModify(t *testing.T, mk *Market, item map[string]any) dexos.BatchModify {
+	t.Helper()
+	for _, k := range []string{"side", "symbol", "type", "clientOrderId"} {
+		if _, has := item[k]; has {
+			t.Fatalf("改单项不该带 %s: %v", k, item)
+		}
+	}
+	seq, err := strconv.ParseUint(item["orderId"].(string), 10, 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	price, err := mk.Scale.Ticks(item["price"].(string))
+	if err != nil {
+		t.Fatal(err)
+	}
+	lots, err := mk.Scale.Lots(item["size"].(string))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tif := map[string]dexos.TimeInForce{"gtc": dexos.GTC, "ioc": dexos.IOC, "alo": dexos.PostOnly, "fok": dexos.FOK}[item["tif"].(string)]
+	ro, _ := item["reduceOnly"].(bool)
+	return dexos.BatchModify{Order: dexos.NewOrderID(mk.SigningMarketID, seq), Price: price, Lots: lots, TIF: tif, ReduceOnly: ro}
 }
 
 // gatewayOrder 按网关的做法把线上的一张单换回执行层参数(符号 → 市场号,十进制 → tick / lot)。
