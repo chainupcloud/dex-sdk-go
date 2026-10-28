@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"net/url"
 	"strings"
 	"sync"
@@ -326,7 +327,11 @@ func (st *Stream) Run(ctx context.Context) error {
 	st.ctx = ctx
 	backoff := st.opt.ReconnectMin
 	for {
-		conn, _, err := st.opt.Dialer.DialContext(ctx, st.url, nil)
+		var header http.Header
+		if st.c.Host != "" {
+			header = http.Header{"Host": {st.c.Host}}
+		}
+		conn, _, err := st.opt.Dialer.DialContext(ctx, st.url, header)
 		if err != nil {
 			if ctx.Err() != nil {
 				return ctx.Err()

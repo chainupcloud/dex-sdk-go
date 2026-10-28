@@ -1,7 +1,8 @@
 - `openapi-v1.json`:dex-os 开放 API v1.1 规格的副本,取自 chainupcloud/dex-os `web/openapi-v1.json`
   @ `2c5d2c2`(main,含 v1.1 §4.9 补缺 PR 9b #83、§4.10 补缺 PR 9c-A #90 与 K 线 / tickers #82),逐字节相同;
   另补了 dex-os#256 的换单改单项(`components.schemas.ModifyItem`、`/v1/orders/replace` 请求体的 `modifies` 与操作说明、
-  `BatchResult.items[]` 的 `modify` 种类与 `replacedOrderId`,取自 dex-os `web/openapi-v1.json` 同名段落)。整份重新同步会牵动大量既有样例,留待单独一次。
+  `BatchResult.items[]` 的 `modify` 种类与 `replacedOrderId`,取自 dex-os `web/openapi-v1.json` 同名段落),以及
+  `GET /v1/builder` 与它的 `components.schemas.BuilderView` / `CategoryView`(dex-os `web/openapi-v1.json` @ `22f85929`)。整份重新同步会牵动大量既有样例,留待单独一次。
   dex-os 改了 v1 接口面就同步更新这份副本,再跑 `go test ./dexosv1/`;`write_test.go` 的 `specDeviations`
   登记已知的规格与实现差异,条目过期(规格已修好)测试会失败,提醒删掉。
 - `fixtures/`:假服务的响应样例。形状按开发环境的真实响应整理,地址换成了假地址;
@@ -11,6 +12,7 @@
   `0x43…43`(API 钱包)推出来的。登记在 `schema_test.go` 的 `fixtureSchemas` / `postFixtureSchemas`。
   回执里的 `requestId` 写成占位值 `0xabab…ab`:假网关按线上请求体独立重算请求身份(`gatewayRequestID`)
   再替换进去,所以 SDK 本地算的身份与"网关"算的对不上就会被测出来。
+- `builder.json`:`/v1/builder` 样例,形状照开发环境 builder 1 的真实响应(目录里改了一行 `closeOnly`、加了一条按市场费率)。
 - v1.1 新增的只读样例:`prices.json`(24h 统计)、`candles.json`(`1M` 周期)、`portfolio.json`、
   `agent_grants.json`(`/v1/agents/{address}`)、`my_vaults.json`(`/v1/account/vaults`)。
 - 金库身份(v1.1 §4.3)样例:`vault.json` / `vaults.json`(v1 形状 §4.9-10:USDC 金额十进制、净值是比值、没有

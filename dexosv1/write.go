@@ -241,6 +241,9 @@ func (c *Client) post(ctx context.Context, path string, body any) (int, []byte, 
 	if s := c.seq.Load(); s > 0 {
 		req.Header.Set(minSeqHeader, strconv.FormatUint(s, 10))
 	}
+	if c.Host != "" {
+		req.Host = c.Host
+	}
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
 		// 连接没建起来(连接被拒、地址不可达、域名解析不了):一个字节都没发出,结论是确定的。连上之后的失败(连接被重置、

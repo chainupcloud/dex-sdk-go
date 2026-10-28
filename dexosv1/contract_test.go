@@ -25,6 +25,7 @@ import (
 //	DEXOS_V1_URL=http://127.0.0.1:17807 DEXOS_V1_ADDRESS=0x… go test -tags dexos_contract -run Contract ./dexosv1/
 //
 // DEXOS_V1_ADDRESS 可选,给了才测账户类接口。只发二十来个读请求(翻页 Limit 很小),不调 /v1/events。
+// DEXOS_V1_HOST 可选:某个 builder 的入口域名(按内网地址连接时带的 Host),给了才测 /v1/builder。
 func TestContractReadOnly(t *testing.T) {
 	base := os.Getenv("DEXOS_V1_URL")
 	if base == "" {
@@ -32,6 +33,7 @@ func TestContractReadOnly(t *testing.T) {
 	}
 	spec := loadSpec(t)
 	c := NewClient(strings.TrimRight(base, "/"))
+	c.Host = os.Getenv("DEXOS_V1_HOST")
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
 
@@ -53,6 +55,13 @@ func TestContractReadOnly(t *testing.T) {
 	}
 	if ex.FundingTickSec == 0 {
 		t.Error("fundingTickSec 应是正整数秒")
+	}
+	if c.Host != "" {
+		conforms("/v1/builder", nil, "/v1/builder")
+		b, err := c.Builder(ctx)
+		if err != nil || b.BuilderID == 0 || b.Status == "" {
+			t.Errorf("Builder: %+v, %v", b, err)
+		}
 	}
 	conforms("/v1/exchange", nil, "/v1/exchange")
 

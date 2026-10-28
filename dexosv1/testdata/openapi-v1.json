@@ -5181,6 +5181,56 @@
           "typeString": "VaultConfigChange(address owner,uint16 vault,uint32 accountId,uint8 kind,uint128 cap,uint32 maxLeverage,bytes32 marketsHash,uint64 nonce)"
         }
       }
+    },
+    "/v1/builder": {
+      "get": {
+        "tags": [
+          "Market data"
+        ],
+        "summary": "The builder behind this entry",
+        "description": "The builder (front-end operator) this request resolves to and the markets it lists, for a white-label front end to render its market list. `?builder=<builderId>` asks for one explicitly; without it the entry domain decides (the request `Host`, or behind the operator's trusted reverse proxies the single `X-Forwarded-Host` they overwrite). Markets with symbol metadata whose status is `listed` or `closeOnly` appear (hidden markets still accept orders but are not shown); each row carries the full `symbol` (use it for every order, cancel and close), `display` (the symbol without the `<dex code>:` prefix — the only name a builder front end shows; it is unique among listed / hidden rows only, so during a source switch a `closeOnly` row and a `listed` row can share it) and `status` (`closeOnly` = only reduce-only orders, show it as close-only). Each row also carries the builder's category codes (`tags`); `categories` gives their display names (the builder's own categories ∪ the platform templates its visible rows use). `fees` is the builder's default and per-market front-end fee rates (decimal; the per-account layer is not exposed). The payout account is not exposed. Unresolvable → 404 `GatewayBuilderNotFound`.",
+        "operationId": "v1_builder",
+        "parameters": [
+          {
+            "name": "builder",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9]+$"
+            },
+            "description": "builderId (decimal); without it the entry domain is used"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BuilderView"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "404": {
+            "description": "No builder for this request (`GatewayBuilderNotFound`, num 10404; `details.builder` or `details.domain`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
     }
   },
   "components": {
@@ -8540,6 +8590,189 @@
             }
           }
         }
+      },
+      "BuilderView": {
+        "type": "object",
+        "required": [
+          "builderId",
+          "status",
+          "catalog",
+          "categories",
+          "fees",
+          "asOfSeq"
+        ],
+        "properties": {
+          "builderId": {
+            "type": "integer",
+            "format": "uint32"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "active",
+              "disabled"
+            ]
+          },
+          "catalog": {
+            "type": "object",
+            "required": [
+              "version",
+              "markets"
+            ],
+            "properties": {
+              "version": {
+                "type": "integer",
+                "format": "uint64",
+                "description": "Catalog version (0 = never written)"
+              },
+              "markets": {
+                "type": "array",
+                "description": "Markets this builder shows, by `sort` then symbol: `listed` and `closeOnly`; hidden markets and markets without symbol metadata are not shown",
+                "items": {
+                  "type": "object",
+                  "required": [
+                    "symbol",
+                    "display",
+                    "status",
+                    "sort",
+                    "tags"
+                  ],
+                  "properties": {
+                    "symbol": {
+                      "type": "string",
+                      "description": "Full market symbol (`<dex code>:BASE-QUOTE` on a merchant dex): the only key to trade, cancel or close with"
+                    },
+                    "display": {
+                      "type": "string",
+                      "description": "The symbol without the `<dex code>:` prefix (`BTC-USD`, `WBTC-USDC`): what a builder front end shows. Unique among listed / hidden rows only; never resolve it back to a symbol",
+                      "examples": [
+                        "BTC-USD"
+                      ]
+                    },
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "listed",
+                        "closeOnly"
+                      ],
+                      "description": "`closeOnly` = only reduce-only orders are accepted (a source being switched or unshared); offer close only"
+                    },
+                    "sort": {
+                      "type": "integer",
+                      "format": "int32"
+                    },
+                    "tags": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      },
+                      "description": "The builder's category codes for this market, in display order (empty when none); names in `categories`"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "categories": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CategoryView"
+            },
+            "description": "The builder's categories ∪ the platform templates its shown rows use, by `sort` then code. Front ends behind a builder's entry use these, not `/v1/markets[].tags`"
+          },
+          "fees": {
+            "type": "object",
+            "required": [
+              "default",
+              "markets"
+            ],
+            "description": "The builder's own front-end fee rates (`builder-tenant-model.md` §8.7) as decimal fractions of notional, like `/v1/markets[].fees.*Rate`. `default` (null = unset) applies on every market without a `markets` row; the per-account layer is not exposed. Charged only once the builder model is on, and capped per market by `/v1/markets[].fees.builderRate` (the rate charged is the smaller of the two); unset = 0. `makerRate` may be negative: a subsidy paid from the builder's payout account to the resting side on perp markets (the cap does not limit it; spot treats it as 0).",
+            "properties": {
+              "default": {
+                "type": [
+                  "object",
+                  "null"
+                ],
+                "required": [
+                  "takerRate",
+                  "makerRate"
+                ],
+                "properties": {
+                  "takerRate": {
+                    "type": "string",
+                    "pattern": "^[0-9]+(\\.[0-9]+)?$",
+                    "description": "Decimal string (fraction of notional)"
+                  },
+                  "makerRate": {
+                    "type": "string",
+                    "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
+                    "description": "Decimal string (fraction of notional); negative = a subsidy the builder pays the resting side (perp markets only), capped per fill at the taker's net protocol fee pro-rated by notional minus the maker's own protocol rebate"
+                  }
+                }
+              },
+              "markets": {
+                "type": "array",
+                "description": "Per-market overrides by symbol, ascending by symbol; markets without symbol metadata are not listed",
+                "items": {
+                  "type": "object",
+                  "required": [
+                    "symbol",
+                    "takerRate",
+                    "makerRate"
+                  ],
+                  "properties": {
+                    "symbol": {
+                      "type": "string",
+                      "description": "Full market symbol"
+                    },
+                    "takerRate": {
+                      "type": "string",
+                      "pattern": "^[0-9]+(\\.[0-9]+)?$",
+                      "description": "Decimal string (fraction of notional)"
+                    },
+                    "makerRate": {
+                      "type": "string",
+                      "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
+                      "description": "Decimal string (fraction of notional); negative = a subsidy the builder pays the resting side (perp markets only), capped per fill at the taker's net protocol fee pro-rated by notional minus the maker's own protocol rebate"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "asOfSeq": {
+            "type": "integer",
+            "format": "uint64",
+            "description": "Log upper bound of the read-model generation the entity was read from"
+          }
+        }
+      },
+      "CategoryView": {
+        "type": "object",
+        "required": [
+          "code",
+          "names",
+          "sort"
+        ],
+        "properties": {
+          "code": {
+            "type": "string",
+            "pattern": "^[a-z0-9-]{1,24}$"
+          },
+          "names": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "Display names by language tag (`en`, `zh-CN`, …); pick the viewer's language, falling back as the front end sees fit"
+          },
+          "sort": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Display order (smaller first; ties by code)"
+          }
+        },
+        "description": "A category definition. A layer's `categories` = its own definitions ∪ the platform templates its references use; an own definition with a template's code wins (`docs/specs/market-categories.md` §3.1)"
       }
     }
   },
