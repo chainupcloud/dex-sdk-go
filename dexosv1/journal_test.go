@@ -229,7 +229,8 @@ func TestExchangeVersionSubaccountsAndMarketFees(t *testing.T) {
 	}
 	btc, _ := cat.Market("BTC-USD")
 	eth, _ := cat.Market("ETH-USD")
-	if btc.Fees == nil || btc.Fees.RateSource != "tier" || eth.Fees.RateSource != "market" || eth.Fees.MakerRate != "-0.0001" || eth.Fees.TakerRate != "0.0005" {
+	if btc.Fees == nil || btc.Fees.RateSource != "tier" || eth.Fees.RateSource != "market" || eth.Fees.MakerRate != "-0.0001" || eth.Fees.TakerRate != "0.0005" ||
+		eth.Fees.BuilderRate != "0.01" || btc.Fees.BuilderRate != "0" {
 		t.Fatalf("市场费率: %+v / %+v", btc.Fees, eth.Fees)
 	}
 }

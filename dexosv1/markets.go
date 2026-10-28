@@ -97,6 +97,8 @@ type MarketFees struct {
 	RateSource string `json:"rateSource"`
 	TakerRate  string `json:"takerRate"`
 	MakerRate  string `json:"makerRate"`
+	// BuilderRate 前端(builder)费率的上限:归属某个 builder 的单,前端费 = min(该 builder 的费率([Client.Builder]), 本上限)。
+	BuilderRate string `json:"builderRate"`
 }
 
 // wireMarket `components.schemas.Market` 的线上形状。
