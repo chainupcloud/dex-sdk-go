@@ -1,0 +1,22 @@
+{
+  "asOfSeq": 12753152,
+  "builderId": 1,
+  "catalog": {
+    "markets": [
+      {"display": "BTC-USD", "sort": 10, "status": "listed", "symbol": "demo:BTC-USD", "tags": ["major", "l2", "crypto"]},
+      {"display": "ETH-USD", "sort": 20, "status": "closeOnly", "symbol": "demo:ETH-USD", "tags": []},
+      {"display": "ETH-USDC", "sort": 40, "status": "listed", "symbol": "demo:ETH-USDC", "tags": []}
+    ],
+    "version": 5
+  },
+  "categories": [
+    {"code": "major", "names": {"en": "Majors", "zh-CN": "主流币"}, "sort": 10},
+    {"code": "l2", "names": {"en": "Layer 2", "zh-CN": "二层网络"}, "sort": 30},
+    {"code": "crypto", "names": {"en": "Crypto", "zh-CN": "加密货币"}, "sort": 140}
+  ],
+  "fees": {
+    "default": {"makerRate": "0.0032", "takerRate": "0.0044"},
+    "markets": [{"symbol": "demo:ETH-USDC", "makerRate": "0.0001", "takerRate": "0.0003"}]
+  },
+  "status": "active"
+}

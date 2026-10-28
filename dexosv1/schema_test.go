@@ -258,6 +258,7 @@ var fixtureSchemas = []struct {
 	{"tickers.json", "/v1/tickers", "200", ""},
 	{"err400_incomplete.json", "", "", "Error"},
 	{"w_sequenced_202.json", "", "", "Sequenced"},
+	{"builder.json", "/v1/builder", "200", ""},
 }
 
 // postFixtureSchemas 写接口回执的 fixture(形状照原生 v1 的 v1_write.rs 整理)。202 的回执按 `Sequenced`
@@ -324,6 +325,8 @@ func TestDecodedFieldsExistInPinnedSpec(t *testing.T) {
 	exchange := schema("Exchange")
 	portfolio := schema("Portfolio")
 	myVault := schema("MyVaultPosition")
+	builder := schema("BuilderView")
+	builderFees := props(obj(builder["fees"]))
 	cases := []struct {
 		name  string
 		typ   reflect.Type
@@ -363,6 +366,12 @@ func TestDecodedFieldsExistInPinnedSpec(t *testing.T) {
 		{"VaultConfig", reflect.TypeFor[wireVaultConfig](), schema("VaultConfig")},
 		{"Market.fees", reflect.TypeFor[MarketFees](), props(obj(schema("Market")["fees"]))},
 		{"Subaccount", reflect.TypeFor[Subaccount](), schema("Subaccount")},
+		{"BuilderView", reflect.TypeFor[Builder](), builder},
+		{"BuilderView.catalog", reflect.TypeFor[BuilderCatalog](), props(obj(builder["catalog"]))},
+		{"BuilderView.catalog.markets[]", reflect.TypeFor[BuilderCatalogRow](), props(obj(obj(props(obj(builder["catalog"]))["markets"])["items"]))},
+		{"BuilderView.fees", reflect.TypeFor[BuilderFees](), builderFees},
+		{"BuilderView.fees.default", reflect.TypeFor[BuilderFeeRate](), props(obj(builderFees["default"]))},
+		{"BuilderView.fees.markets[]", reflect.TypeFor[BuilderMarketFees](), props(obj(obj(builderFees["markets"])["items"]))},
 	}
 	for _, c := range cases {
 		if c.props == nil {

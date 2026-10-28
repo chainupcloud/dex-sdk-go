@@ -18,6 +18,9 @@ import (
 type Client struct {
 	BaseURL string
 	HTTP    *http.Client
+	// Host 非空即每个请求(REST 与 WS 握手)的 Host 头用它,而不是 BaseURL 里的主机名:按内网地址连接 dex-os、
+	// 以白标前端的公网域名作入口时用。dex-os 按入口域名识别 builder(下单归属、上架目录闸门、[Client.Builder])。
+	Host string
 	// AckWait 写请求等结论的预算(`?waitMs=`,上限 5s);0 = 服务端缺省(`V1_ACK_WAIT_MS`)。
 	// 预算内没等到折叠回 202,会话按结论未知锁定([ErrPending])。
 	AckWait time.Duration
@@ -130,6 +133,9 @@ func (c *Client) roundTrip(ctx context.Context, path string, q url.Values, kind 
 	}
 	if s := c.seq.Load(); s > 0 && kind == accountRead {
 		req.Header.Set(minSeqHeader, strconv.FormatUint(s, 10))
+	}
+	if c.Host != "" {
+		req.Host = c.Host
 	}
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
