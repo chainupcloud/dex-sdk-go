@@ -228,12 +228,16 @@ func newCatalog(ws []wireMarket) (*Catalog, error) {
 		if err != nil {
 			return nil, err
 		}
+		cat.markets = append(cat.markets, m)
+		// 下市后名称释放、可再上同名新市场（dex-os deploy.md §6i）：按符号只索引没下市的市场，两个没下市的同名才是目录错误。
+		if m.Status == "Delisted" {
+			continue
+		}
 		key := strings.ToUpper(m.Symbol)
 		if _, dup := cat.bySymbol[key]; dup {
 			return nil, fmt.Errorf("dexosv1: 市场目录里符号 %q 重复", m.Symbol)
 		}
-		cat.bySymbol[key] = len(cat.markets)
-		cat.markets = append(cat.markets, m)
+		cat.bySymbol[key] = len(cat.markets) - 1
 	}
 	return cat, nil
 }

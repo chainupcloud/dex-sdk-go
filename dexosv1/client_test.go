@@ -2,6 +2,7 @@ package dexosv1
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -150,6 +151,66 @@ func TestCatalogRejectsMisalignedPrice(t *testing.T) {
 		if _, err := cl.Catalog(context.Background()); err == nil || !strings.Contains(err.Error(), c.want) {
 			t.Fatalf("%s 应当报错,得到 %v", c.to, err)
 		}
+	}
+}
+
+// dex-os 下市后名称释放、可再上同名新市场（dex-os docs/deploy.md §6i，v_market_meta v2）：目录里同一符号可以有一个 Delisted
+// 的旧市场和一个在用的新市场。按符号只认在用的那个，旧市场仍在 Markets() 里；两个在用的市场同名才是目录错误。
+func TestCatalogResolvesRelistedSymbolToLiveMarket(t *testing.T) {
+	relisted := func(status string) string {
+		var doc struct {
+			Markets []map[string]any `json:"markets"`
+		}
+		if err := json.Unmarshal(fixture(t, "markets.json"), &doc); err != nil {
+			t.Fatal(err)
+		}
+		var old map[string]any
+		for _, m := range doc.Markets {
+			if m["symbol"] == "BTC-USD" {
+				old = m
+			}
+		}
+		if old == nil {
+			t.Fatal("fixture 里没有 BTC-USD")
+		}
+		live := map[string]any{}
+		for k, v := range old {
+			live[k] = v
+		}
+		old["status"] = status
+		live["signingMarketId"] = 8
+		doc.Markets = append(doc.Markets, live)
+		body, err := json.Marshal(doc)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(body)
+	}
+
+	f, c := newFake(t)
+	body := relisted("Delisted")
+	f.routes["/v1/markets"] = func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(body)) }
+	cat, err := c.Catalog(context.Background())
+	if err != nil {
+		t.Fatalf("下市后同名再上的目录应能读: %v", err)
+	}
+	btc, err := cat.Market("btc-usd")
+	if err != nil || btc.SigningMarketID != 8 || btc.Status == "Delisted" {
+		t.Fatalf("按符号应取在用的新市场 8: %+v %v", btc, err)
+	}
+	delisted := 0
+	for _, m := range cat.Markets() {
+		if m.Symbol == "BTC-USD" && m.Status == "Delisted" {
+			delisted++
+		}
+	}
+	if delisted != 1 {
+		t.Fatalf("下市的旧市场仍应在 Markets() 里: %d", delisted)
+	}
+
+	body = relisted("Active")
+	if _, err := c.Catalog(context.Background()); err == nil || !strings.Contains(err.Error(), "重复") {
+		t.Fatalf("两个在用的市场同名应报目录错误: %v", err)
 	}
 }
 
