@@ -194,8 +194,10 @@ func (w wireMarket) market() (Market, error) {
 // 目录是一次读取的快照;新上的市场不在旧目录里,响应里出现目录外的符号时读取直接报错
 // (不猜精度),调用方重新取一次目录即可。
 type Catalog struct {
-	markets  []Market
+	markets []Market
+	// bySymbol 按符号寻址只认没下市的市场；sameName 是每个符号（大写）的全部市场下标（含已下市），按目录顺序。
 	bySymbol map[string]int
+	sameName map[string][]int
 }
 
 // Markets 目录里的全部市场(服务端顺序)。
@@ -222,24 +224,57 @@ func (c *Client) Catalog(ctx context.Context) (*Catalog, error) {
 }
 
 func newCatalog(ws []wireMarket) (*Catalog, error) {
-	cat := &Catalog{bySymbol: make(map[string]int, len(ws))}
+	cat := &Catalog{bySymbol: make(map[string]int, len(ws)), sameName: make(map[string][]int, len(ws))}
 	for _, w := range ws {
 		m, err := w.market()
 		if err != nil {
 			return nil, err
 		}
 		cat.markets = append(cat.markets, m)
+		key := strings.ToUpper(m.Symbol)
+		cat.sameName[key] = append(cat.sameName[key], len(cat.markets)-1)
 		// 下市后名称释放、可再上同名新市场（dex-os deploy.md §6i）：按符号只索引没下市的市场，两个没下市的同名才是目录错误。
 		if m.Status == "Delisted" {
 			continue
 		}
-		key := strings.ToUpper(m.Symbol)
 		if _, dup := cat.bySymbol[key]; dup {
 			return nil, fmt.Errorf("dexosv1: 市场目录里符号 %q 重复", m.Symbol)
 		}
 		cat.bySymbol[key] = len(cat.markets) - 1
 	}
 	return cat, nil
+}
+
+// rowMarket 是账户记录（成交、持仓、挂单）里的符号所指的市场：有没下市的同名市场就是它；只剩已下市的（名称还没被再用）
+// 就是最后一个下市的那个——v1 的「市场 → 符号」展示对所有行照旧，历史记录不改名（dex-os public-api-v1-1 §4.4）。
+func (c *Catalog) rowMarket(symbol string) (*Market, error) {
+	if m, err := c.Market(symbol); err == nil {
+		return m, nil
+	}
+	if same := c.sameName[strings.ToUpper(symbol)]; len(same) > 0 {
+		return &c.markets[same[len(same)-1]], nil
+	}
+	return nil, fmt.Errorf("dexosv1: 市场目录里没有 %q(新上市场请重新取目录)", symbol)
+}
+
+// listRows 把整表行（/v1/prices、WS prices 帧、/v1/tickers）逐行对到市场。这几张表与 /v1/markets 一样列出全部市场、按市场号
+// 顺序、只带符号，同名的已下市旧市场与在用新市场各占一行（dex-os public-api-v1-1 §4.4）：同一符号的第 n 行就是目录里该符号的
+// 第 n 个市场。行数比目录里同名市场多（目录取得早、之后又上了同名市场）即报错，重新取目录。
+type listRows struct {
+	cat  *Catalog
+	used map[string]int
+}
+
+func (c *Catalog) listRows() *listRows { return &listRows{cat: c, used: map[string]int{}} }
+
+func (r *listRows) market(symbol string) (*Market, error) {
+	key := strings.ToUpper(symbol)
+	same, n := r.cat.sameName[key], r.used[key]
+	if n >= len(same) {
+		return nil, fmt.Errorf("dexosv1: 市场目录里没有 %q(新上市场请重新取目录)", symbol)
+	}
+	r.used[key] = n + 1
+	return &r.cat.markets[same[n]], nil
 }
 
 // Market 单个市场(`/v1/markets/{symbol}`)。
@@ -329,14 +364,16 @@ func levels(s Scale, in [][2]string) ([]Level, error) {
 // Price 一个市场的实时价与滚动 24h 统计(`GET /v1/prices`)。价格是 tick、数量是 lot;
 // nil = 服务端给了 null(没有预言机 / 盘口空 / 24h 统计不可用 / 窗口里没有成交)。
 type Price struct {
-	Symbol       string
-	Last         uint32
-	Mark         *uint32
-	Oracle       *uint32
-	BestBid      *uint32
-	BestAsk      *uint32
-	FundingRate  *string
-	OpenInterest *uint64
+	Symbol string
+	// SigningMarketID 是这一行对到的市场（同名的已下市旧市场与在用新市场各有一行，按它区分，见 [Catalog]）。
+	SigningMarketID uint16
+	Last            uint32
+	Mark            *uint32
+	Oracle          *uint32
+	BestBid         *uint32
+	BestAsk         *uint32
+	FundingRate     *string
+	OpenInterest    *uint64
 	// FundingIndex 最近一次结算后的累计资金费指数(整数串,与 `/v1/markets` 的 fundingIndex 同值);nil = 现货。
 	FundingIndex *string
 	// LastFundingMs 最近一次资金费结算的区块时间(Unix 毫秒);NextFundingMs 下一次应结的时刻
@@ -406,12 +443,13 @@ type wirePrices struct {
 
 func (w wirePrices) prices(cat *Catalog) (*Prices, error) {
 	out := &Prices{TS: w.TS, Window: w.Window, Prices: make([]Price, 0, len(w.Prices))}
+	rows := cat.listRows()
 	for _, wp := range w.Prices {
-		m, err := cat.Market(wp.Symbol)
+		m, err := rows.market(wp.Symbol)
 		if err != nil {
 			return nil, err
 		}
-		p := Price{Symbol: wp.Symbol, FundingRate: wp.FundingRate, FundingIndex: wp.FundingIndex, LastFundingMs: wp.LastFundingMs,
+		p := Price{Symbol: wp.Symbol, SigningMarketID: m.SigningMarketID, FundingRate: wp.FundingRate, FundingIndex: wp.FundingIndex, LastFundingMs: wp.LastFundingMs,
 			NextFundingMs: wp.NextFundingMs, Change24h: wp.Change24h, QuoteVolume24h: wp.QuoteVolume24h}
 		if p.Last, err = m.Scale.Ticks(wp.Last); err != nil {
 			return nil, fmt.Errorf("dexosv1: %s last: %w", wp.Symbol, err)
@@ -456,7 +494,9 @@ func (w wirePrices) prices(cat *Catalog) (*Prices, error) {
 // Ticker 一个市场最近 24 小时的成交统计(`GET /v1/tickers`)。价格是 tick、数量是 lot;
 // 窗口里没有成交时 Trades 为 0、量为 0、四个价格都是 nil。
 type Ticker struct {
-	Symbol                string
+	Symbol string
+	// SigningMarketID 是这一行对到的市场（同 [Price]）。
+	SigningMarketID       uint16
 	Open, High, Low, Last *uint32
 	// Volume 基础币成交量;QuoteVolume 计价币成交额(十进制)。
 	Volume      uint64
@@ -494,12 +534,13 @@ func (c *Client) Tickers(ctx context.Context, cat *Catalog) (*Tickers, error) {
 		return nil, err
 	}
 	out := &Tickers{WindowStart: w.WindowStart, WindowEnd: w.WindowEnd, Tickers: make([]Ticker, 0, len(w.Tickers))}
+	rows := cat.listRows()
 	for _, wt := range w.Tickers {
-		m, err := cat.Market(wt.Symbol)
+		m, err := rows.market(wt.Symbol)
 		if err != nil {
 			return nil, err
 		}
-		t := Ticker{Symbol: wt.Symbol, QuoteVolume: wt.QuoteVolume, Trades: wt.Trades}
+		t := Ticker{Symbol: wt.Symbol, SigningMarketID: m.SigningMarketID, QuoteVolume: wt.QuoteVolume, Trades: wt.Trades}
 		for _, f := range []struct {
 			name string
 			in   *string

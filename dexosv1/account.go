@@ -142,7 +142,7 @@ func (c *Client) Positions(ctx context.Context, cat *Catalog, ref AccountRef) ([
 func positionsFrom(cat *Catalog, in []wirePosition) ([]Position, error) {
 	out := make([]Position, 0, len(in))
 	for _, w := range in {
-		m, err := cat.Market(w.Symbol)
+		m, err := cat.rowMarket(w.Symbol)
 		if err != nil {
 			return nil, err
 		}
@@ -244,7 +244,7 @@ func (c *Client) Orders(ctx context.Context, cat *Catalog, ref AccountRef, symbo
 
 // order 挂单行(REST 响应与 WS `orders` 快照同形)换算成 tick / lot。
 func (w wireOrder) order(cat *Catalog) (Order, error) {
-	m, err := cat.Market(w.Symbol)
+	m, err := cat.rowMarket(w.Symbol)
 	if err != nil {
 		return Order{}, err
 	}
