@@ -32,11 +32,13 @@ type Account struct {
 	// Groups 按结算 token 分的风险组(USDC 一组,另有其他抵押 token 的 dex 各一组)。
 	Groups []RiskGroup `json:"groups"`
 	// FeeTier / TakerFee / MakerFee nil = 服务端给了 null(市场级费率的市场看 Market 的 fees)。
-	FeeTier        *int    `json:"feeTier"`
-	TakerFee       *string `json:"takerFee"`
-	MakerFee       *string `json:"makerFee"`
-	PositionsCount int     `json:"positionsCount"`
-	OrdersCount    int     `json:"ordersCount"`
+	FeeTier  *int    `json:"feeTier"`
+	TakerFee *string `json:"takerFee"`
+	MakerFee *string `json:"makerFee"`
+	// Fees 本账户在各市场实际被收的费率(dex-os INV-API-V1-ACCOUNT-FEES)。
+	Fees           AccountFees `json:"fees"`
+	PositionsCount int         `json:"positionsCount"`
+	OrdersCount    int         `json:"ordersCount"`
 	// Leverage 设过自定义杠杆的市场。
 	Leverage []MarketLeverage `json:"leverage"`
 	// Nonce 主钱包作用域的下一个 nonce(API 钱包的 nonce 用 [Client.Nonce] 带 signer 取)。
@@ -71,6 +73,44 @@ type MarketLeverage struct {
 	Leverage int    `json:"leverage"`
 }
 
+// AccountFees 账户在各市场实际被收的费率,与撮合计费同一判定。builder 按请求的入口域名定(与经这个入口下单的归属一致),
+// Builder 为 nil 即这个入口不经 builder、没有 builder 腿。只出本账户自己的取值结果。
+type AccountFees struct {
+	Builder *uint32             `json:"builder"`
+	Markets []AccountMarketFees `json:"markets"`
+}
+
+// AccountMarketFees 一个市场的实收费率,十进制、名义额的比例,负数是返佣 / 补贴;Rate 是各腿之和。
+type AccountMarketFees struct {
+	Symbol string        `json:"symbol"`
+	Maker  MakerFeeRates `json:"maker"`
+	Taker  TakerFeeRates `json:"taker"`
+	Source FeeSource     `json:"source"`
+}
+
+// MakerFeeRates maker 侧:协议费与 builder 前端费(已按市场上限封顶)。
+type MakerFeeRates struct {
+	Rate     string `json:"rate"`
+	Protocol string `json:"protocol"`
+	Builder  string `json:"builder"`
+}
+
+// TakerFeeRates taker 侧:协议费、dex 附加、市场 deployer 分成与 builder 前端费。
+type TakerFeeRates struct {
+	Rate     string `json:"rate"`
+	Protocol string `json:"protocol"`
+	Dex      string `json:"dex"`
+	Deployer string `json:"deployer"`
+	Builder  string `json:"builder"`
+}
+
+// FeeSource 费率出处。Protocol "market"(市场级费率)| "tier"(账户档位);Builder 是 builder 腿取自哪一层:
+// "account_market" | "account" | "market" | "default" | "unset","none" = 不经 builder,"legacy" = builder 模型未开。
+type FeeSource struct {
+	Protocol string `json:"protocol"`
+	Builder  string `json:"builder"`
+}
+
 // Account 账户汇总。响应缺 epoch / asOfSeq 时报错:没有它们就判断不了纪元有没有变、视图新不新。
 func (c *Client) Account(ctx context.Context, ref AccountRef) (*Account, error) {
 	q, err := ref.values()
@@ -82,6 +122,27 @@ func (c *Client) Account(ctx context.Context, ref AccountRef) (*Account, error) 
 		return nil, err
 	}
 	return decodeAccount(raw, "/v1/account")
+}
+
+// AccountFeesIn 本账户在 symbol 市场实际被收的费率(`GET /v1/account?symbol=` 的 fees)。应答里没有恰好这一个市场即报错。
+func (c *Client) AccountFeesIn(ctx context.Context, ref AccountRef, symbol string) (*AccountMarketFees, error) {
+	q, err := ref.values()
+	if err != nil {
+		return nil, err
+	}
+	q.Set("symbol", symbol)
+	var raw json.RawMessage
+	if err := c.get(ctx, "/v1/account", q, accountRead, &raw); err != nil {
+		return nil, err
+	}
+	a, err := decodeAccount(raw, "/v1/account")
+	if err != nil {
+		return nil, err
+	}
+	if len(a.Fees.Markets) != 1 || !strings.EqualFold(a.Fees.Markets[0].Symbol, symbol) {
+		return nil, fmt.Errorf("dexosv1: /v1/account?symbol=%s 的费率应只有这一个市场: %+v", symbol, a.Fees.Markets)
+	}
+	return &a.Fees.Markets[0], nil
 }
 
 // decodeAccount 账户汇总的体(REST 响应与 WS `account` 帧同形)。

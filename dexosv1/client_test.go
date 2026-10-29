@@ -335,6 +335,11 @@ func TestAccountReads(t *testing.T) {
 		a.Groups[0] != (RiskGroup{"USDC", "-1282.814453", "13928.966644", "760.656", "456.3936", "12.5", "13168.310644"}) {
 		t.Fatalf("账户风险头不对: %+v", a)
 	}
+	if a.Fees.Builder == nil || *a.Fees.Builder != 1 || len(a.Fees.Markets) != 2 ||
+		a.Fees.Markets[0] != (AccountMarketFees{"BTC-USD", MakerFeeRates{"0", "0", "0"}, TakerFeeRates{"0.0005", "0.0005", "0", "0", "0"}, FeeSource{"tier", "account"}}) ||
+		a.Fees.Markets[1].Maker != (MakerFeeRates{"0.00035", "0.00015", "0.0002"}) || a.Fees.Markets[1].Source != (FeeSource{"market", "default"}) {
+		t.Fatalf("账户实收费率不对: %+v", a.Fees)
+	}
 
 	f.routes["/v1/account/positions"] = serve(t, 200, "positions.json")
 	ps, err := c.Positions(ctx, cat, ref)
@@ -377,6 +382,29 @@ func TestAccountReads(t *testing.T) {
 	q := f.requests()[1].URL.Query()
 	if q.Get("address") != testAddr || q.Get("subaccount") != "0" {
 		t.Fatalf("账户寻址参数不对: %v", q)
+	}
+}
+
+// 按市场读实收费率:带上 symbol,应答只能有这一个市场。
+func TestAccountFeesIn(t *testing.T) {
+	f, c := newFake(t)
+	ref := AccountRef{Address: mustAddr(t, testAddr)}
+	ctx := context.Background()
+	f.routes["/v1/account"] = func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write(fixture(t, map[string]string{"": "account_vault.json", "BTC-USD": "account_vault.json", "ETH-USD": "account.json"}[r.URL.Query().Get("symbol")]))
+	}
+	got, err := c.AccountFeesIn(ctx, ref, "BTC-USD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Maker != (MakerFeeRates{"0", "0", "0"}) || got.Source != (FeeSource{"tier", "none"}) {
+		t.Fatalf("BTC-USD 的实收费率不对: %+v", got)
+	}
+	if q := f.requests()[0].URL.Query(); q.Get("symbol") != "BTC-USD" || q.Get("address") != testAddr {
+		t.Fatalf("按市场读费率的参数不对: %v", q)
+	}
+	if _, err := c.AccountFeesIn(ctx, ref, "ETH-USD"); err == nil {
+		t.Fatal("应答不止一个市场应报错")
 	}
 }
 
