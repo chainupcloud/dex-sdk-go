@@ -192,7 +192,7 @@ func (c *Client) Fills(ctx context.Context, cat *Catalog, ref AccountRef, symbol
 }
 
 func (w wireFill) fill(cat *Catalog) (Fill, error) {
-	m, err := cat.Market(w.Symbol)
+	m, err := cat.rowMarket(w.Symbol)
 	if err != nil {
 		return Fill{}, err
 	}

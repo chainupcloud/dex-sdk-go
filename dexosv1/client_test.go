@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -211,6 +212,107 @@ func TestCatalogResolvesRelistedSymbolToLiveMarket(t *testing.T) {
 	body = relisted("Active")
 	if _, err := c.Catalog(context.Background()); err == nil || !strings.Contains(err.Error(), "重复") {
 		t.Fatalf("两个在用的市场同名应报目录错误: %v", err)
+	}
+}
+
+// 整表行（/v1/prices、/v1/tickers，WS prices 帧同形）列出全部市场、只带符号：同名的已下市旧市场与在用新市场各占一行，按目录里
+// 同名市场的先后逐个对上，行上带出市场号；只剩已下市的名称也照常对上，不报目录外符号（dex-os public-api-v1-1 §4.4）。
+// 10-29 dex-01：demo:BTC-USD 的 1 号下市、8 号上线，/v1/prices 里两行 demo:BTC-USD，平台盘 BTC-USD 只剩下市的 0 号。
+func TestListRowsFollowSameNameMarketsInOrder(t *testing.T) {
+	var markets struct {
+		Markets []map[string]any `json:"markets"`
+	}
+	if err := json.Unmarshal(fixture(t, "markets.json"), &markets); err != nil {
+		t.Fatal(err)
+	}
+	var live map[string]any
+	for _, m := range markets.Markets {
+		if m["symbol"] == "BTC-USD" {
+			live = map[string]any{}
+			for k, v := range m {
+				live[k] = v
+			}
+			m["status"] = "Delisted"
+		}
+	}
+	live["signingMarketId"] = 8
+	markets.Markets = append(markets.Markets, live)
+	relisted := func(name, key string, last map[string]any) string {
+		var doc map[string]any
+		if err := json.Unmarshal(fixture(t, name), &doc); err != nil {
+			t.Fatal(err)
+		}
+		rows := doc[key].([]any)
+		var btc map[string]any
+		for _, r := range rows {
+			if r.(map[string]any)["symbol"] == "BTC-USD" {
+				btc = map[string]any{}
+				for k, v := range r.(map[string]any) {
+					btc[k] = v
+				}
+			}
+		}
+		for k, v := range last {
+			btc[k] = v
+		}
+		doc[key] = append(rows, btc)
+		body, err := json.Marshal(doc)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(body)
+	}
+	body, err := json.Marshal(markets)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, c := newFake(t)
+	f.routes["/v1/markets"] = func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write(body) }
+	ctx := context.Background()
+	cat, err := c.Catalog(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	prices := relisted("prices.json", "prices", map[string]any{"mark": "83000"})
+	f.routes["/v1/prices"] = func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(prices)) }
+	ps, err := c.Prices(ctx, cat)
+	if err != nil {
+		t.Fatalf("同名两行的价格表应能读: %v", err)
+	}
+	var ids []uint16
+	for _, p := range ps.Prices {
+		ids = append(ids, p.SigningMarketID)
+	}
+	if !slices.Equal(ids, []uint16{0, 1, 8}) || *ps.Prices[0].Mark != 82680 || *ps.Prices[2].Mark != 83000 {
+		t.Fatalf("价格行应按同名市场的先后对到 0 与 8: %v %+v", ids, ps.Prices)
+	}
+
+	tickers := relisted("tickers.json", "tickers", map[string]any{"trades": 7})
+	f.routes["/v1/tickers"] = func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(tickers)) }
+	ts, err := c.Tickers(ctx, cat)
+	if err != nil {
+		t.Fatalf("同名两行的成交统计应能读: %v", err)
+	}
+	if ts.Tickers[0].SigningMarketID != 0 || ts.Tickers[0].Trades != 42 || ts.Tickers[3].SigningMarketID != 8 || ts.Tickers[3].Trades != 7 {
+		t.Fatalf("成交统计行应按同名市场的先后对到 0 与 8: %+v", ts.Tickers)
+	}
+
+	// 价格表比目录多出一行同名（目录取得早，之后又上了同名市场）：报目录外符号，调用方重新取目录。
+	var doc map[string]any
+	if err := json.Unmarshal([]byte(prices), &doc); err != nil {
+		t.Fatal(err)
+	}
+	rows := doc["prices"].([]any)
+	doc["prices"] = append(rows, rows[len(rows)-1])
+	extraBody, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	extra := string(extraBody)
+	f.routes["/v1/prices"] = func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(extra)) }
+	if _, err := c.Prices(ctx, cat); err == nil || !strings.Contains(err.Error(), "重新取目录") {
+		t.Fatalf("同名行多于目录里的同名市场应报错: %v", err)
 	}
 }
 
