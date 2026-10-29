@@ -747,7 +747,7 @@
           "Account"
         ],
         "summary": "Account summary",
-        "description": "Addressed by wallet (`?address=&subaccount=`). Equity / margin / available / balances / per-group risk / fee rates / counts, all as decimal strings; the risk fields come from one view at `asOfSeq` (in `epoch`); **no account id** (INV-API-V1-NO-ACCOUNT-ID). An address that has never deposited is 404.",
+        "description": "Addressed by wallet (`?address=&subaccount=`). Equity / margin / available / balances / per-group risk / fee rates / counts, all as decimal strings; the risk fields come from one view at `asOfSeq` (in `epoch`); **no account id** (INV-API-V1-NO-ACCOUNT-ID). An address that has never deposited is 404. `fees` = the rates this account is actually charged per market (INV-API-V1-ACCOUNT-FEES).",
         "operationId": "v1_account",
         "parameters": [
           {
@@ -781,6 +781,25 @@
               "minimum": 0
             },
             "description": "Vault id: read the vault's own account instead of a wallet's (specification v1.1 §4.3). Mutually exclusive with `address` / `subaccount` (400); an unknown vault is 404. The response then shows `vault` instead of `address` / `subaccount`."
+          },
+          {
+            "name": "builder",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "description": "Builder id the `fees` block is computed for. Omitted = the builder bound to the request's entry domain (the same attribution an order placed through this entry gets); an entry with no builder = no builder leg. An unknown builder is 404 `GatewayBuilderNotFound`."
+          },
+          {
+            "name": "symbol",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Limit `fees.markets` to this market; omitted = every tradable market. An unknown symbol is 404."
           },
           {
             "$ref": "#/components/parameters/MinSeq"
@@ -6166,6 +6185,7 @@
           "feeTier",
           "takerFee",
           "makerFee",
+          "fees",
           "positionsCount",
           "ordersCount",
           "leverage",
@@ -6299,6 +6319,132 @@
             ],
             "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
             "description": "Decimal string"
+          },
+          "fees": {
+            "type": "object",
+            "required": [
+              "builder",
+              "markets"
+            ],
+            "description": "Rates this account is actually charged, from the same decision the matcher bills with (INV-API-V1-ACCOUNT-FEES). Only this account's own result; never another account's override table.",
+            "properties": {
+              "builder": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "description": "Builder the rates are computed for (`?builder=` or the entry domain's); null = no builder"
+              },
+              "markets": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": [
+                    "symbol",
+                    "maker",
+                    "taker",
+                    "source"
+                  ],
+                  "properties": {
+                    "symbol": {
+                      "type": "string"
+                    },
+                    "maker": {
+                      "type": "object",
+                      "required": [
+                        "rate",
+                        "protocol",
+                        "builder"
+                      ],
+                      "properties": {
+                        "rate": {
+                          "type": "string",
+                          "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
+                          "description": "Total maker rate = protocol + builder (negative = rebate)"
+                        },
+                        "protocol": {
+                          "type": "string",
+                          "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
+                          "description": "Protocol maker rate"
+                        },
+                        "builder": {
+                          "type": "string",
+                          "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
+                          "description": "Builder maker rate after the market cap (negative = subsidy; 0 on spot)"
+                        }
+                      }
+                    },
+                    "taker": {
+                      "type": "object",
+                      "required": [
+                        "rate",
+                        "protocol",
+                        "dex",
+                        "deployer",
+                        "builder"
+                      ],
+                      "properties": {
+                        "rate": {
+                          "type": "string",
+                          "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
+                          "description": "Total taker rate = protocol + dex + deployer + builder"
+                        },
+                        "protocol": {
+                          "type": "string",
+                          "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
+                          "description": "Protocol taker rate"
+                        },
+                        "dex": {
+                          "type": "string",
+                          "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
+                          "description": "Dex surcharge = protocol taker × the dex fee scale"
+                        },
+                        "deployer": {
+                          "type": "string",
+                          "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
+                          "description": "Market deployer share (taker side only)"
+                        },
+                        "builder": {
+                          "type": "string",
+                          "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
+                          "description": "Builder taker rate after the market cap"
+                        }
+                      }
+                    },
+                    "source": {
+                      "type": "object",
+                      "required": [
+                        "protocol",
+                        "builder"
+                      ],
+                      "properties": {
+                        "protocol": {
+                          "type": "string",
+                          "enum": [
+                            "market",
+                            "tier"
+                          ],
+                          "description": "`market` = market-level rates are on; `tier` = the account's fee tier"
+                        },
+                        "builder": {
+                          "type": "string",
+                          "enum": [
+                            "account_market",
+                            "account",
+                            "market",
+                            "default",
+                            "unset",
+                            "none",
+                            "legacy"
+                          ],
+                          "description": "Layer the builder leg came from: account×market > account > builder market > builder default > unset; `none` = no builder; `legacy` = builder model off (taker builder = market `builder_ppm`)"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
           },
           "positionsCount": {
             "type": "integer"

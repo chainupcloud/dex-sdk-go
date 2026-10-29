@@ -327,6 +327,8 @@ func TestDecodedFieldsExistInPinnedSpec(t *testing.T) {
 	myVault := schema("MyVaultPosition")
 	builder := schema("BuilderView")
 	builderFees := props(obj(builder["fees"]))
+	accountFees := props(obj(schema("Account")["fees"]))
+	accountMarketFees := props(obj(obj(accountFees["markets"])["items"]))
 	cases := []struct {
 		name  string
 		typ   reflect.Type
@@ -348,6 +350,11 @@ func TestDecodedFieldsExistInPinnedSpec(t *testing.T) {
 		{"Exchange.version", field[Exchange](t, "Version"), props(obj(exchange["version"]))},
 		{"Exchange.deposit.tokens[]", reflect.TypeFor[Token](), props(obj(obj(props(obj(exchange["deposit"]))["tokens"])["items"]))},
 		{"Account.groups[]", reflect.TypeFor[RiskGroup](), props(obj(obj(schema("Account")["groups"])["items"]))},
+		{"Account.fees", reflect.TypeFor[AccountFees](), accountFees},
+		{"Account.fees.markets[]", reflect.TypeFor[AccountMarketFees](), accountMarketFees},
+		{"Account.fees.markets[].maker", reflect.TypeFor[MakerFeeRates](), props(obj(accountMarketFees["maker"]))},
+		{"Account.fees.markets[].taker", reflect.TypeFor[TakerFeeRates](), props(obj(accountMarketFees["taker"]))},
+		{"Account.fees.markets[].source", reflect.TypeFor[FeeSource](), props(obj(accountMarketFees["source"]))},
 		{"Book", reflect.TypeFor[wireBook](), schema("Book")},
 		{"Price", reflect.TypeFor[wirePrice](), schema("Price")},
 		{"Ticker", reflect.TypeFor[wireTicker](), schema("Ticker")},
