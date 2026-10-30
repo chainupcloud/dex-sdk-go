@@ -122,6 +122,11 @@ func TestCatalogAndBookScaleToTicksAndLots(t *testing.T) {
 	if _, err := cat.Market("SOL-USD"); err == nil {
 		t.Fatal("目录外的符号应当报错")
 	}
+	// 盘口聚合档位原样带过来(tick 数);null = 该市场未配置
+	if !slices.Equal(btc.AggTicks, []uint64{1, 10, 100, 1000}) || eth.AggTicks != nil ||
+		!slices.Equal(spot.AggTicks, []uint64{10, 100}) {
+		t.Fatalf("聚合档位不对: %v %v %v", btc.AggTicks, eth.AggTicks, spot.AggTicks)
+	}
 
 	f.routes["/v1/markets/ETH-USD/book"] = serve(t, 200, "book.json")
 	b, err := c.Book(context.Background(), eth, 2)

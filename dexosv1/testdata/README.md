@@ -2,7 +2,7 @@
   @ `2c5d2c2`(main,含 v1.1 §4.9 补缺 PR 9b #83、§4.10 补缺 PR 9c-A #90 与 K 线 / tickers #82),逐字节相同;
   另补了 dex-os#256 的换单改单项(`components.schemas.ModifyItem`、`/v1/orders/replace` 请求体的 `modifies` 与操作说明、
   `BatchResult.items[]` 的 `modify` 种类与 `replacedOrderId`,取自 dex-os `web/openapi-v1.json` 同名段落),以及
-  `GET /v1/builder` 与它的 `components.schemas.BuilderView` / `CategoryView`(dex-os `web/openapi-v1.json` @ `22f85929`),以及 `GET /v1/account` 的 `builder` / `symbol` 参数与 `components.schemas.Account` 的 `fees`(账户实收费率,dex-os INV-API-V1-ACCOUNT-FEES)。整份重新同步会牵动大量既有样例,留待单独一次。
+  `GET /v1/builder` 与它的 `components.schemas.BuilderView` / `CategoryView`(dex-os `web/openapi-v1.json` @ `22f85929`),以及 `GET /v1/account` 的 `builder` / `symbol` 参数与 `components.schemas.Account` 的 `fees`(账户实收费率,dex-os INV-API-V1-ACCOUNT-FEES),以及 `components.schemas.Market` 的 `aggTicks`(盘口聚合档位,市场配置,dex-os `docs/specs/book-aggregation.md` r2)。整份重新同步会牵动大量既有样例,留待单独一次。
   dex-os 改了 v1 接口面就同步更新这份副本,再跑 `go test ./dexosv1/`;`write_test.go` 的 `specDeviations`
   登记已知的规格与实现差异,条目过期(规格已修好)测试会失败,提醒删掉。
 - `fixtures/`:假服务的响应样例。形状按开发环境的真实响应整理,地址换成了假地址;
@@ -19,6 +19,7 @@
 - 金库身份(v1.1 §4.3)样例:`vault.json` / `vaults.json`(v1 形状 §4.9-10:USDC 金额十进制、净值是比值、没有
   `mainAccount` 与市场号;manager 认领在子账户 2、creator 在子账户 1;列表里另有一个待认领的金库)、
   `account_vault.json` / `ledger_vault.json`(`?vault=3` 读,身份字段只有 `vault`)、`w_nonce_vault.json`(`?vault=3&signer=`,`signingAccountId` 31 是金库主账户)。
+- `markets.json` 的 `aggTicks`:BTC-USD 配了 1 / 10 / 100 / 1000 tick、ETH-USD 未配置(null)、BTC-USDC 配了 10 / 100。
 - v1.1 §4.9(PR 9b)补的样例:`markets.json` 加 `quotePerTickLot` / `strictIsolated` 与一个现货市场(`baseToken` /
   `quoteToken` / `basePerLot`),`book.json` 带 `depth`,`exchange.json` 带 `fundingTickSec`;`tickers.json`
   (`/v1/tickers`)、`err400_incomplete.json`(`400 GatewayHistoryIncomplete`);`w_sequenced_202.json` 按 `Sequenced` 校验。
