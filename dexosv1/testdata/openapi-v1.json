@@ -5541,7 +5541,8 @@
           "openInterest",
           "openInterestCap",
           "dex",
-          "fees"
+          "fees",
+          "aggTicks"
         ],
         "properties": {
           "symbol": {
@@ -5774,6 +5775,28 @@
                 "description": "Decimal string"
               }
             }
+          },
+          "aggTicks": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "minItems": 1,
+            "maxItems": 6,
+            "description": "Order book price aggregation levels configured for this market, in ticks per bucket (1 tick = `tickSize`), strictly ascending; e.g. `[10, 100, 1000, 10000, 100000]` for a market with `tickSize` 0.01 means buckets of 0.1 / 1 / 10 / 100 / 1000. These are the only values `aggTicks` accepts on `GET /v1/markets/{symbol}/book` and the WebSocket `book` channel. Set by the platform or the market's dex when listing and editable later; null when the market has no aggregation levels configured (then only the raw book is available). Never enters the execution layer or any signature",
+            "examples": [
+              [
+                10,
+                100,
+                1000,
+                10000,
+                100000
+              ]
+            ]
           }
         }
       },

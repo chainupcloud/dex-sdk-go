@@ -89,6 +89,9 @@ type Market struct {
 	// Fees 本市场的费率;nil = 服务端没给。RateSource 为 "market" 时 taker / maker 按这里收,
 	// 为 "tier" 时按账户档位([Account] 的 TakerFee / MakerFee)收。
 	Fees *MarketFees
+	// AggTicks 本市场配置的盘口聚合档位(每桶 tick 数,升序):`/v1/markets/{symbol}/book` 与 WS `book` 的
+	// `aggTicks` 只认这几档;nil = 未配置,只有原始盘口。
+	AggTicks []uint64
 }
 
 // MarketFees 市场的费率(十进制比例,maker 为负 = 返佣)。
@@ -125,6 +128,7 @@ type wireMarket struct {
 	OpenInterest    *string     `json:"openInterest"`
 	FundingRate     *string     `json:"fundingRate"`
 	Fees            *MarketFees `json:"fees"`
+	AggTicks        []uint64    `json:"aggTicks"`
 }
 
 func (w wireMarket) market() (Market, error) {
@@ -142,6 +146,7 @@ func (w wireMarket) market() (Market, error) {
 		MaxLeverage:     w.MaxLeverage,
 		FundingRate:     w.FundingRate,
 		Fees:            w.Fees,
+		AggTicks:        w.AggTicks,
 	}
 	if w.Symbol == "" {
 		return Market{}, fmt.Errorf("dexosv1: 市场缺 symbol")
