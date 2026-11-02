@@ -21,6 +21,10 @@
 //   - [Wallet]:主钱包自签(EIP-712 具名结构体)。单笔下单 / 撤单、设杠杆、授权与撤销 API 钱包,
 //     金库的建库、存入、赎回、认领与改配置。
 //
+// 子账户模型 v2(`sigVersion: 2`,账户 = owner 地址 + 子账户编号,nonce 是签名者的窗口 nonce,见 [WindowNonce]):
+// [PairedSession] 做成对成交(仅测试链,`POST /v1/orders/paired`);[Client.SubmitAgentScope] 提交主钱包在别处签好的
+// owner 级授权。
+//
 // 写入串行,一律等结论(`ack=result`,等待上限 [Client.AckWait],最多 5s):nonce 前不前进要看结论。
 // 业务拒绝是终局结论,不锁会话;结论未知(202、传输失败、5xx、批量回执缺项)就锁定会话,用 Pending()
 // 给出的请求身份查 [Client.Request] 核对之后再新建会话。每个请求的身份(requestId)在发出前就按签名算好,

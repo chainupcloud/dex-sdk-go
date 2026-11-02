@@ -1,0 +1,1 @@
+{"error":{"code":"GatewayForbidden","num":10403,"message":"taker account is not allowed to use paired trades on this environment","details":{"reason":"paired_trade_not_allowed","leg":"taker"}}}

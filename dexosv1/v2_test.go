@@ -206,7 +206,7 @@ func TestAgentsListOwnerLevelGrants(t *testing.T) {
 		t.Fatalf("按账户授权: %+v", legacy)
 	}
 	if owner.Scope != "owner" || owner.SubaccountMask != 6 || !slices.Equal(owner.Subaccounts, []uint32{1, 2}) ||
-		owner.Address != agentAddr || owner.Label != "paint" || *owner.ValidUntil != 1791999999000 {
+		owner.Address != agentAddr || owner.Label != "paint" || *owner.ValidUntil != 1893456000000 {
 		t.Fatalf("owner 级授权: %+v", owner)
 	}
 }
