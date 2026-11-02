@@ -127,6 +127,33 @@ s, err := dexosv1.NewSession(ctx, c, agent, dexosv1.VaultAccount(vaultID))
 撤全部、断线保护),资金类动作网关以 403 拒。读接口同样接受 `VaultAccount(id)`。
 完整流程见 [`examples/vault`](examples/vault/main.go)。
 
+### 成对成交(仅测试链)与 owner 级授权
+
+`POST /v1/orders/paired` 让两个账户在一次请求里原子成交(挂单腿 M、吃单腿 T,价格必须严格在买一与卖一之间,
+两腿都不进簿),用来在测试环境画成交 K 线。只在测试链上可用,网关只对白名单账户开放(名单为空时 404)。
+两条腿都是 `sigVersion: 2` 的签名:账户 = (owner 地址, 子账户编号),nonce 是签名者自己取的毫秒时间戳(窗口 nonce)。
+
+```go
+// 主钱包在别处(浏览器钱包)签一次 owner 级授权:位图只覆盖 M、T 两个编号
+ex, _ := c.Exchange(ctx)
+domain, _ := ex.SigningDomain()
+nonce := dexosv1.WindowNonce(owner)
+payload := domain.ApproveAgentScopeTypedData(owner, agent.Address(), 1<<1|1<<2, 0, nonce)
+// …… 拿回签名 sig 之后
+_, err := c.SubmitAgentScope(ctx, dexosv1.SignedAgentScope{Owner: owner, Domain: domain, Agent: agent.Address(),
+    SubaccountMask: 1<<1 | 1<<2, Nonce: nonce, Signature: sig})
+
+p, err := dexosv1.NewPairedSession(ctx, c, agent,
+    dexosv1.AccountRef{Address: owner, Subaccount: 1}, dexosv1.AccountRef{Address: owner, Subaccount: 2})
+res, err := p.Trade(ctx, dexosv1.PairedTrade{Market: btc, MakerSide: dexos.Sell, Price: px, Lots: sz})
+```
+
+422(`PairedTradeOutsideSpread`、被拒那条腿的 `InsufficientMargin` …)与定序前的 4xx 是终局结论,会话照常可用;
+202 / 传输失败 / 5xx 是结论未知,会话锁定,`p.Pending()` 给出挂单腿的请求身份(成对成交的 requestId 就是它)。
+要在发出之前落账,用 `PairedSession.TradeJournaled`。撤销 owner 级授权:主钱包签 `domain.RevokeAgentScopeTypedData`
+(位图与有效期都为 0 的 `ApproveAgentScope`),交给 `c.SubmitAgentScopeRevoke`(走 `/v1/account/agents/revoke`;授权端点不收位图 0)。`Agents` 的结果里 owner 级授权是 `Scope == "owner"`:
+它出现在 owner 名下每个编号的列表里,能不能交易某个编号看 `SubaccountMask`。
+
 ---
 
 ## 连接参数
@@ -304,7 +331,9 @@ cargo run -q --example sdk_golden > ../dex-sdk-go/dexos/testdata/golden.json
 go test ./dexos/
 ```
 
-金样覆盖空集合、极值、只撤不挂、只挂不撤等边界。两种字节序在同一个 SDK 里并存,是最容易混的地方:
+金样覆盖空集合、极值、只撤不挂、只挂不撤等边界。成对成交与 v2 签名(`PairedTradeLeg` 编码、`Action` /
+`ApproveAgentScope` 摘要、签名、请求身份)另有 `dexosv1/testdata/paired_golden.json`,由 dex-os 的 Rust 实现导出,
+做法见 [`dexosv1/testdata/README.md`](dexosv1/testdata/README.md)。两种字节序在同一个 SDK 里并存,是最容易混的地方:
 
 - **规范命令编码** → 小端(内核的紧凑编码)
 - **EIP-712 word** → 大端 32 字节右对齐(以太坊 ABI 约定)

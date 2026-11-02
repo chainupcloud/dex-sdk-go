@@ -134,6 +134,12 @@ func (f *writeFake) answerRaw(t *testing.T, path string, status int, body []byte
 // API 钱包签 AgentExec(规范命令编码, nonce),主钱包签 EIP-712 具名结构体;都从请求体重建,不经 SDK 的签名路径。
 func gatewayRequestID(t *testing.T, cat *Catalog, path string, body any) string {
 	t.Helper()
+	if path == "/v1/orders/paired" {
+		// 成对成交的请求身份 = 挂单腿的签名身份(dex-os request_digest 对 PairedTrade 的定义)
+		digest, signerHex := gatewayPairedLeg(t, cat, m(body), "maker")
+		signer := mustAddr(t, signerHex)
+		return "0x" + hex.EncodeToString(dexos.Keccak256(signer[:], digest))
+	}
 	env := m(body)
 	items, isBatch := body.([]any)
 	if isBatch {
@@ -226,8 +232,21 @@ func gatewayRequestID(t *testing.T, cat *Catalog, path string, body any) string 
 			}
 			digest = leverageHash(testDomain, owner, signingID, market(env["symbol"]).SigningMarketID, imf, nonce)
 		case "/v1/account/agents/approve":
+			if env["sigVersion"] != nil && num(t, env["sigVersion"]) == 2 {
+				mask, err := strconv.ParseUint(env["subaccountMask"].(string), 10, 64)
+				if err != nil {
+					t.Fatal(err)
+				}
+				digest = testDomain.ApproveAgentScopeHash(owner, mustAddr(t, env["agent"].(string)), mask, optional("validUntil"), nonce)
+				break
+			}
 			digest = testDomain.ApproveAgentHash(owner, signingID, mustAddr(t, env["agent"].(string)), optional("validUntil"), nonce)
 		case "/v1/account/agents/revoke":
+			if env["sigVersion"] != nil && num(t, env["sigVersion"]) == 2 {
+				// 与网关 agent_revoke 的 v2 分支一致:位图 0、有效期 0 的 ApproveAgentScope
+				digest = testDomain.ApproveAgentScopeHash(owner, mustAddr(t, env["agent"].(string)), 0, 0, nonce)
+				break
+			}
 			digest = testDomain.RevokeAgentHash(owner, signingID, mustAddr(t, env["agent"].(string)), nonce)
 		default:
 			if !strings.HasPrefix(path, "/v1/vaults") {
@@ -238,6 +257,44 @@ func gatewayRequestID(t *testing.T, cat *Catalog, path string, body any) string 
 	}
 	signer := mustAddr(t, signerHex)
 	return "0x" + hex.EncodeToString(dexos.Keccak256(signer[:], digest))
+}
+
+// gatewayPairedLeg 按网关的做法(v1_write.rs paired_trade)从成对成交请求体重建一条腿的 v2 Action 摘要:
+// 价量按普通限价单换算,内层 PairedTradeLeg 的对手取另一条腿的账户。返回摘要与声明的签名者(缺省 = owner)。
+func gatewayPairedLeg(t *testing.T, cat *Catalog, body map[string]any, role string) ([]byte, string) {
+	t.Helper()
+	mk, err := cat.Market(body["symbol"].(string))
+	if err != nil {
+		t.Fatal(err)
+	}
+	price, err := mk.Scale.Ticks(body["price"].(string))
+	if err != nil {
+		t.Fatal(err)
+	}
+	lots, err := mk.Scale.Lots(body["size"].(string))
+	if err != nil {
+		t.Fatal(err)
+	}
+	side := map[any]dexos.Side{"buy": dexos.Buy, "sell": dexos.Sell}[body["makerSide"]]
+	other := map[string]string{"maker": "taker", "taker": "maker"}[role]
+	me, them := m(body[role]), m(body[other])
+	if num(t, me["sigVersion"]) != 2 {
+		t.Fatalf("%s 腿应为 sigVersion 2: %v", role, me)
+	}
+	field := func(leg map[string]any, k string) uint64 {
+		if leg[k] == nil {
+			return 0
+		}
+		return num(t, leg[k])
+	}
+	inner := dexos.EncodePairedTradeLeg(dexos.PairedTradeLeg{Taker: role == "taker", Market: mk.SigningMarketID, MakerSide: side, Price: price,
+		Lots: lots, Counterparty: mustAddr(t, them["account"].(string)), CounterpartySubaccount: uint16(field(them, "subaccount"))}, num(t, body["nowMs"]))
+	digest := testDomain.ActionHash(mustAddr(t, me["account"].(string)), uint16(field(me, "subaccount")), inner, num(t, me["nonce"]), field(me, "expiresAt"))
+	signerHex, ok := me["signer"].(string)
+	if !ok {
+		signerHex = me["account"].(string)
+	}
+	return digest, signerHex
 }
 
 func (f *writeFake) last(t *testing.T) captured {
@@ -720,8 +777,14 @@ func TestWalletWrites(t *testing.T) {
 }
 
 // specDeviations 本包按实现读、而钉住的规格里没有的字段:发现了就报给 dex-os,规格改好、同步副本后
-// 删掉对应条目 —— 条目多余时测试会红。dex-os 3c1ce22(v1.1 #79 金库身份)之后没有已知偏差。
-var specDeviations = map[string][]string{}
+// 删掉对应条目 —— 条目多余时测试会红。
+var specDeviations = map[string][]string{
+	// `POST /v1/orders/paired` 的 200 响应在规格里只是 `{type: object}`,字段只写在 description 里
+	// (`{status: "filled", symbol, price, size, makerOrderId, takerOrderId, fills, avgPrice, seq, sub, requestId}`);
+	// 本包照 dex-os v1_write.rs paired_result + conclude_try 读。
+	"PairedResult":      {"status", "symbol", "price", "size", "makerOrderId", "takerOrderId", "avgPrice", "fills"},
+	"PairedResult(ack)": {"status", "seq", "sub", "duplicate", "requestId"},
+}
 
 // 本包解码 / 发送用到的每个字段都必须在规格里,specDeviations 除外。
 func TestWriteFieldsExistInPinnedSpec(t *testing.T) {
@@ -762,6 +825,11 @@ func TestWriteFieldsExistInPinnedSpec(t *testing.T) {
 		{"vault claim", reflect.TypeFor[wireVaultAmountReq](), props(requestSchema(t, spec, "/v1/vaults/{id}/claim"))},
 		{"vault redeem", reflect.TypeFor[wireVaultSharesReq](), props(requestSchema(t, spec, "/v1/vaults/{id}/redeem"))},
 		{"vault config", reflect.TypeFor[wireVaultConfigReq](), props(requestSchema(t, spec, "/v1/vaults/{id}/config"))},
+		{"paired", reflect.TypeFor[wirePairedReq](), props(requestSchema(t, spec, "/v1/orders/paired"))},
+		{"paired.maker", reflect.TypeFor[wirePairedLeg](), props(obj(props(requestSchema(t, spec, "/v1/orders/paired"))["maker"]))},
+		{"paired.taker", reflect.TypeFor[wirePairedLeg](), props(obj(props(requestSchema(t, spec, "/v1/orders/paired"))["taker"]))},
+		{"PairedResult", reflect.TypeFor[wirePairedResult](), props(postResponseSchema(t, spec, "/v1/orders/paired", "200"))},
+		{"PairedResult(ack)", reflect.TypeFor[wireAck](), props(postResponseSchema(t, spec, "/v1/orders/paired", "200"))},
 	}
 	for _, c := range cases {
 		allowed := map[string]bool{}

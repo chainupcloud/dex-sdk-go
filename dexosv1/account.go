@@ -367,11 +367,29 @@ func (c *Client) Nonce(ctx context.Context, ref AccountRef, signer *dexos.Addres
 }
 
 // Agent 一把已授权的 API 钱包。ValidUntil nil = 不过期。
+//
+// 列表里有两种授权(dex-os 子账户模型 v2 §3.4):Scope "account" 授权在被问的这个账户上;"owner" 是 owner 级授权,
+// 覆盖 SubaccountMask 里的编号。服务端在 owner 名下**每个**编号的列表里都列出该 owner 的全部 owner 级授权,
+// 包括不覆盖这个编号的 —— 能不能交易某个编号要看位图。
 type Agent struct {
 	Address    string `json:"address"`
 	Label      string `json:"label"`
 	ValidUntil *int64 `json:"validUntil"`
 	Expired    bool   `json:"expired"`
+	// Scope "account" | "owner"。
+	Scope string `json:"scope"`
+	// SubaccountMask owner 级授权的位图,第 i 位 = 编号 i(可以覆盖还没建的编号);按账户授权为 0。
+	SubaccountMask uint64 `json:"subaccountMask,string"`
+	// Subaccounts owner 级授权覆盖的编号(位图里置位的那些);按账户授权为 nil。
+	Subaccounts []uint32 `json:"subaccounts"`
+}
+
+// covers 这条授权能不能代编号 sub 的账户签名(授权取自 sub 号账户的列表):按账户授权就是这个账户的;owner 级授权看位图。
+func (a Agent) covers(sub uint32) bool {
+	if a.Scope == "owner" {
+		return sub < 64 && a.SubaccountMask>>sub&1 == 1
+	}
+	return true
 }
 
 // Agents 账户上授权的 API 钱包。不接受金库身份:代金库交易的 API 钱包授权在 manager 认领金库所用的

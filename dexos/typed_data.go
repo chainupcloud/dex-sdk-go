@@ -47,6 +47,10 @@ var (
 		{Name: "owner", Type: "address"}, {Name: "master", Type: "uint32"}, {Name: "agent", Type: "address"},
 		{Name: "nonce", Type: "uint64"},
 	}
+	approveAgentScopeFields = []TypedField{
+		{Name: "owner", Type: "address"}, {Name: "agent", Type: "address"}, {Name: "subaccountMask", Type: "uint64"},
+		{Name: "validUntilMs", Type: "uint64"}, {Name: "nonce", Type: "uint64"},
+	}
 )
 
 // encodeType 按 EIP-712 规则把字段表拼成类型串,如 ApproveAgent(address owner,...)。
@@ -89,4 +93,25 @@ func (d Domain) RevokeAgentTypedData(owner Address, master uint32, agent Address
 		"agent":  agent.Hex(),
 		"nonce":  strconv.FormatUint(nonce, 10),
 	})
+}
+
+// ApproveAgentScopeTypedData 「owner 级授权 API 钱包」(sigVersion 2)的钱包待签结构;签名结果交给
+// dexosv1 的 Client.SubmitAgentScope。与 ApproveAgentScopeHash 同源。
+//
+// nonce 是 owner 的窗口 nonce(毫秒时间戳,dexosv1.WindowNonce 给出):不用先查计数器,签完到提交之间别的签名
+// 也不会让它作废;但提交时要落在执行层的窗口里(块时间前 2 天到后 1 天),同一个 nonce 只能用一次。
+func (d Domain) ApproveAgentScopeTypedData(owner, agent Address, subaccountMask, validUntilMs, nonce uint64) TypedData {
+	return d.typedData("ApproveAgentScope", approveAgentScopeFields, map[string]any{
+		"owner":          owner.Hex(),
+		"agent":          agent.Hex(),
+		"subaccountMask": strconv.FormatUint(subaccountMask, 10),
+		"validUntilMs":   strconv.FormatUint(validUntilMs, 10),
+		"nonce":          strconv.FormatUint(nonce, 10),
+	})
+}
+
+// RevokeAgentScopeTypedData 「撤销 owner 级授权」的钱包待签结构(位图与有效期都为 0 的 ApproveAgentScope);
+// 签名结果交给 dexosv1 的 Client.SubmitAgentScopeRevoke。与 RevokeAgentScopeHash 同源。
+func (d Domain) RevokeAgentScopeTypedData(owner, agent Address, nonce uint64) TypedData {
+	return d.ApproveAgentScopeTypedData(owner, agent, 0, 0, nonce)
 }

@@ -48,6 +48,8 @@ const (
 	tagBatchReplace      byte = 0x3E
 	// 带改单项的原子换单(dex-os#256,规格 dex-os docs/specs/batch-replace-modify.md)
 	tagBatchReplace2 byte = 0x88
+	// 成对成交的一条腿(dex-os#292,规格 dex-os docs/specs/paired-trade.md)
+	tagPairedTradeLeg byte = 0x8C
 )
 
 // Side 买卖方向。取值必须与内核的 put_side 一致。
@@ -488,3 +490,44 @@ func EncodePlaceTpslPair(account uint32, p TpslPair, nowMs uint64) []byte {
 // NoParent 「没有父单」的哨兵(内核 conditional.rs:`parent.0 == u64::MAX` 才算无父)。
 // TpslPair.Parent 的零值在编码时映射成它,调用方不必自己写 MaxUint64。
 const NoParent OrderID = OrderID(^uint64(0))
+
+// ActorPlaceholder sigVersion 2 通用动作(SignedAction)内层命令的行为人占位值(内核 ACTOR_PLACEHOLDER = u32::MAX):
+// 签名时内层的 account 一律填它,执行层认证之后换成按 (owner, 子账户编号) 解析出的账户。
+const ActorPlaceholder uint32 = 0xFFFFFFFF
+
+// PairedTradeLeg 成对成交一条腿的签名内容(Command::PairedTradeLeg,dex-os docs/specs/paired-trade.md §3.1)。
+// 两条腿写同一个 Market / MakerSide / Price / Lots,各自的 Counterparty 指向另一条腿的账户 ——
+// 一条腿的签名因此只对这个对手、这个价量、这个角色有效。
+type PairedTradeLeg struct {
+	// Taker false = 挂单腿(maker),true = 吃单腿(taker)。
+	Taker  bool
+	Market uint16
+	// MakerSide 挂单腿的方向(吃单腿取反;两条腿写同一个值)。
+	MakerSide Side
+	Price     uint32
+	Lots      uint64
+	// Counterparty / CounterpartySubaccount 另一条腿的主钱包地址与子账户编号。
+	Counterparty           Address
+	CounterpartySubaccount uint16
+}
+
+// EncodePairedTradeLeg 规范编码 Command::PairedTradeLeg。行为人恒为 [ActorPlaceholder]:
+// 这条命令只作 v2 Action 的内层(单独提交一律被拒),签名时没有别的取值。
+//
+// 布局:tag | account u32 | taker u8 | market u16 | makerSide u8 | price u32 | lots u64
+// | counterparty [20] | counterpartySubaccount u16 | nowMs u64
+func EncodePairedTradeLeg(l PairedTradeLeg, nowMs uint64) []byte {
+	e := &encoder{}
+	e.u8(codecVersion)
+	e.u8(tagPairedTradeLeg)
+	e.u32(ActorPlaceholder)
+	e.boolean(l.Taker)
+	e.u16(l.Market)
+	e.u8(byte(l.MakerSide))
+	e.u32(l.Price)
+	e.u64(l.Lots)
+	e.buf = append(e.buf, l.Counterparty[:]...)
+	e.u16(l.CounterpartySubaccount)
+	e.u64(nowMs)
+	return e.buf
+}
