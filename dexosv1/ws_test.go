@@ -549,6 +549,78 @@ func TestStreamSnapshotChannels(t *testing.T) {
 	}
 }
 
+// dex-os 上任一 dex 新上市场(10-02 dex-01 demo 上架 XRP):价格帧里多出目录外的一行,订阅照旧 Live,目录里的行照常换算、
+// 目录外的只列出符号;调用方重新取目录并 SetCatalog 后,下一帧换算出新市场那一行,新市场也能订盘口。
+func TestStreamPricesStayLiveWhenMarketListed(t *testing.T) {
+	h := newWSHarness(t, nil)
+	prices := make(chan *Prices, 8)
+	ps, err := h.st.SubscribePrices(func(p *Prices) { prices <- p })
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.run()
+	conn := h.fw.accept(t)
+	conn.ack(t, conn.subscribes(t, 1)["prices"], testEpoch, 1)
+	conn.push(t, "prices", jsonObj(t, fixture(t, "prices.json"), nil), 2, "", true)
+	h.waitState(ps, StateLive)
+	if p := recv(t, prices); len(p.Prices) != 2 || len(p.Uncataloged) != 0 {
+		t.Fatalf("快照: %+v", p)
+	}
+
+	var frame map[string]any
+	if err := json.Unmarshal(fixture(t, "prices.json"), &frame); err != nil {
+		t.Fatal(err)
+	}
+	listed := map[string]any{}
+	for k, v := range frame["prices"].([]any)[1].(map[string]any) {
+		listed[k] = v
+	}
+	listed["symbol"], listed["last"] = "XRP-USD", "2.5"
+	frame["prices"] = append(frame["prices"].([]any), listed)
+	conn.push(t, "prices", frame, 3, "", false)
+	if p := recv(t, prices); len(p.Prices) != 2 || p.Prices[1].Last != 24930 || !reflect.DeepEqual(p.Uncataloged, []string{"XRP-USD"}) {
+		t.Fatalf("目录外的行只列符号、目录里的照常换算: %+v", p)
+	}
+	if _, err := h.st.SubscribeBook("XRP-USD", 5, func(*Book) {}); err == nil {
+		t.Fatal("换目录之前不认识新市场")
+	}
+
+	var markets struct {
+		Markets []map[string]any `json:"markets"`
+	}
+	if err := json.Unmarshal(fixture(t, "markets.json"), &markets); err != nil {
+		t.Fatal(err)
+	}
+	xrp := map[string]any{}
+	for k, v := range markets.Markets[1] {
+		xrp[k] = v
+	}
+	xrp["symbol"], xrp["signingMarketId"] = "XRP-USD", 9
+	markets.Markets = append(markets.Markets, xrp)
+	body, err := json.Marshal(markets)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.f.routes["/v1/markets"] = func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write(body) }
+	cat, err := h.c.Catalog(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := h.st.SetCatalog(cat); err != nil {
+		t.Fatal(err)
+	}
+	conn.push(t, "prices", frame, 4, "", false)
+	if p := recv(t, prices); len(p.Prices) != 3 || p.Prices[2].SigningMarketID != 9 || p.Prices[2].Last != 25 || len(p.Uncataloged) != 0 {
+		t.Fatalf("换目录之后新市场那一行照常换算: %+v", p)
+	}
+	if _, err := h.st.SubscribeBook("XRP-USD", 5, func(*Book) {}); err != nil {
+		t.Fatalf("换目录之后能订新市场的盘口: %v", err)
+	}
+	if trail := h.trail(ps); !reflect.DeepEqual(trail, []State{StateLive}) {
+		t.Fatalf("价格订阅全程 Live，不进 Syncing: %v", trail)
+	}
+}
+
 func orderFrame(fields map[string]any) map[string]any {
 	out := map[string]any{"address": testAddr, "subaccount": 0, "symbol": "ETH-USD", "clientOrderId": nil, "ts": 1}
 	for k, v := range fields {

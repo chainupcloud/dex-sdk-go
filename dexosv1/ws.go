@@ -127,7 +127,7 @@ type StreamOptions struct {
 // 数据回调与 OnState 都在 Run 的 goroutine 里按序调用。
 type Stream struct {
 	c   *Client
-	cat *Catalog
+	cat atomic.Pointer[Catalog]
 	opt StreamOptions
 	url string
 
@@ -187,14 +187,29 @@ func NewStream(c *Client, cat *Catalog, opt StreamOptions) (*Stream, error) {
 	def(&opt.ReconnectMin, 500*time.Millisecond)
 	def(&opt.ReconnectMax, 30*time.Second)
 	def(&opt.CatchUpWait, 10*time.Second)
-	return &Stream{
-		c: c, cat: cat, opt: opt, url: opt.URL,
+	st := &Stream{
+		c: c, opt: opt, url: opt.URL,
 		subs: map[*Subscription]struct{}{},
 		wake: make(chan struct{}, 1),
 		due:  make(chan func(), 256),
 		quit: make(chan struct{}),
-	}, nil
+	}
+	st.cat.Store(cat)
+	return st, nil
 }
+
+// SetCatalog 换上同一 dex-os 后来读的市场目录:之后到的帧、之后的补拉与新建的订阅都按它换算。目录取得之后新上的市场
+// (在价格帧里只列在 [Prices.Uncataloged])要订盘口、要换算它的价格行与账户记录时,先重新取目录再调它。
+// 已有的盘口 / bbo / 公共成交订阅照旧按订阅时的市场换算。可在运行中从任意 goroutine 调用。
+func (st *Stream) SetCatalog(cat *Catalog) error {
+	if cat == nil {
+		return errors.New("dexosv1: SetCatalog 需要 Catalog")
+	}
+	st.cat.Store(cat)
+	return nil
+}
+
+func (st *Stream) catalog() *Catalog { return st.cat.Load() }
 
 // Subscription 一个订阅。
 type Subscription struct {

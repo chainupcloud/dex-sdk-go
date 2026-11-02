@@ -303,21 +303,35 @@ func TestListRowsFollowSameNameMarketsInOrder(t *testing.T) {
 		t.Fatalf("成交统计行应按同名市场的先后对到 0 与 8: %+v", ts.Tickers)
 	}
 
-	// 价格表比目录多出一行同名（目录取得早，之后又上了同名市场）：报目录外符号，调用方重新取目录。
+	// 价格表比目录多出一行同名（目录取得早，之后又上了同名市场）、多出一个目录里没有的符号（别的 dex 新上的市场）：
+	// 目录里的行照常换算，目录外的行只列出符号。
 	var doc map[string]any
 	if err := json.Unmarshal([]byte(prices), &doc); err != nil {
 		t.Fatal(err)
 	}
 	rows := doc["prices"].([]any)
-	doc["prices"] = append(rows, rows[len(rows)-1])
+	listed := map[string]any{}
+	for k, v := range rows[0].(map[string]any) {
+		listed[k] = v
+	}
+	listed["symbol"] = "other:XRP-USD"
+	doc["prices"] = append(rows, rows[len(rows)-1], listed)
 	extraBody, err := json.Marshal(doc)
 	if err != nil {
 		t.Fatal(err)
 	}
 	extra := string(extraBody)
 	f.routes["/v1/prices"] = func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(extra)) }
-	if _, err := c.Prices(ctx, cat); err == nil || !strings.Contains(err.Error(), "重新取目录") {
-		t.Fatalf("同名行多于目录里的同名市场应报错: %v", err)
+	ps, err = c.Prices(ctx, cat)
+	if err != nil {
+		t.Fatalf("目录外的行不该让整张价格表读不出来: %v", err)
+	}
+	ids = ids[:0]
+	for _, p := range ps.Prices {
+		ids = append(ids, p.SigningMarketID)
+	}
+	if !slices.Equal(ids, []uint16{0, 1, 8}) || !slices.Equal(ps.Uncataloged, []string{"BTC-USD", "other:XRP-USD"}) {
+		t.Fatalf("目录里的行照常对到 0、1、8，目录外的两行只列符号: %v %v", ids, ps.Uncataloged)
 	}
 }
 

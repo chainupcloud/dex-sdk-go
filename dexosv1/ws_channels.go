@@ -19,7 +19,7 @@ func (st *Stream) SubscribePrices(fn func(*Prices)) (*Subscription, error) {
 		if err := json.Unmarshal(f.Data, &w); err != nil {
 			return fmt.Errorf("dexosv1: prices 帧解析失败: %w", err)
 		}
-		p, err := w.prices(st.cat)
+		p, err := w.prices(st.catalog())
 		if err != nil {
 			return err
 		}
@@ -32,7 +32,7 @@ func (st *Stream) SubscribePrices(fn func(*Prices)) (*Subscription, error) {
 // SubscribeBook 盘口(`book`):每帧都是前 depth 档的整份盘口(块边界合并,变了才推)。depth 0 = 服务端缺省 20,上限 100。
 // 同一个市场只能有一个盘口订阅(帧按符号路由)。
 func (st *Stream) SubscribeBook(symbol string, depth int, fn func(*Book)) (*Subscription, error) {
-	m, err := st.cat.Market(symbol)
+	m, err := st.catalog().Market(symbol)
 	if err != nil {
 		return nil, err
 	}
@@ -69,7 +69,7 @@ type BBO struct {
 
 // SubscribeBBO 最优一档(`bbo`),最优价或量变了才推。
 func (st *Stream) SubscribeBBO(symbol string, fn func(BBO)) (*Subscription, error) {
-	m, err := st.cat.Market(symbol)
+	m, err := st.catalog().Market(symbol)
 	if err != nil {
 		return nil, err
 	}
@@ -117,7 +117,7 @@ type Trade struct {
 
 // SubscribeTrades 公共成交(`trades`),逐笔推。断线 / 丢帧时缺的帧不补,以 [*TradesGapError] 报出。
 func (st *Stream) SubscribeTrades(symbol string, fn func(Trade)) (*Subscription, error) {
-	m, err := st.cat.Market(symbol)
+	m, err := st.catalog().Market(symbol)
 	if err != nil {
 		return nil, err
 	}
@@ -180,7 +180,7 @@ func (st *Stream) SubscribePositions(ref AccountRef, fn func([]Position)) (*Subs
 		if err := json.Unmarshal(f.Data, &w); err != nil {
 			return fmt.Errorf("dexosv1: positions 帧解析失败: %w", err)
 		}
-		ps, err := positionsFrom(st.cat, w.Positions)
+		ps, err := positionsFrom(st.catalog(), w.Positions)
 		if err != nil {
 			return err
 		}
@@ -269,7 +269,7 @@ func (st *Stream) SubscribeOrders(ref AccountRef, fn func(OrdersUpdate)) (*Subsc
 			}
 			next := make(map[uint64]Order, len(w.Orders))
 			for _, wo := range w.Orders {
-				o, err := wo.order(st.cat)
+				o, err := wo.order(st.catalog())
 				if err != nil {
 					return err
 				}
@@ -287,7 +287,7 @@ func (st *Stream) SubscribeOrders(ref AccountRef, fn func(OrdersUpdate)) (*Subsc
 		if err := json.Unmarshal(f.Data, &w); err != nil {
 			return fmt.Errorf("dexosv1: orders 帧解析失败: %w", err)
 		}
-		ev, err := w.event(st.cat)
+		ev, err := w.event(st.catalog())
 		if err != nil {
 			return err
 		}

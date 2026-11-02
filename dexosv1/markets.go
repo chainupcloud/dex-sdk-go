@@ -197,7 +197,8 @@ func (w wireMarket) market() (Market, error) {
 // Catalog 市场目录:符号 → 市场。账户类读取的响应按符号给价量,换算要靠它。
 //
 // 目录是一次读取的快照;新上的市场不在旧目录里,响应里出现目录外的符号时读取直接报错
-// (不猜精度),调用方重新取一次目录即可。
+// (不猜精度),调用方重新取一次目录即可。价格整表([Prices])例外:它列出 dex-os 上全部 dex 的全部市场,
+// 目录外的行不换算,只把符号列在 [Prices.Uncataloged]。
 type Catalog struct {
 	markets []Market
 	// bySymbol 按符号寻址只认没下市的市场；sameName 是每个符号（大写）的全部市场下标（含已下市），按目录顺序。
@@ -264,7 +265,7 @@ func (c *Catalog) rowMarket(symbol string) (*Market, error) {
 
 // listRows 把整表行（/v1/prices、WS prices 帧、/v1/tickers）逐行对到市场。这几张表与 /v1/markets 一样列出全部市场、按市场号
 // 顺序、只带符号，同名的已下市旧市场与在用新市场各占一行（dex-os public-api-v1-1 §4.4）：同一符号的第 n 行就是目录里该符号的
-// 第 n 个市场。行数比目录里同名市场多（目录取得早、之后又上了同名市场）即报错，重新取目录。
+// 第 n 个市场。行数比目录里同名市场多（目录取得早、之后又上了同名市场）即目录外的行：成交统计报错、重新取目录，价格整表只列出符号。
 type listRows struct {
 	cat  *Catalog
 	used map[string]int
@@ -428,9 +429,12 @@ type Prices struct {
 	Prices []Price
 	TS     int64
 	Window *Window24h
+	// Uncataloged 是目录外的行的符号(按表中顺序):目录取得之后新上的市场(任一 dex 上架都算),没有换算(不猜精度)。
+	// 要它们的价格就重新取目录;WS 订阅经 [Stream.SetCatalog] 换上新目录。
+	Uncataloged []string
 }
 
-// Prices 全部市场的实时价与 24h 统计。响应里出现目录外的符号时报错(不猜精度)。
+// Prices 全部市场的实时价与 24h 统计。目录外的行不换算,符号列在 [Prices.Uncataloged]。
 func (c *Client) Prices(ctx context.Context, cat *Catalog) (*Prices, error) {
 	var w wirePrices
 	if err := c.get(ctx, "/v1/prices", nil, marketRead, &w); err != nil {
@@ -452,7 +456,8 @@ func (w wirePrices) prices(cat *Catalog) (*Prices, error) {
 	for _, wp := range w.Prices {
 		m, err := rows.market(wp.Symbol)
 		if err != nil {
-			return nil, err
+			out.Uncataloged = append(out.Uncataloged, wp.Symbol)
+			continue
 		}
 		p := Price{Symbol: wp.Symbol, SigningMarketID: m.SigningMarketID, FundingRate: wp.FundingRate, FundingIndex: wp.FundingIndex, LastFundingMs: wp.LastFundingMs,
 			NextFundingMs: wp.NextFundingMs, Change24h: wp.Change24h, QuoteVolume24h: wp.QuoteVolume24h}
