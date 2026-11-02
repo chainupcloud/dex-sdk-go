@@ -130,7 +130,7 @@ func (st *Stream) SubscribeFills(ref AccountRef, from HistoryCursor, fn func(Fil
 		return histItem{id: f.ID, pos: p, emit: func() { fn(f) }}, nil
 	}
 	h.fetch = func(ctx context.Context, after, epoch, upper string) ([]histItem, error) {
-		res, err := st.c.Fills(ctx, st.cat, ref, "", HistoryQuery{After: after, Epoch: epoch, Upper: upper})
+		res, err := st.c.Fills(ctx, st.catalog(), ref, "", HistoryQuery{After: after, Epoch: epoch, Upper: upper})
 		if err != nil {
 			return nil, err
 		}
@@ -149,7 +149,7 @@ func (st *Stream) SubscribeFills(ref AccountRef, from HistoryCursor, fn func(Fil
 		if err := json.Unmarshal(f.Data, &w); err != nil {
 			return nil, fmt.Errorf("dexosv1: fills 帧解析失败: %w", err)
 		}
-		fill, err := w.fill(st.cat)
+		fill, err := w.fill(st.catalog())
 		if err != nil {
 			return nil, err
 		}
