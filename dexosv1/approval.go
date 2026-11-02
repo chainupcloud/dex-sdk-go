@@ -102,7 +102,7 @@ func (c *Client) SubmitAgentScope(ctx context.Context, a SignedAgentScope) (*Rec
 		return nil, errors.New("dexosv1: 授权的 API 钱包地址为空或就是主钱包")
 	}
 	if a.SubaccountMask == 0 {
-		return nil, errors.New("dexosv1: 位图为 0 是撤销,不是授权")
+		return nil, errors.New("dexosv1: 位图为 0 是撤销(网关的授权端点不收),用 SubmitAgentScopeRevoke")
 	}
 	digest := a.Domain.ApproveAgentScopeHash(a.Owner, a.Agent, a.SubaccountMask, a.ValidUntil, a.Nonce)
 	id := newIdentity(a.Owner, "signer:"+a.Owner.Hex(), a.Nonce, digest, nil)
@@ -126,6 +126,53 @@ func (c *Client) SubmitAgentScope(ctx context.Context, a SignedAgentScope) (*Rec
 	}
 	if !strings.EqualFold(wr.Agent, a.Agent.Hex()) || wr.SubaccountMask != mask {
 		return nil, fmt.Errorf("dexosv1: 授权 %s(subaccountMask %s),回执是 %q(subaccountMask %q)", a.Agent.Hex(), mask, wr.Agent, wr.SubaccountMask)
+	}
+	return &out, nil
+}
+
+// SignedAgentScopeRevoke 一份已签好的「撤销 owner 级授权」。签的是 Domain.RevokeAgentScopeTypedData(Owner, Agent, Nonce),
+// 即位图与有效期都为 0 的 ApproveAgentScope。
+type SignedAgentScopeRevoke struct {
+	Owner dexos.Address
+	// Domain 签名时从 `GET /v1/exchange` 读到的域。
+	Domain dexos.Domain
+	Agent  dexos.Address
+	// Nonce owner 的窗口 nonce(毫秒时间戳,[WindowNonce] 给出)。
+	Nonce uint64
+	// Signature 65 字节 hex(0x 开头)。
+	Signature string
+}
+
+// SubmitAgentScopeRevoke 提交一份已签好的「撤销 owner 级授权」(`POST /v1/account/agents/revoke`,`sigVersion: 2`):
+// 删除这一对 owner / API 钱包,幂等(本来没有也是成功)。只撤 owner 级授权;同一把钥匙在某个账户上的按账户授权不受影响,
+// 要撤那种用 [Wallet.RevokeAgent]。错误语义同 [Client.SubmitAgentScope]。
+func (c *Client) SubmitAgentScopeRevoke(ctx context.Context, r SignedAgentScopeRevoke) (*Receipt, error) {
+	if !strings.HasPrefix(r.Signature, "0x") || len(r.Signature) != 132 {
+		return nil, fmt.Errorf("dexosv1: 撤销签名应为 0x + 130 位十六进制,得到 %d 个字符", len(r.Signature))
+	}
+	if r.Agent.IsZero() || r.Agent == r.Owner {
+		return nil, errors.New("dexosv1: 撤销的 API 钱包地址为空或就是主钱包")
+	}
+	digest := r.Domain.RevokeAgentScopeHash(r.Owner, r.Agent, r.Nonce)
+	id := newIdentity(r.Owner, "signer:"+r.Owner.Hex(), r.Nonce, digest, nil)
+	env := &envelope{SigVersion: 2, Account: r.Owner.Hex(), Nonce: r.Nonce, Signature: r.Signature}
+	status, raw, err := c.post(ctx, "/v1/account/agents/revoke", wireRevokeReq{envelope: env, Agent: r.Agent.Hex()})
+	if err != nil {
+		return nil, err
+	}
+	out, err := receipt(status, raw, id)
+	if err != nil {
+		return nil, err
+	}
+	var wr struct {
+		Agent   string `json:"agent"`
+		Revoked bool   `json:"revoked"`
+	}
+	if err := decodeInto(raw, &wr, "撤销授权回执"); err != nil {
+		return nil, err
+	}
+	if !strings.EqualFold(wr.Agent, r.Agent.Hex()) || !wr.Revoked {
+		return nil, fmt.Errorf("dexosv1: 撤销 %s 的 owner 级授权,回执是 %s", r.Agent.Hex(), raw)
 	}
 	return &out, nil
 }

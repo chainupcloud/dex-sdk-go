@@ -52,21 +52,24 @@ type goldenPair struct {
 	RequestID string       `json:"requestId"`
 }
 
+type goldenScope struct {
+	Domain         goldenDomain `json:"domain"`
+	Owner          string       `json:"owner"`
+	Agent          string       `json:"agent"`
+	SubaccountMask uint64       `json:"subaccountMask,string"`
+	ValidUntilMs   uint64       `json:"validUntilMs,string"`
+	Nonce          uint64       `json:"nonce,string"`
+	Digest         string       `json:"digest"`
+	Signature      string       `json:"signature"`
+	RequestID      string       `json:"requestId"`
+}
+
 type pairedGolden struct {
-	CodecVersion      uint32       `json:"codecVersion"`
-	ActorPlaceholder  uint32       `json:"actorPlaceholder"`
-	PairedTrades      []goldenPair `json:"pairedTrades"`
-	ApproveAgentScope []struct {
-		Domain         goldenDomain `json:"domain"`
-		Owner          string       `json:"owner"`
-		Agent          string       `json:"agent"`
-		SubaccountMask uint64       `json:"subaccountMask,string"`
-		ValidUntilMs   uint64       `json:"validUntilMs,string"`
-		Nonce          uint64       `json:"nonce,string"`
-		Digest         string       `json:"digest"`
-		Signature      string       `json:"signature"`
-		RequestID      string       `json:"requestId"`
-	} `json:"approveAgentScope"`
+	CodecVersion      uint32        `json:"codecVersion"`
+	ActorPlaceholder  uint32        `json:"actorPlaceholder"`
+	PairedTrades      []goldenPair  `json:"pairedTrades"`
+	ApproveAgentScope []goldenScope `json:"approveAgentScope"`
+	RevokeAgentScope  []goldenScope `json:"revokeAgentScope"`
 }
 
 func loadPairedGolden(t *testing.T) pairedGolden {
@@ -79,7 +82,7 @@ func loadPairedGolden(t *testing.T) pairedGolden {
 	if err := json.Unmarshal(raw, &g); err != nil {
 		t.Fatal(err)
 	}
-	if len(g.PairedTrades) == 0 || len(g.ApproveAgentScope) == 0 {
+	if len(g.PairedTrades) == 0 || len(g.ApproveAgentScope) == 0 || len(g.RevokeAgentScope) == 0 {
 		t.Fatal("金样为空")
 	}
 	return g
@@ -162,6 +165,32 @@ func TestApproveAgentScopeGoldenVectors(t *testing.T) {
 		}
 		if id := newIdentity(owner.Address(), "signer:"+ownerAddr, v.Nonce, digest, nil); id.RequestID != v.RequestID {
 			t.Errorf("向量 %d 请求身份 %s,金样 %s", i, id.RequestID, v.RequestID)
+		}
+	}
+}
+
+// 撤销 owner 级授权的金样按网关 agent_revoke 的 v2 分支导出:位图与有效期都恒为 0。
+func TestRevokeAgentScopeGoldenVectors(t *testing.T) {
+	g := loadPairedGolden(t)
+	owner := signer(t, ownerKey)
+	for i, v := range g.RevokeAgentScope {
+		if v.SubaccountMask != 0 || v.ValidUntilMs != 0 || v.Owner != ownerAddr {
+			t.Fatalf("撤销向量 %d 的形状: %+v", i, v)
+		}
+		d := v.Domain.domain(t)
+		digest := d.RevokeAgentScopeHash(owner.Address(), mustAddr(t, v.Agent), v.Nonce)
+		if got := hex0x(digest); got != v.Digest {
+			t.Errorf("撤销向量 %d 摘要 %s,金样 %s", i, got, v.Digest)
+			continue
+		}
+		if got := hashTypedDataV4(t, d.RevokeAgentScopeTypedData(owner.Address(), mustAddr(t, v.Agent), v.Nonce)); hex0x(got) != v.Digest {
+			t.Errorf("撤销向量 %d 的钱包待签结构摘要 %x,金样 %s", i, got, v.Digest)
+		}
+		if sig, err := owner.SignHashHex(digest); err != nil || sig != v.Signature {
+			t.Errorf("撤销向量 %d 签名 %s(%v),金样 %s", i, sig, err, v.Signature)
+		}
+		if id := newIdentity(owner.Address(), "signer:"+ownerAddr, v.Nonce, digest, nil); id.RequestID != v.RequestID {
+			t.Errorf("撤销向量 %d 请求身份 %s,金样 %s", i, id.RequestID, v.RequestID)
 		}
 	}
 }
@@ -364,4 +393,58 @@ func hashTypedDataV4(t *testing.T, td dexos.TypedData) []byte {
 	domain := enc("EIP712Domain", map[string]any{"name": td.Domain.Name, "version": td.Domain.Version, "chainId": td.Domain.ChainID,
 		"verifyingContract": td.Domain.VerifyingContract})
 	return dexos.Keccak256([]byte{0x19, 0x01}, domain, enc(td.PrimaryType, td.Message))
+}
+
+// 撤销 owner 级授权走 `POST /v1/account/agents/revoke`(网关的 v2 approve 拒位图 0):信封 sigVersion 2,只带 agent;
+// 假网关按网关的做法重算位图 0、有效期 0 的摘要并恢复签名者。
+func TestSubmitAgentScopeRevoke(t *testing.T) {
+	f, c := newWriteFake(t)
+	f.answer(t, "/v1/account/agents/revoke", 200, "w_revoke.json")
+	owner := signer(t, ownerKey)
+	agent := mustAddr(t, agentAddr)
+	nonce := WindowNonce(owner.Address())
+	sig, err := owner.SignHashHex(testDomain.RevokeAgentScopeHash(owner.Address(), agent, nonce))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rv := SignedAgentScopeRevoke{Owner: owner.Address(), Domain: testDomain, Agent: agent, Nonce: nonce, Signature: sig}
+	r, err := c.SubmitAgentScopeRevoke(context.Background(), rv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := m(f.last(t).body)
+	conformsRequest(t, "/v1/account/agents/revoke", body)
+	if num(t, body["sigVersion"]) != 2 || body["account"] != ownerAddr || body["agent"] != agentAddr || num(t, body["nonce"]) != nonce ||
+		body["subaccountMask"] != nil || body["validUntil"] != nil || body["signer"] != nil || body["subaccount"] != nil {
+		t.Fatalf("v2 撤销的请求体: %v", body)
+	}
+	if recoverAddr(t, testDomain.ApproveAgentScopeHash(owner.Address(), agent, 0, 0, nonce), body["signature"].(string)) != ownerAddr {
+		t.Fatal("网关恢复不出主钱包")
+	}
+	if r.Seq != 512 || r.Request.Scope != "signer:"+ownerAddr || r.Request.Nonce != nonce {
+		t.Fatalf("回执: %+v / %+v", r, r.Request)
+	}
+
+	sent := f.count()
+	for name, bad := range map[string]SignedAgentScopeRevoke{
+		"签名格式":       {Owner: owner.Address(), Domain: testDomain, Agent: agent, Nonce: nonce, Signature: "0x12"},
+		"撤销主钱包自己":    {Owner: owner.Address(), Domain: testDomain, Agent: owner.Address(), Nonce: nonce, Signature: sig},
+		"API 钱包地址为空": {Owner: owner.Address(), Domain: testDomain, Nonce: nonce, Signature: sig},
+	} {
+		if _, err := c.SubmitAgentScopeRevoke(context.Background(), bad); err == nil {
+			t.Errorf("%s: 应在本地报错", name)
+		}
+	}
+	if f.count() != sent {
+		t.Fatal("本地校验失败不该发请求")
+	}
+	f.answerRaw(t, "/v1/account/agents/revoke", 200, []byte(strings.Replace(string(fixture(t, "w_revoke.json")), `"revoked":true`, `"revoked":false`, 1)))
+	if _, err := c.SubmitAgentScopeRevoke(context.Background(), rv); err == nil {
+		t.Fatal("回执没说撤掉应报错")
+	}
+	// 位图 0 不走授权入口:网关的 v2 approve 回 400 让改走撤销
+	a := SignedAgentScope{Owner: owner.Address(), Domain: testDomain, Agent: agent, Nonce: nonce, Signature: sig}
+	if _, err := c.SubmitAgentScope(context.Background(), a); err == nil || !strings.Contains(err.Error(), "SubmitAgentScopeRevoke") {
+		t.Fatalf("位图 0 的授权应指向撤销入口: %v", err)
+	}
 }

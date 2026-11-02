@@ -109,3 +109,9 @@ func (d Domain) ApproveAgentScopeTypedData(owner, agent Address, subaccountMask,
 		"nonce":          strconv.FormatUint(nonce, 10),
 	})
 }
+
+// RevokeAgentScopeTypedData 「撤销 owner 级授权」的钱包待签结构(位图与有效期都为 0 的 ApproveAgentScope);
+// 签名结果交给 dexosv1 的 Client.SubmitAgentScopeRevoke。与 RevokeAgentScopeHash 同源。
+func (d Domain) RevokeAgentScopeTypedData(owner, agent Address, nonce uint64) TypedData {
+	return d.ApproveAgentScopeTypedData(owner, agent, 0, 0, nonce)
+}

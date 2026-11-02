@@ -150,7 +150,8 @@ res, err := p.Trade(ctx, dexosv1.PairedTrade{Market: btc, MakerSide: dexos.Sell,
 
 422(`PairedTradeOutsideSpread`、被拒那条腿的 `InsufficientMargin` …)与定序前的 4xx 是终局结论,会话照常可用;
 202 / 传输失败 / 5xx 是结论未知,会话锁定,`p.Pending()` 给出挂单腿的请求身份(成对成交的 requestId 就是它)。
-要在发出之前落账,用 `PairedSession.TradeJournaled`。`Agents` 的结果里 owner 级授权是 `Scope == "owner"`:
+要在发出之前落账,用 `PairedSession.TradeJournaled`。撤销 owner 级授权:主钱包签 `domain.RevokeAgentScopeTypedData`
+(位图与有效期都为 0 的 `ApproveAgentScope`),交给 `c.SubmitAgentScopeRevoke`(走 `/v1/account/agents/revoke`;授权端点不收位图 0)。`Agents` 的结果里 owner 级授权是 `Scope == "owner"`:
 它出现在 owner 名下每个编号的列表里,能不能交易某个编号看 `SubaccountMask`。
 
 ---

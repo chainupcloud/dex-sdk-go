@@ -242,6 +242,11 @@ func gatewayRequestID(t *testing.T, cat *Catalog, path string, body any) string 
 			}
 			digest = testDomain.ApproveAgentHash(owner, signingID, mustAddr(t, env["agent"].(string)), optional("validUntil"), nonce)
 		case "/v1/account/agents/revoke":
+			if env["sigVersion"] != nil && num(t, env["sigVersion"]) == 2 {
+				// 与网关 agent_revoke 的 v2 分支一致:位图 0、有效期 0 的 ApproveAgentScope
+				digest = testDomain.ApproveAgentScopeHash(owner, mustAddr(t, env["agent"].(string)), 0, 0, nonce)
+				break
+			}
 			digest = testDomain.RevokeAgentHash(owner, signingID, mustAddr(t, env["agent"].(string)), nonce)
 		default:
 			if !strings.HasPrefix(path, "/v1/vaults") {

@@ -157,3 +157,9 @@ func (d Domain) ApproveAgentScopeHash(owner, agent Address, subaccountMask, vali
 	)
 	return d.signingHash(sh)
 }
+
+// RevokeAgentScopeHash 「撤销 owner 级授权」的待签哈希:位图与有效期都为 0 的 ApproveAgentScope(dex-os 子账户模型 v2 §3.4,
+// 删除这一对 owner / API 钱包,幂等)。网关的撤销端点按这个形状验签,授权端点不收位图 0。
+func (d Domain) RevokeAgentScopeHash(owner, agent Address, nonce uint64) []byte {
+	return d.ApproveAgentScopeHash(owner, agent, 0, 0, nonce)
+}

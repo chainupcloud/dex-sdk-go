@@ -82,6 +82,15 @@ func TestAgentTypedDataHashesToSignedHash(t *testing.T) {
 	if got, want := hashTypedData(t, scope), d.ApproveAgentScopeHash(owner, agent, 1<<1|1<<2, 1789111997200, 1762070000000); !bytes.Equal(got, want) {
 		t.Fatalf("ApproveAgentScope 待签结构与签名哈希不一致: %x != %x", got, want)
 	}
+	// 撤销 owner 级授权 = 位图与有效期都为 0 的 ApproveAgentScope(网关 agent_revoke 的 v2 分支)
+	revokeScope := d.RevokeAgentScopeTypedData(owner, agent, 1762070000100)
+	if got, want := hashTypedData(t, revokeScope), d.RevokeAgentScopeHash(owner, agent, 1762070000100); !bytes.Equal(got, want) {
+		t.Fatalf("撤销 owner 级授权的待签结构与签名哈希不一致: %x != %x", got, want)
+	}
+	if !bytes.Equal(d.RevokeAgentScopeHash(owner, agent, 1762070000100), d.ApproveAgentScopeHash(owner, agent, 0, 0, 1762070000100)) ||
+		revokeScope.PrimaryType != "ApproveAgentScope" || revokeScope.Message["subaccountMask"] != "0" || revokeScope.Message["validUntilMs"] != "0" {
+		t.Fatalf("撤销应签位图 0、有效期 0 的 ApproveAgentScope: %+v", revokeScope)
+	}
 	// 位图超出 JS 安全整数时按十进制字符串原样签
 	if full := d.ApproveAgentScopeTypedData(owner, agent, ^uint64(0), 0, 1); full.Message["subaccountMask"] != "18446744073709551615" {
 		t.Fatalf("全 1 位图应签十进制字符串: %v", full.Message["subaccountMask"])
