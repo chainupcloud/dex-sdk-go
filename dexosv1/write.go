@@ -87,6 +87,8 @@ type Receipt struct {
 // envelope 统一签名信封。`signer` 给了就是 API 钱包代签,此时 `nowMs` 必填(它在内层命令里、进签名)。
 // 被操作账户二选一:钱包寻址带 `subaccount`;金库身份带 `vault`、`account` 是 manager 的主钱包(同给是 400)。
 type envelope struct {
+	// SigVersion 2 = 子账户模型 v2(账户 = owner + 编号,窗口 nonce);0 = 旧信封,不上线。
+	SigVersion int     `json:"sigVersion,omitempty"`
 	Account    string  `json:"account"`
 	Subaccount *uint32 `json:"subaccount,omitempty"`
 	Vault      *uint16 `json:"vault,omitempty"`

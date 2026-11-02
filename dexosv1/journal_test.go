@@ -209,6 +209,10 @@ func TestExchangeVersionSubaccountsAndMarketFees(t *testing.T) {
 	if len(subs) != 2 || !subs[0].IsMain || subs[0].SigningAccountID != 7 || subs[1].Subaccount != 1 || subs[1].SigningAccountID != 9 {
 		t.Fatalf("账户表: %+v", subs)
 	}
+	// 名字是网关标签:没起过名的给空串
+	if subs[0].Name != "" || subs[1].Name != "画线 M" {
+		t.Fatalf("子账户名: %q / %q", subs[0].Name, subs[1].Name)
+	}
 	if _, err := c.Subaccounts(context.Background(), mustAddr(t, agentAddr)); err == nil {
 		t.Fatal("答的不是所问地址时应报错")
 	}

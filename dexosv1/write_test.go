@@ -226,6 +226,14 @@ func gatewayRequestID(t *testing.T, cat *Catalog, path string, body any) string 
 			}
 			digest = leverageHash(testDomain, owner, signingID, market(env["symbol"]).SigningMarketID, imf, nonce)
 		case "/v1/account/agents/approve":
+			if env["sigVersion"] != nil && num(t, env["sigVersion"]) == 2 {
+				mask, err := strconv.ParseUint(env["subaccountMask"].(string), 10, 64)
+				if err != nil {
+					t.Fatal(err)
+				}
+				digest = testDomain.ApproveAgentScopeHash(owner, mustAddr(t, env["agent"].(string)), mask, optional("validUntil"), nonce)
+				break
+			}
 			digest = testDomain.ApproveAgentHash(owner, signingID, mustAddr(t, env["agent"].(string)), optional("validUntil"), nonce)
 		case "/v1/account/agents/revoke":
 			digest = testDomain.RevokeAgentHash(owner, signingID, mustAddr(t, env["agent"].(string)), nonce)

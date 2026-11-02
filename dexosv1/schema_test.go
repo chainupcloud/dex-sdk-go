@@ -259,6 +259,7 @@ var fixtureSchemas = []struct {
 	{"err400_incomplete.json", "", "", "Error"},
 	{"w_sequenced_202.json", "", "", "Sequenced"},
 	{"builder.json", "/v1/builder", "200", ""},
+	{"w_agents_owner.json", "/v1/account/agents", "200", ""},
 }
 
 // postFixtureSchemas 写接口回执的 fixture(形状照原生 v1 的 v1_write.rs 整理)。202 的回执按 `Sequenced`
@@ -282,6 +283,7 @@ var postFixtureSchemas = []struct {
 	{"w_vault_redeem.json", "/v1/vaults/{id}/redeem", "200"},
 	{"w_vault_claim.json", "/v1/vaults/{id}/claim", "200"},
 	{"w_vault_config.json", "/v1/vaults/{id}/config", "200"},
+	{"w_approve_scope.json", "/v1/account/agents/approve", "200"},
 }
 
 func TestFixturesConformToPinnedSpec(t *testing.T) {

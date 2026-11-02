@@ -48,3 +48,6 @@
   发出的请求体);第三组各字段取最大值。三条 `ApproveAgentScope`:位图 {1, 2}、全 1(带有效期)、0(撤销的形状)。
   摘要、签名与请求身份另用 ethers 6.17 的 `TypedDataEncoder.hash` / `Wallet.signTypedData` 交叉核过一遍。
   重新生成:按上面的调用对每组参数输出同样的 JSON。
+- 子账户模型 v2 的样例:`w_agents_owner.json`(`/v1/account/agents`,一条按账户授权加一条 owner 级授权,位图 {1, 2},
+  形状照 dex-os `crates/gateway/src/api/v1.rs::agents`)、`w_approve_scope.json`(`sigVersion: 2` 授权的回执,
+  照 `v1_write.rs::agent_approve` 的 v2 分支)、`subaccounts.json` 的 `name`(网关标签,没起过名为空串)。
