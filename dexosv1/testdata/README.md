@@ -1,10 +1,12 @@
-- `openapi-v1.json`:dex-os 开放 API v1.1 规格的副本,取自 chainupcloud/dex-os `web/openapi-v1.json`
-  @ `2c5d2c2`(main,含 v1.1 §4.9 补缺 PR 9b #83、§4.10 补缺 PR 9c-A #90 与 K 线 / tickers #82),逐字节相同;
-  另补了 dex-os#256 的换单改单项(`components.schemas.ModifyItem`、`/v1/orders/replace` 请求体的 `modifies` 与操作说明、
-  `BatchResult.items[]` 的 `modify` 种类与 `replacedOrderId`,取自 dex-os `web/openapi-v1.json` 同名段落),以及
-  `GET /v1/builder` 与它的 `components.schemas.BuilderView` / `CategoryView`(dex-os `web/openapi-v1.json` @ `22f85929`),以及 `GET /v1/account` 的 `builder` / `symbol` 参数与 `components.schemas.Account` 的 `fees`(账户实收费率,dex-os INV-API-V1-ACCOUNT-FEES),以及 `components.schemas.Market` 的 `aggTicks`(盘口聚合档位,市场配置,dex-os `docs/specs/book-aggregation.md` r2)。整份重新同步会牵动大量既有样例,留待单独一次。
-  dex-os 改了 v1 接口面就同步更新这份副本,再跑 `go test ./dexosv1/`;`write_test.go` 的 `specDeviations`
+- `openapi-v1.json`:dex-os 开放 API v1 规格的副本,取自 chainupcloud/dex-os `web/openapi-v1.json` @ `c5ce1049`(main,含成对成交
+  `POST /v1/orders/paired` 与子账户模型 v2 的 `sigVersion: 2` 信封、owner 级授权),逐字节相同。
+  dex-os 改了 v1 接口面就整份同步这份副本,再跑 `go test ./dexosv1/`;`write_test.go` 的 `specDeviations`
   登记已知的规格与实现差异,条目过期(规格已修好)测试会失败,提醒删掉。
+- 整份同步到 `c5ce1049` 时,规格给既有响应加的必填字段在样例里按同一含义补齐(本包不读它们):`markets.json` 的
+  `tags` / `priceSource`;`account.json` / `account_vault.json` 的 `crossEquity` / `crossMarginUsed` / `crossMaintenanceMargin`
+  (样例里没有逐仓,与全账户同值)、`leverage[].type`、`groups[].isolatedEquity`;`positions.json` 的 `marginMode` 与逐仓字段
+  (全仓为 null);`exchange.json` 的 `vault`、`deliveryReadSigning` 与 `deposit` 的 `protocol` / `routing` / `ledgerEpoch` / `routes`;
+  `vault.json` / `vaults.json` 的 `authorizedManager` / `confirmedTradingHalt` / `pendingClaim`。
 - `fixtures/`:假服务的响应样例。形状按开发环境的真实响应整理,地址换成了假地址;
   每个文件都在 `schema_test.go` 的 `fixtureSchemas` 里登记了要符合的 schema,并由测试校验。
 - `fixtures/w_*.json`、`fixtures/err4xx_*.json`:写接口的回执与错误样例,形状照原生 v1
