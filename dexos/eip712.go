@@ -17,6 +17,9 @@ const (
 	approveAgentType = "ApproveAgent(address owner,uint32 master,address agent,uint64 validUntilMs,uint64 nonce)"
 	revokeAgentType  = "RevokeAgent(address owner,uint32 master,address agent,uint64 nonce)"
 	agentExecType    = "AgentExec(bytes32 commandHash,uint64 nonce)"
+	// 子账户模型 v2(sigVersion 2):账户 = (owner 地址, uint16 子账户编号),不含内部账户号
+	actionType            = "Action(address account,uint16 subaccount,bytes32 action,uint64 nonce,uint64 expiry)"
+	approveAgentScopeType = "ApproveAgentScope(address owner,address agent,uint64 subaccountMask,uint64 validUntilMs,uint64 nonce)"
 )
 
 // Keccak256 以太坊口径的 keccak(不是 SHA3-256)。
@@ -123,4 +126,40 @@ func (d Domain) AgentExecHashOf(commandHash []byte, nonce uint64) []byte {
 		wordU64(nonce),
 	)
 	return d.signingHash(sh)
+}
+
+// ActionHash sigVersion 2 通用动作的待签哈希(dex-os 子账户模型 v2 §3.5)。账户 = (owner 地址, 子账户编号);
+// action = keccak256(内层命令的规范编码),内层的行为人填 [ActorPlaceholder]。签名者是 owner 本人或它授权的
+// API 钱包;nonce 是**签名者**的窗口 nonce(毫秒时间戳),expiry 0 = 不过期。
+func (d Domain) ActionHash(account Address, subaccount uint16, commandBytes []byte, nonce, expiry uint64) []byte {
+	sh := Keccak256(
+		Keccak256([]byte(actionType)),
+		wordAddr(account),
+		wordU64(uint64(subaccount)),
+		Keccak256(commandBytes),
+		wordU64(nonce),
+		wordU64(expiry),
+	)
+	return d.signingHash(sh)
+}
+
+// ApproveAgentScopeHash 「owner 级授权 API 钱包」的待签哈希(dex-os 子账户模型 v2 §3.4)。一份授权覆盖 owner 名下
+// subaccountMask 里的编号(第 i 位 = 编号 i,可以覆盖还没建的编号;0 = 撤销);validUntilMs 0 = 不过期;
+// nonce 是 owner 的窗口 nonce(毫秒时间戳)。只有 owner 本人能签。
+func (d Domain) ApproveAgentScopeHash(owner, agent Address, subaccountMask, validUntilMs, nonce uint64) []byte {
+	sh := Keccak256(
+		Keccak256([]byte(approveAgentScopeType)),
+		wordAddr(owner),
+		wordAddr(agent),
+		wordU64(subaccountMask),
+		wordU64(validUntilMs),
+		wordU64(nonce),
+	)
+	return d.signingHash(sh)
+}
+
+// RevokeAgentScopeHash 「撤销 owner 级授权」的待签哈希:位图与有效期都为 0 的 ApproveAgentScope(dex-os 子账户模型 v2 §3.4,
+// 删除这一对 owner / API 钱包,幂等)。网关的撤销端点按这个形状验签,授权端点不收位图 0。
+func (d Domain) RevokeAgentScopeHash(owner, agent Address, nonce uint64) []byte {
+	return d.ApproveAgentScopeHash(owner, agent, 0, 0, nonce)
 }

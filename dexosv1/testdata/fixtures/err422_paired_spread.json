@@ -1,0 +1,1 @@
+{"error":{"code":"PairedTradeOutsideSpread","num":20127,"message":"paired trade price must be strictly between the best bid and the best ask at execution"}}

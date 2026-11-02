@@ -159,20 +159,10 @@ func NewSession(ctx context.Context, c *Client, agent *dexos.Signer, ref Account
 		return nil, err
 	}
 	s := &Session{Client: c, Agent: agent, Account: ref, domain: d, owner: grant.Address}
-	found := false
-	for _, a := range agents {
-		if a.Address == agent.Address().Hex() {
-			found = true
-			if a.Expired {
-				return nil, ErrAgentExpired
-			}
-			if a.ValidUntil != nil {
-				s.ValidUntil = time.UnixMilli(*a.ValidUntil)
-			}
-		}
-	}
-	if !found {
+	if s.ValidUntil, err = grantOf(agents, agent.Address(), grant.Subaccount); errors.Is(err, ErrAgentNotAuthorized) {
 		return nil, fmt.Errorf("%w: %s 不在 %s 的授权列表里(会话账户 %s)", ErrAgentNotAuthorized, agent.Address().Hex(), grant, ref)
+	} else if err != nil {
+		return nil, err
 	}
 	addr := agent.Address()
 	n, err := c.Nonce(ctx, ref, &addr)
@@ -181,6 +171,37 @@ func NewSession(ctx context.Context, c *Client, agent *dexos.Signer, ref Account
 	}
 	s.signingID, s.guard.nonce = n.SigningAccountID, n.Nonce
 	return s, nil
+}
+
+// grantOf 这把钥匙代 sub 号账户签名的授权,与执行层 agent_authorized 同口径:按账户授权,或位图覆盖这个编号的
+// owner 级授权,任一未过期即放行。返回其中最晚的到期时刻(零值 = 不过期)。
+// 一条都没有 → ErrAgentNotAuthorized;有但都过期了 → ErrAgentExpired。
+func grantOf(agents []Agent, agent dexos.Address, sub uint32) (time.Time, error) {
+	var until time.Time
+	found, live := false, false
+	for _, a := range agents {
+		if a.Address != agent.Hex() || !a.covers(sub) {
+			continue
+		}
+		found = true
+		if a.Expired {
+			continue
+		}
+		if a.ValidUntil == nil {
+			return time.Time{}, nil
+		}
+		if t := time.UnixMilli(*a.ValidUntil); !live || t.After(until) {
+			until = t
+		}
+		live = true
+	}
+	switch {
+	case live:
+		return until, nil
+	case found:
+		return time.Time{}, ErrAgentExpired
+	}
+	return time.Time{}, ErrAgentNotAuthorized
 }
 
 // Nonce 下一个要用的 agent nonce。
@@ -656,6 +677,8 @@ type wireApproveReq struct {
 	Agent      string `json:"agent"`
 	ValidUntil uint64 `json:"validUntil,omitempty"`
 	Label      string `json:"label,omitempty"`
+	// SubaccountMask 只在 sigVersion 2(owner 级授权)出现:十进制 u64 位图
+	SubaccountMask string `json:"subaccountMask,omitempty"`
 }
 
 // ApproveAgent 授权一把 API 钱包代本账户交易。validUntil 零值 = 不过期;label 只是网关上的标签(≤ 32 字符,不进签名)。
