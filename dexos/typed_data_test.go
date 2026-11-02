@@ -20,6 +20,7 @@ func TestTypedDataFieldsMatchSignedTypeStrings(t *testing.T) {
 		{"EIP712Domain", domainFields, domainType},
 		{"ApproveAgent", approveAgentFields, approveAgentType},
 		{"RevokeAgent", revokeAgentFields, revokeAgentType},
+		{"ApproveAgentScope", approveAgentScopeFields, approveAgentScopeType},
 	} {
 		if got := encodeType(tc.name, tc.fields); got != tc.want {
 			t.Fatalf("%s 字段表与签名类型串漂移:\n got %s\nwant %s", tc.name, got, tc.want)
@@ -76,6 +77,14 @@ func TestAgentTypedDataHashesToSignedHash(t *testing.T) {
 	revoke := d.RevokeAgentTypedData(owner, 7, agent, 43)
 	if got, want := hashTypedData(t, revoke), d.RevokeAgentHash(owner, 7, agent, 43); !bytes.Equal(got, want) {
 		t.Fatalf("RevokeAgent 待签结构与签名哈希不一致: %x != %x", got, want)
+	}
+	scope := d.ApproveAgentScopeTypedData(owner, agent, 1<<1|1<<2, 1789111997200, 1762070000000)
+	if got, want := hashTypedData(t, scope), d.ApproveAgentScopeHash(owner, agent, 1<<1|1<<2, 1789111997200, 1762070000000); !bytes.Equal(got, want) {
+		t.Fatalf("ApproveAgentScope 待签结构与签名哈希不一致: %x != %x", got, want)
+	}
+	// 位图超出 JS 安全整数时按十进制字符串原样签
+	if full := d.ApproveAgentScopeTypedData(owner, agent, ^uint64(0), 0, 1); full.Message["subaccountMask"] != "18446744073709551615" {
+		t.Fatalf("全 1 位图应签十进制字符串: %v", full.Message["subaccountMask"])
 	}
 	// 永不过期是 0,不是省略字段。
 	if approve := d.ApproveAgentTypedData(owner, 7, agent, 0, 42); approve.Message["validUntilMs"] != "0" {

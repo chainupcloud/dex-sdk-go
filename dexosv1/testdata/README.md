@@ -36,3 +36,15 @@
   `crates/auth/src/lib.rs`,与钉住规格的 `x-eip712.typeString` 逐字一致(`eip712_test.go` 核对)。白名单 / 市场摘要(`depositorWhitelistHash` / `marketsHash`)也由生成脚本按 dex-os 的定义
   (升序去重后紧凑拼接再 keccak,空表为全零)独立算出,原始输入记在向量的 `inputs` 里。
   重新生成:对每个向量按 `eip712.go` 的类型串组 `types`,调用上面两个函数,输出同样的 JSON。
+- `paired_golden.json`:成对成交与 v2 签名的金样 —— `PairedTradeLeg` 规范编码、`action` = keccak256(编码)、v2 `Action` 与
+  `ApproveAgentScope` 的 EIP-712 摘要、签名与请求身份,由 dex-os 的 Rust 实现生成(dex-os @ `c5ce1049`),与本包的 Go 实现
+  互相独立。生成程序是一个临时 cargo 程序(不入库),以 path 依赖引用 dex-os 的 `crates/core`(feature `auth`)与
+  `crates/crypto`:内层用 `engine::SignedPairedLeg::inner` + `codec::encode_command` 编码,摘要取 `auth::Action` /
+  `auth::ApproveAgentScope` 的 `signing_hash`,签名用 k256 `SigningKey::sign_prehash_recoverable`(v = 27 + recid,
+  再经 `auth::recover` 回验),请求身份取 `engine::request_digest(..).request_id()`(整条 `PairedTrade` 的身份 = 挂单腿)。
+  私钥 `0x42…42`(owner)、`0x43…43`(API 钱包)、`0x44…44`(另一个 owner);两个域(11155111 + 零地址,421614 + 非零地址)。
+  三组成对成交:第一组参数同 dex-os `crates/gateway/tests/api_e2e.rs::paired_body`(owner 本人签两个主账户);第二组是画线形态
+  (一把 API 钱包签同一 owner 的子账户 1 / 2,ETH-USD 的市场号 1,nonce 从 nowMs 起递增 —— `paired_test.go` 用它核对会话
+  发出的请求体);第三组各字段取最大值。三条 `ApproveAgentScope`:位图 {1, 2}、全 1(带有效期)、0(撤销的形状)。
+  摘要、签名与请求身份另用 ethers 6.17 的 `TypedDataEncoder.hash` / `Wallet.signTypedData` 交叉核过一遍。
+  重新生成:按上面的调用对每组参数输出同样的 JSON。
