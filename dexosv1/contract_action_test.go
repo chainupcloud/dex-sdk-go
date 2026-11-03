@@ -153,6 +153,26 @@ func TestContractActions(t *testing.T) {
 	if _, err := c.SendCancel(ctx, old); err == nil || ClassifyAction(err) != ActionNotExecuted || !strings.Contains(err.Error(), "NonceOutOfWindow") {
 		t.Fatalf("出窗的 nonce: %v", err)
 	}
+	missing, err := aw.SignReplace(m, nil, nil, []OrderRequest{order(2)}, expiry())
+	if err != nil {
+		t.Fatal(err)
+	}
+	sentinel, err := aw.SignCancelAt(m, missing.Request.Nonce, []uint64{1<<48 - 1}, time.Time{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.SendCancel(ctx, sentinel); err == nil || ClassifyAction(err) != ActionRejected || !strings.Contains(err.Error(), "UnknownOrder") {
+		t.Fatalf("单张撤一张不存在的单应整条被拒并消费 nonce: %v", err)
+	}
+	if _, err := c.SendReplace(ctx, missing); err == nil || ClassifyAction(err) != ActionNotExecuted || !strings.Contains(err.Error(), "NonceMismatch") {
+		t.Fatalf("nonce 被撤占位单号的撤单用掉后，原请求应以 NonceMismatch 拒在消费之前: %v", err)
+	}
+	if got, err := c.Request(ctx, sentinel.Request.RequestID, sentinel.Request.Query()); err != nil || got.Status != "rejected" || !strings.Contains(string(got.Raw), `"nonceConsumed":true`) {
+		t.Fatalf("撤占位单号的回执应是 rejected 且 nonce 已消费: %+v %v", got, err)
+	}
+	if got, err := c.Request(ctx, missing.Request.RequestID, missing.Request.Query()); err != nil || got.ConflictingRequest == nil || !strings.EqualFold(*got.ConflictingRequest, sentinel.Request.RequestID) {
+		t.Fatalf("原请求的回执应指向撤占位单号的撤单: %+v %v", got, err)
+	}
 	expired, err := aw.SignReplace(m, nil, nil, []OrderRequest{order(3)}, time.Now().Add(-time.Second))
 	if err != nil {
 		t.Fatal(err)
