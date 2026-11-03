@@ -36,9 +36,9 @@ var ErrAgentExpired = errors.New("dexosv1: API 钱包授权已到期")
 // 带着这些拒因的命令没有消费 nonce。其余 422 拒因都在 nonce 消费之后。
 // NonceMismatch 也在其中,但它说明本地计数器不可信,单独处理(锁定)。
 var preConsume = map[string]bool{
-	"SignatureExpired": true, "BadSignature": true, "AuthUnavailable": true, "UnboundSigner": true,
-	"UnknownAgent": true, "AgentScopeViolation": true, "AgentExpired": true, "NonceMismatch": true,
-	"VaultNoManager": true,
+	"SignatureExpired": true, "WithdrawalExpired": true, "InvalidRecipient": true, "BadSignature": true,
+	"AuthUnavailable": true, "UnboundSigner": true, "UnknownAgent": true, "AgentScopeViolation": true,
+	"AgentExpired": true, "NonceMismatch": true, "VaultNoManager": true, "NonceOutOfWindow": true,
 }
 
 // beforeSequencing 网关在定序之前就回的状态码:命令没进日志,nonce 没动,结论是确定的。
