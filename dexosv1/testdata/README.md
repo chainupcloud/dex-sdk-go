@@ -56,3 +56,10 @@
   加 `conclude_try` 的公共字段)、`err422_paired_spread.json`(`PairedTradeOutsideSpread`,num 20127)、
   `err403_paired.json`(名单外,`details = {reason: paired_trade_not_allowed, leg}`)、`err404_route.json`(接口未开)。
   规格里 200 响应只是 `{type: object}`,所以本包读的字段登记在 `write_test.go` 的 `specDeviations`。
+- `v2_quote_golden.json`:sigVersion 2 交易类写入([ActionWriter])的金样 —— 内层命令(行为人 `0xFFFFFFFF`)`BatchReplace`、
+  `BatchReplace2`、`CancelOrder`、`BatchCancel` 的规范编码、`action` = keccak256(编码)、`Action` 的 EIP-712 摘要、签名与请求身份,
+  由 dex-os 的 Rust 实现生成(dex-os @ `ead8f04b`),与本包的 Go 实现互相独立。生成程序是一个临时 cargo 程序(不入库),以 path
+  依赖引用 dex-os 的 `crates/core`(feature `auth`)、`crates/auth`、`crates/types` 与 `crates/crypto`:内层用 `engine::Command`
+  的四个变体加 `codec::encode_command` 编码,摘要取 `auth::Action::signing_hash`,签名用 k256 `sign_prehash_recoverable`
+  (v = 27 + recid,再经 `auth::recover` 回验),请求身份取 `engine::request_digest(&Command::SignedAction{..}).request_id()`。
+  owner 私钥 `0x42…42`、API 钱包 `0x43…43`,子账户 1;两个域(11155111 + 零地址,421614 + `0xcc…cc`)。

@@ -1,0 +1,295 @@
+{
+  "actorPlaceholder": 4294967295,
+  "vectors": [
+    {
+      "action": "0x7b34b11cefa81f370f9da692b1b08ea034c85ea0f0be6e6973c99db88f0264c9",
+      "digest": "0xd35f4d0f9e60434de292f5ef16de9c11e8e71523b9d7a4608710fa3d14b755b3",
+      "domain": {
+        "chainId": 11155111,
+        "verifyingContract": "0x0000000000000000000000000000000000000000"
+      },
+      "expiry": "1793680005200",
+      "inner": "0x013effffffff7bc4a89fa1010000020000000500000000000000070000000000000002000000000000a086010003000000000000000200000001aa86010004000000000000000200",
+      "inputs": {
+        "cancels": [
+          5,
+          7
+        ],
+        "market": 0,
+        "orders": [
+          {
+            "lots": "3",
+            "price": 100000,
+            "reduceOnly": false,
+            "side": "buy",
+            "tif": "alo"
+          },
+          {
+            "lots": "4",
+            "price": 100010,
+            "reduceOnly": false,
+            "side": "sell",
+            "tif": "alo"
+          }
+        ]
+      },
+      "name": "replace",
+      "nonce": "1793680000200",
+      "nowMs": "1793680000123",
+      "owner": "0x17c5185167401ed00cf5f5b2fc97d9bbfdb7d025",
+      "requestId": "0x7f0d3810282acfaa87075009149517452fd96c7330199e455e9e162768df6167",
+      "signature": "0xe8ae95ab6ea1a762e8f0429a99dd3f67517ba3ce5b496471f1fa736f0501a2d4537e6aeaa35a4218a22d588a3c0edcdb7ab8ad766adac9a65c163de2d88b46bc1c",
+      "signer": "0x5975c152fe58cdcb7e25586a3c9b994a16dbb615",
+      "signerKey": "0x4343434343434343434343434343434343434343434343434343434343434343",
+      "subaccount": 1
+    },
+    {
+      "action": "0x4ddc8ff9a9967f10f9ba8b904f6466aa3705874584c668f6d9ab132e78d1cebf",
+      "digest": "0x0629c93902df40c0b53467ded8d82d245f0ca671b60c336c560c21872e708d5f",
+      "domain": {
+        "chainId": 11155111,
+        "verifyingContract": "0x0000000000000000000000000000000000000000"
+      },
+      "expiry": "1793680005200",
+      "inner": "0x0188ffffffff7bc4a89fa10100000200000005000000000000000700000000000000010000000900000000000000968601000200000000000000020002000000000000a086010003000000000000000200000001aa86010004000000000000000200",
+      "inputs": {
+        "cancels": [
+          5,
+          7
+        ],
+        "market": 0,
+        "modifies": [
+          {
+            "lots": "2",
+            "order": 9,
+            "price": 99990,
+            "reduceOnly": false,
+            "tif": "alo"
+          }
+        ],
+        "orders": [
+          {
+            "lots": "3",
+            "price": 100000,
+            "reduceOnly": false,
+            "side": "buy",
+            "tif": "alo"
+          },
+          {
+            "lots": "4",
+            "price": 100010,
+            "reduceOnly": false,
+            "side": "sell",
+            "tif": "alo"
+          }
+        ]
+      },
+      "name": "replace_modify",
+      "nonce": "1793680000201",
+      "nowMs": "1793680000123",
+      "owner": "0x17c5185167401ed00cf5f5b2fc97d9bbfdb7d025",
+      "requestId": "0x1b7c2c296a919b0fd21009adc3764614a5bf19bd05827df2da6d1e60ab777186",
+      "signature": "0xd0b3a516deeefc4170d24640c3e19ea497a6c25b01acd5129a1b69b65784e6bc0b7ebcb95a68ee51a9c6ca9741e6641922f74a7496f002d1d44cdd69c2e998a91c",
+      "signer": "0x5975c152fe58cdcb7e25586a3c9b994a16dbb615",
+      "signerKey": "0x4343434343434343434343434343434343434343434343434343434343434343",
+      "subaccount": 1
+    },
+    {
+      "action": "0xf817fe82ddab9ef39eab2660f98429bbf38500fa71743b3d900d1493aef2e5fe",
+      "digest": "0x99409b0d6fcbf8ff702958cdf34e7285da3b5c56059ba51144d06263b338a937",
+      "domain": {
+        "chainId": 11155111,
+        "verifyingContract": "0x0000000000000000000000000000000000000000"
+      },
+      "expiry": "1793680005200",
+      "inner": "0x0106ffffffff0b00000000000000",
+      "inputs": {
+        "market": 0,
+        "orders": [
+          11
+        ]
+      },
+      "name": "cancel_one",
+      "nonce": "1793680000202",
+      "nowMs": "1793680000123",
+      "owner": "0x17c5185167401ed00cf5f5b2fc97d9bbfdb7d025",
+      "requestId": "0x12c1de592430262a49313addc0f2c44aa214f64d3ae6c8738a3ec139e77c8793",
+      "signature": "0x1ce00b89123c006a60224e944016f031b2b0fe5645496c5ccd09a0a56939198a302ac519bca5aefa71f84a43d53fdf26f63d4216cf14d31539f80dd2d5a1dc4e1b",
+      "signer": "0x5975c152fe58cdcb7e25586a3c9b994a16dbb615",
+      "signerKey": "0x4343434343434343434343434343434343434343434343434343434343434343",
+      "subaccount": 1
+    },
+    {
+      "action": "0xd1486616db158a38d017c5495c75b5ea14de0acfaa07662a81bbc772f406f0a7",
+      "digest": "0xca4baf60a1437975ab67eafca1d471f4b092202b778d378fb968a88440c4674b",
+      "domain": {
+        "chainId": 11155111,
+        "verifyingContract": "0x0000000000000000000000000000000000000000"
+      },
+      "expiry": "0",
+      "inner": "0x010fffffffff030000000b000000000000000c000000000000000d00000000000000",
+      "inputs": {
+        "market": 0,
+        "orders": [
+          11,
+          12,
+          13
+        ]
+      },
+      "name": "cancel_batch",
+      "nonce": "1793680000203",
+      "nowMs": "1793680000123",
+      "owner": "0x17c5185167401ed00cf5f5b2fc97d9bbfdb7d025",
+      "requestId": "0x599c479a986d3bfc85c0d243752695b73dfb5ee03bdd7729e8d714ced188e6dd",
+      "signature": "0x4f9c16cc256c6eba0f4281805cd089b489bdf713715032d76a95861eac5a321a428cee55d0a85f69bfb9056e469683bec2536941f85c8e47b078ae4faaa782b41b",
+      "signer": "0x5975c152fe58cdcb7e25586a3c9b994a16dbb615",
+      "signerKey": "0x4343434343434343434343434343434343434343434343434343434343434343",
+      "subaccount": 1
+    },
+    {
+      "action": "0x7b34b11cefa81f370f9da692b1b08ea034c85ea0f0be6e6973c99db88f0264c9",
+      "digest": "0x17954f648b97253ec2d804032b3ccc74a3afd370f05227cc3150cf055a849057",
+      "domain": {
+        "chainId": 421614,
+        "verifyingContract": "0xcccccccccccccccccccccccccccccccccccccccc"
+      },
+      "expiry": "1793680005200",
+      "inner": "0x013effffffff7bc4a89fa1010000020000000500000000000000070000000000000002000000000000a086010003000000000000000200000001aa86010004000000000000000200",
+      "inputs": {
+        "cancels": [
+          5,
+          7
+        ],
+        "market": 0,
+        "orders": [
+          {
+            "lots": "3",
+            "price": 100000,
+            "reduceOnly": false,
+            "side": "buy",
+            "tif": "alo"
+          },
+          {
+            "lots": "4",
+            "price": 100010,
+            "reduceOnly": false,
+            "side": "sell",
+            "tif": "alo"
+          }
+        ]
+      },
+      "name": "replace",
+      "nonce": "1793680000200",
+      "nowMs": "1793680000123",
+      "owner": "0x17c5185167401ed00cf5f5b2fc97d9bbfdb7d025",
+      "requestId": "0x04380c579332a8cef1da08c4eebcb35eca9201b5cbddaddc104ff66f6df2793b",
+      "signature": "0x7f9a287335831679ef629e1394bdd5a9608f77eae6817cc818d6c039c3840a1760cf69005c072cf8a0d7ffb6ceca79b93d943adef8a17d33cfceb038b29c8e0a1b",
+      "signer": "0x5975c152fe58cdcb7e25586a3c9b994a16dbb615",
+      "signerKey": "0x4343434343434343434343434343434343434343434343434343434343434343",
+      "subaccount": 1
+    },
+    {
+      "action": "0x4ddc8ff9a9967f10f9ba8b904f6466aa3705874584c668f6d9ab132e78d1cebf",
+      "digest": "0x2571346641c79e84003f77fb21876099e944c1e9366ac828494a175bafcccdd4",
+      "domain": {
+        "chainId": 421614,
+        "verifyingContract": "0xcccccccccccccccccccccccccccccccccccccccc"
+      },
+      "expiry": "1793680005200",
+      "inner": "0x0188ffffffff7bc4a89fa10100000200000005000000000000000700000000000000010000000900000000000000968601000200000000000000020002000000000000a086010003000000000000000200000001aa86010004000000000000000200",
+      "inputs": {
+        "cancels": [
+          5,
+          7
+        ],
+        "market": 0,
+        "modifies": [
+          {
+            "lots": "2",
+            "order": 9,
+            "price": 99990,
+            "reduceOnly": false,
+            "tif": "alo"
+          }
+        ],
+        "orders": [
+          {
+            "lots": "3",
+            "price": 100000,
+            "reduceOnly": false,
+            "side": "buy",
+            "tif": "alo"
+          },
+          {
+            "lots": "4",
+            "price": 100010,
+            "reduceOnly": false,
+            "side": "sell",
+            "tif": "alo"
+          }
+        ]
+      },
+      "name": "replace_modify",
+      "nonce": "1793680000201",
+      "nowMs": "1793680000123",
+      "owner": "0x17c5185167401ed00cf5f5b2fc97d9bbfdb7d025",
+      "requestId": "0x8892db7b952ca63cb92bda192713b9e4daa2f6595baf2a8d8b7a31cac08c768a",
+      "signature": "0x49d0466875ad3550670d716ed4c1c96b03d7061162efb504b0017872be816e4355b0a37c7a53ebf142f8f128de9752aec62a979b5c33d9fae30e6065d9fdd2b41c",
+      "signer": "0x5975c152fe58cdcb7e25586a3c9b994a16dbb615",
+      "signerKey": "0x4343434343434343434343434343434343434343434343434343434343434343",
+      "subaccount": 1
+    },
+    {
+      "action": "0xf817fe82ddab9ef39eab2660f98429bbf38500fa71743b3d900d1493aef2e5fe",
+      "digest": "0x42d8ccd8c13541923a8c485e1f284f7f2518884a029043a797f731d0d993cede",
+      "domain": {
+        "chainId": 421614,
+        "verifyingContract": "0xcccccccccccccccccccccccccccccccccccccccc"
+      },
+      "expiry": "1793680005200",
+      "inner": "0x0106ffffffff0b00000000000000",
+      "inputs": {
+        "market": 0,
+        "orders": [
+          11
+        ]
+      },
+      "name": "cancel_one",
+      "nonce": "1793680000202",
+      "nowMs": "1793680000123",
+      "owner": "0x17c5185167401ed00cf5f5b2fc97d9bbfdb7d025",
+      "requestId": "0x50bb798be646732fa5dc8c7b91651f130ab999503d4701b30d7078ed6a4d14b0",
+      "signature": "0xf30af79645a65d98d5362b7bfcdf8fd6a16a33f330796b559aebbfca70cf044d4766faf002a0bc5ae98c4feda1fe3e5fb889aa209d45d768e586b4defd28091d1b",
+      "signer": "0x5975c152fe58cdcb7e25586a3c9b994a16dbb615",
+      "signerKey": "0x4343434343434343434343434343434343434343434343434343434343434343",
+      "subaccount": 1
+    },
+    {
+      "action": "0xd1486616db158a38d017c5495c75b5ea14de0acfaa07662a81bbc772f406f0a7",
+      "digest": "0x9365eb9400b1e5ef3667f02e9dcd2283cb94c598b82df3efa03f924d764b3ba8",
+      "domain": {
+        "chainId": 421614,
+        "verifyingContract": "0xcccccccccccccccccccccccccccccccccccccccc"
+      },
+      "expiry": "0",
+      "inner": "0x010fffffffff030000000b000000000000000c000000000000000d00000000000000",
+      "inputs": {
+        "market": 0,
+        "orders": [
+          11,
+          12,
+          13
+        ]
+      },
+      "name": "cancel_batch",
+      "nonce": "1793680000203",
+      "nowMs": "1793680000123",
+      "owner": "0x17c5185167401ed00cf5f5b2fc97d9bbfdb7d025",
+      "requestId": "0x2d94bba2397126b3728f4df158a87f2fcc1703dd9cd98a5e5ff4feba5e49b6a0",
+      "signature": "0x0fe95133c09b738b7def3620d58ac8fb9d4619a3c8181e8b7af893ea33f4b9267a55f8cfc604b20362a605578889c97e9f180d83f802bdb1b53c8e2304e436f71b",
+      "signer": "0x5975c152fe58cdcb7e25586a3c9b994a16dbb615",
+      "signerKey": "0x4343434343434343434343434343434343434343434343434343434343434343",
+      "subaccount": 1
+    }
+  ]
+}
