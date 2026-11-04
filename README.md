@@ -21,6 +21,7 @@ go get github.com/chainupcloud/dex-sdk-go
 | [`examples/quickstart`](examples/quickstart/main.go) | API 钱包完整生命周期(授权 → 批量下单 → 原子换单 → 断线保护 → 撤全部 → 撤销 → 反证),也是对着真节点的集成自检 |
 | [`examples/vault`](examples/vault/main.go) | **以金库身份交易**(测试栈:入金 → 建库 → manager 账户授权 API 钱包 → 金库身份会话 → 挂单 / 撤单);`GW=… ADMIN_TOKEN=… go run ./examples/vault -state <文件>` |
 | [`examples/wslatency`](examples/wslatency/main.go) | 实测「写回执 ↔ 推送收到」的时延分布 |
+| [`examples/subaccounts`](examples/subaccounts/main.go) | **多子账户做市**:读网页「API」页导出的密钥文件,每个子账户一把 API 钱包并发挂单 / 撤单,核对互不串号;`-rounds` 跑多轮,中途撤销一把只影响它自己 |
 | `dexosv1` 契约测试 | 对着真节点逐个响应对规格:读(`contract_test.go`)、写(`TestContractWrites`)、推送(`contract_ws_test.go`)、金库(`contract_vault_test.go`);`go test -tags dexos_contract`,环境变量见各文件头 |
 | [`docs/`](docs/) | 写于旧接口客户端时期。概念部分(账号体系、原子换单、读一致性、拒因、做市完整性边界)仍然适用;**代码以本 README、`dexosv1` 文档注释与上面的示例为准** |
 
@@ -177,6 +178,25 @@ res, err := p.Trade(ctx, dexosv1.PairedTrade{Market: btc, MakerSide: dexos.Sell,
 要在发出之前落账,用 `PairedSession.TradeJournaled`。撤销 owner 级授权:主钱包签 `domain.RevokeAgentScopeTypedData`
 (位图与有效期都为 0 的 `ApproveAgentScope`),交给 `c.SubmitAgentScopeRevoke`(走 `/v1/account/agents/revoke`;授权端点不收位图 0)。`Agents` 的结果里 owner 级授权是 `Scope == "owner"`:
 它出现在 owner 名下每个编号的列表里,能不能交易某个编号看 `SubaccountMask`。
+
+### 多子账户做市:一个子账户一把 API 钱包
+
+做市商常把不同策略放在不同子账户里,每个子账户配一把自己的 API 钱包(和 Hyperliquid 的做法一样)。
+
+- **建钥匙**:主钱包在网页「API」页点「创建 API」,勾选几个子账户。浏览器会给每个子账户各生成一把钥匙,并导出一个**密钥文件**(只导出这一次,里面是明文私钥)。然后主钱包为每把钥匙各签一次 owner 级授权,位图只有一位,所以每把钥匙只能交易它自己那个子账户。
+- **用钥匙**:[`dexosv1.ParseKeyFile`](dexosv1/keyfile.go) 读这个文件,核对私钥与地址对得上、子账户不重复。每把钥匙建一个 `ActionWriter`,各用各的 `NonceSource`:签名者窗口 nonce 互不排队,几个进程同时签也不会互相顶掉。
+- **撤销**:在网页上撤销其中一把,执行层随即拒它(`UnknownAgent`),其余照常。
+
+```go
+kf, _ := dexosv1.ParseKeyFile(raw)
+for _, w := range kf.Wallets {
+    aw, err := dexosv1.NewActionWriter(ctx, c, w.Signer, w.Account(kf.Owner), dexosv1.NewNonceSource(0))
+    // …… 每个子账户一个 goroutine:aw.SignReplace / c.SendReplace 挂单,aw.SignCancel / c.SendCancel 撤单
+}
+```
+
+完整示例见 [`examples/subaccounts`](examples/subaccounts/main.go):`go run ./examples/subaccounts -keys api-wallets-xxxx.json -rounds 5`。
+子账户要先从主账户划转保证金,否则挂单被拒 `InsufficientMargin`。
 
 ---
 
