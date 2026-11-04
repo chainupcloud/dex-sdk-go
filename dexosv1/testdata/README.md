@@ -1,10 +1,11 @@
-- `openapi-v1.json`:dex-os 开放 API v1 规格的副本,取自 chainupcloud/dex-os `web/openapi-v1.json` @ `e6691cfa`(main,#321 合并:
-  合约与现货可以同名,按名称定位处另收 `kind`,市场行带 `kind`、流水与批量回执项带 `signingMarketId`;含成对成交
-  `POST /v1/orders/paired` 与子账户模型 v2 的 `sigVersion: 2` 信封、owner 级授权),逐字节相同。
-  dex-os 改了 v1 接口面就整份同步这份副本,再跑 `go test ./dexosv1/`;`write_test.go` 的 `specDeviations`
-  登记已知的规格与实现差异(读写两侧都按它放行),条目过期(规格已修好)测试会失败,提醒删掉。
-  从 `c5ce1049` 同步到 `e6691cfa` 时规格只加了可选字段(`kind`、`signingMarketId`、#311 的商户保险基金),既有样例不用改;
-  样例保持 #321 之前的形状(价格、盘口、挂单、成交等行上没有 `kind`),用来测老节点照常可用,同名场景的响应在 `same_symbol*_test.go` 里按 #321 的形状现造。
+- `openapi-v1.json`：dex-os 开放 API v1 规格的逐字节副本，取自 chainupcloud/dex-os `web/openapi-v1.json` @ `d4fe0a4e636f9592b80071ad01a23de70f5c97b2`（#346 实施分支，尚未合入 main）。
+  本次同步包含 `subticksPerTick`、`tradingRulesVersion`、`tickChangePending` 必填字段；版本按规则状态转换递增。
+  `tickSize` 为有效下单步长，签名整数和 `aggTicks` 继续以 `10^-priceDecimals` 为基础价格单位。
+  dex-os 改了 v1 接口面就整份同步这份副本，再跑 `go test ./dexosv1/`；`write_test.go` 的 `specDeviations`
+  登记已知规格与实现差异，过期条目会导致测试失败。旧节点缺失规则字段的只读兼容由 `trading_rules_test.go` 独立覆盖。
+- 前次固定来源为 `e6691cfa`（main，#321 合并），从 `c5ce1049` 更新时新增的 `kind`、`signingMarketId` 与商户保险基金字段为可选；
+  既有价格、盘口、挂单、成交等样例保持 #321 前的形状，同名场景在 `same_symbol*_test.go` 中按新形状构造。
+- #346 同步时，`markets.json` 补齐初始规则（`subticksPerTick=1`、`tradingRulesVersion="0"`、`tickChangePending=false`）与此前上游新增的必填 `settleToken`（三行均以 USDC 结算，id 0、decimals 6），原价格和聚合档位不变。
 - 整份同步到 `c5ce1049` 时,规格给既有响应加的必填字段在样例里按同一含义补齐(本包不读它们):`markets.json` 的
   `tags` / `priceSource`;`account.json` / `account_vault.json` 的 `crossEquity` / `crossMarginUsed` / `crossMaintenanceMargin`
   (样例里没有逐仓,与全账户同值)、`leverage[].type`、`groups[].isolatedEquity`;`positions.json` 的 `marginMode` 与逐仓字段

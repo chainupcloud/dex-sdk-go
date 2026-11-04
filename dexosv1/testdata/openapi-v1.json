@@ -405,10 +405,11 @@
                         "protocol": {
                           "type": "string",
                           "enum": [
+                            "marketMaker",
                             "market",
                             "tier"
                           ],
-                          "description": "`market` = market-level rates are on; `tier` = the account's fee tier"
+                          "description": "`marketMaker` = the account's owner is on the market-maker whitelist (its rates win over market-level rates and the fee tier; the dex and deployer surcharges and the builder leg on this account's side are waived); `market` = market-level rates are on; `tier` = the account's fee tier"
                         },
                         "builder": {
                           "type": "string",
@@ -419,9 +420,10 @@
                             "default",
                             "unset",
                             "none",
-                            "legacy"
+                            "legacy",
+                            "marketMaker"
                           ],
-                          "description": "Layer the builder leg came from: account×market > account > builder market > builder default > unset; `none` = no builder; `legacy` = builder model off (taker builder = market `builder_ppm`)"
+                          "description": "Layer the builder leg came from: account×market > account > builder market > builder default > unset; `none` = no builder; `legacy` = builder model off (taker builder = market `builder_ppm`); `marketMaker` = waived for a whitelisted market maker"
                         }
                       }
                     }
@@ -3037,6 +3039,7 @@
           "baseToken",
           "quoteToken",
           "basePerLot",
+          "settleToken",
           "lastPrice",
           "oraclePrice",
           "markPrice",
@@ -3051,7 +3054,10 @@
           "fees",
           "tags",
           "priceSource",
-          "aggTicks"
+          "aggTicks",
+          "subticksPerTick",
+          "tradingRulesVersion",
+          "tickChangePending"
         ],
         "properties": {
           "symbol": {
@@ -3085,7 +3091,7 @@
           "tickSize": {
             "type": "string",
             "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
-            "description": "Minimum price increment = 10^-priceDecimals"
+            "description": "Minimum order price increment = subticksPerTick × 10^-priceDecimals. The base price unit used for signed integers and aggTicks remains 10^-priceDecimals."
           },
           "lotSize": {
             "type": "string",
@@ -3158,6 +3164,38 @@
             ],
             "pattern": "^[0-9]+$",
             "description": "Spot only: base-token atomic units per lot (integer string); null for perpetuals"
+          },
+          "settleToken": {
+            "type": "object",
+            "description": "Settlement token of the market: perpetuals settle margin, PnL, funding and fees in the collateral token of their dex; spot settles in the quote token. `minNotional` and `openInterestCap.notional` are in this token's ledger units (1e-6).",
+            "required": [
+              "id",
+              "symbol",
+              "decimals"
+            ],
+            "properties": {
+              "id": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "Ledger token id (0 = USDC)"
+              },
+              "symbol": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Token symbol; null when the token has no metadata yet"
+              },
+              "decimals": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "minimum": 0,
+                "description": "Token decimals as published in token metadata; null when unknown"
+              }
+            },
+            "additionalProperties": false
           },
           "lastPrice": {
             "type": "string",
@@ -3330,7 +3368,7 @@
             },
             "minItems": 1,
             "maxItems": 6,
-            "description": "Order book price aggregation levels configured for this market, in ticks per bucket (1 tick = `tickSize`), strictly ascending; e.g. `[10, 100, 1000, 10000, 100000]` for a market with `tickSize` 0.01 means buckets of 0.1 / 1 / 10 / 100 / 1000. These are the only values `aggTicks` accepts on `GET /v1/markets/{symbol}/book` and the WebSocket `book` channel. Set by the platform or the market's dex when listing and editable later; null when the market has no aggregation levels configured (then only the raw book is available). Never enters the execution layer or any signature",
+            "description": "Order book price aggregation levels configured for this market, in ticks per bucket (1 tick = 10^-priceDecimals), strictly ascending; e.g. `[10, 100, 1000, 10000, 100000]` for a market with `priceDecimals` 2 means buckets of 0.1 / 1 / 10 / 100 / 1000. These are the only values `aggTicks` accepts on `GET /v1/markets/{symbol}/book` and the WebSocket `book` channel. Set by the platform or the market's dex when listing and editable later; null when the market has no aggregation levels configured (then only the raw book is available). Never enters the execution layer or any signature",
             "examples": [
               [
                 10,
@@ -3340,6 +3378,21 @@
                 100000
               ]
             ]
+          },
+          "subticksPerTick": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 4294967295,
+            "description": "Minimum order price increment in base price units. tickSize = subticksPerTick × 10^-priceDecimals."
+          },
+          "tradingRulesVersion": {
+            "type": "string",
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "description": "Monotonic uint64 revision of the complete trading-rule state. Increments once when a request becomes pending and once when its result is confirmed, including a failed request. Never parse as a floating-point number."
+          },
+          "tickChangePending": {
+            "type": "boolean",
+            "description": "New orders are blocked while true; cancellation remains available. Step, revision and pending are read from the same confirmed translation-state snapshot."
           }
         }
       },
@@ -8511,7 +8564,7 @@
               "type": "integer",
               "minimum": 1
             },
-            "description": "Price aggregation: ticks per bucket (1 tick = `tickSize`). Allowed values are exactly the market's `aggTicks` from `GET /v1/markets/{symbol}` (configured per market, not derived from the price). Any other value is 400 `GatewayBadRequest` with the allowed values in `details.allowed` (an empty array when the market has no levels configured). Omit for raw price levels."
+            "description": "Price aggregation: ticks per bucket (1 tick = 10^-priceDecimals). Allowed values are exactly the market's `aggTicks` from `GET /v1/markets/{symbol}` (configured per market, not derived from the price). Any other value is 400 `GatewayBadRequest` with the allowed values in `details.allowed` (an empty array when the market has no levels configured). Omit for raw price levels."
           },
           {
             "$ref": "#/components/parameters/MinSeq"
