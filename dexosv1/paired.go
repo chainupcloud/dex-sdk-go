@@ -207,7 +207,7 @@ func pairedDefinite(err error) bool {
 		return true
 	}
 	var e *Error
-	return errors.As(err, &e) && (beforeSequencing[e.Status] || e.Status == http.StatusUnprocessableEntity && e.Code != "")
+	return errors.As(err, &e) && (notSequenced(e) || e.Status == http.StatusUnprocessableEntity && e.Code != "")
 }
 
 type wirePairedLeg struct {

@@ -49,6 +49,14 @@ var beforeSequencing = map[int]bool{
 	http.StatusMisdirectedRequest: true, http.StatusTooManyRequests: true,
 }
 
+// heldBeforeSequencing 网关在定序之前就挡下、但状态码是 503 的拒因:执行结果落库积压时新写入一律先挡
+// (dex-os `crates/gateway/src/api/history_gate.rs`),命令没进日志,nonce 没动。
+var heldBeforeSequencing = map[string]bool{"GatewayHistoryBackpressure": true}
+
+func notSequenced(e *Error) bool {
+	return beforeSequencing[e.Status] || e.Status == http.StatusServiceUnavailable && heldBeforeSequencing[e.Code]
+}
+
 // nonceGuard 一条 nonce 序列的本地计数器 + 「结论未知就锁」。
 type nonceGuard struct {
 	mu      sync.Mutex
@@ -60,7 +68,7 @@ type nonceGuard struct {
 // run 串行执行一次签名写入。f 用给定的 nonce 签名并发送,返回请求身份(签名之后恒非 nil)。
 //
 //   - 成功:nonce 已消耗 → 本地 ++。
-//   - 没发出(ErrNotSent,含连接没建起来)或定序前的拒绝(beforeSequencing):命令没进日志 → 不动,不锁。
+//   - 没发出(ErrNotSent,含连接没建起来)或定序前的拒绝(notSequenced):命令没进日志 → 不动,不锁。
 //   - 422 执行层拒绝:NonceMismatch → 锁(本地计数器不可信);preConsume 里的其余拒因 → 不动,不锁;
 //     其余(InsufficientMargin 等业务拒绝)→ ++,不锁。都是终局结论,锁住只会让一笔保证金不足停掉整个做市进程。
 //   - ErrPending(202)、ErrIncompleteBatch、连上之后的传输失败、5xx、回执解析失败:结论未知或本地看不全 → 锁定。
@@ -86,7 +94,7 @@ func (g *nonceGuard) run(ctx context.Context, f func(nonce uint64) (*RequestIden
 	var e *Error
 	if !errors.As(err, &je) && errors.As(err, &e) && e.Code != "NonceMismatch" {
 		switch {
-		case beforeSequencing[e.Status]:
+		case notSequenced(e):
 			return err
 		case e.Status == http.StatusUnprocessableEntity && e.Code != "":
 			if !preConsume[e.Code] {

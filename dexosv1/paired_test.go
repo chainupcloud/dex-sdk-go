@@ -131,6 +131,7 @@ func TestPairedSessionOutcomes(t *testing.T) {
 		}},
 		{name: "202 结论未知", status: 202, fixture: "w_sequenced_202.json", blocked: true, check: func(err error) bool { return errors.Is(err, ErrPending) }},
 		{name: "5xx", status: 500, fixture: "err404.json", blocked: true},
+		{name: "执行结果落库背压", status: 503, fixture: "err503_backpressure.json"},
 		{name: "回执不是 filled", status: 200, raw: `{"status":"ok","symbol":"ETH-USD","seq":9,"sub":0,"requestId":"` + testReqID + `"}`, blocked: true},
 		{name: "requestId 对不上", status: 200, raw: `{"status":"filled","symbol":"ETH-USD","seq":9,"sub":0,"requestId":"0x` + strings.Repeat("cd", 32) + `"}`, blocked: true},
 	} {

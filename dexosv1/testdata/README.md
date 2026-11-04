@@ -25,6 +25,7 @@
 - v1.1 §4.9(PR 9b)补的样例:`markets.json` 加 `quotePerTickLot` / `strictIsolated` 与一个现货市场(`baseToken` /
   `quoteToken` / `basePerLot`),`book.json` 带 `depth`,`exchange.json` 带 `fundingTickSec`;`tickers.json`
   (`/v1/tickers`)、`err400_incomplete.json`(`400 GatewayHistoryIncomplete`);`w_sequenced_202.json` 按 `Sequenced` 校验。
+- `err503_backpressure.json`:执行结果落库积压时网关对新写入的拒绝(`503 GatewayHistoryBackpressure`,dex-os `crates/gateway/src/api/history_gate.rs`),形状照 2026-11-04 开发环境的真实响应;它在定序之前,结论是确定没执行。
 - v1.1 §4.10(PR 9c-A)补的字段:`prices.json` 带资金费时间表(`fundingIndex` / `lastFundingMs` / `nextFundingMs`,
   ETH 还没结算过);`orders.json` 带 `tif` / `reduceOnly` / `trigger`,另有一张待触发的仓位止损条件单。
 - 主钱包的金库写与撤销授权回执:`w_vault_create.json` / `w_vault_deposit.json` / `w_vault_redeem.json` / `w_vault_claim.json` /

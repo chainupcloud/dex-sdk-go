@@ -328,6 +328,7 @@ func TestClassifyAction(t *testing.T) {
 		{429, "err429.json", ActionNotExecuted},
 		{202, "w_sequenced_202.json", ActionUnknown},
 		{503, "err503_gaps.json", ActionUnknown},
+		{503, "err503_backpressure.json", ActionNotExecuted},
 	}
 	for _, c := range cases {
 		f.answer(t, "/v1/orders/replace", c.status, c.fixture)
