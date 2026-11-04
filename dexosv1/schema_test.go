@@ -235,6 +235,7 @@ var fixtureSchemas = []struct {
 	{"err429.json", "", "", "Error"},
 	{"err409_epoch.json", "", "", "Error"},
 	{"err503_gaps.json", "", "", "Error"},
+	{"err503_backpressure.json", "", "", "Error"},
 	{"request_not_found.json", "", "", "Error"},
 	{"w_agents.json", "/v1/account/agents", "200", ""},
 	{"w_nonce_agent.json", "/v1/account/nonce", "200", ""},

@@ -287,7 +287,7 @@ func ClassifyAction(err error) ActionOutcome {
 		return ActionUnknown
 	}
 	switch {
-	case beforeSequencing[e.Status]:
+	case notSequenced(e):
 		return ActionNotExecuted
 	case e.Status == http.StatusUnprocessableEntity && e.Code != "" && preConsume[e.Code]:
 		return ActionNotExecuted

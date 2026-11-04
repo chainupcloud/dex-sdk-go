@@ -583,6 +583,8 @@ func TestSessionNonceOutcomes(t *testing.T) {
 		{"NonceMismatch:本地计数器不可信", 422, "err422_nonce.json", 41, true, nil, true},
 		{"202:结论未知", 202, "w_sequenced_202.json", 41, true, func(err error) bool { return errors.Is(err, ErrPending) }, true},
 		{"5xx", 500, "err404.json", 41, true, nil, true},
+		{"定序前:执行结果落库背压", 503, "err503_backpressure.json", 41, false, nil, true},
+		{"历史有缺口的 503", 503, "err503_gaps.json", 41, true, nil, true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
