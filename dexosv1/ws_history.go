@@ -191,18 +191,12 @@ func (st *Stream) SubscribeLedger(ref AccountRef, from HistoryCursor, fn func(Le
 		return out, nil
 	}
 	h.decode = func(f *wsFrame) ([]histItem, error) {
-		// 一条命令一帧:身份 + entries[],每条与 REST 的条目逐字段相同(v1.1 §4.9-2)
-		var w struct {
-			Entries *[]LedgerEntry `json:"entries"`
+		entries, err := ledgerFrameEntries(f)
+		if err != nil {
+			return nil, err
 		}
-		if err := json.Unmarshal(f.Data, &w); err != nil {
-			return nil, fmt.Errorf("dexosv1: ledger 帧解析失败: %w", err)
-		}
-		if w.Entries == nil {
-			return nil, fmt.Errorf("dexosv1: ledger 帧没有 entries: %s", f.Data)
-		}
-		out := make([]histItem, 0, len(*w.Entries))
-		for _, e := range *w.Entries {
+		out := make([]histItem, 0, len(entries))
+		for _, e := range entries {
 			it, err := item(e)
 			if err != nil {
 				return nil, err
@@ -210,6 +204,101 @@ func (st *Stream) SubscribeLedger(ref AccountRef, from HistoryCursor, fn func(Le
 			out = append(out, it)
 		}
 		return out, nil
+	}
+	return st.add(sub)
+}
+
+func ledgerFrameEntries(f *wsFrame) ([]LedgerEntry, error) {
+	var w struct {
+		Entries *[]LedgerEntry `json:"entries"`
+	}
+	if err := json.Unmarshal(f.Data, &w); err != nil {
+		return nil, fmt.Errorf("dexosv1: ledger 帧解析失败: %w", err)
+	}
+	if w.Entries == nil {
+		return nil, fmt.Errorf("dexosv1: ledger 帧没有 entries: %s", f.Data)
+	}
+	return *w.Entries, nil
+}
+
+type LedgerFrame struct {
+	Seq     uint64
+	Sub     uint16
+	Entries []LedgerEntry
+}
+
+func commandEnd(seq uint64, sub uint16) cpos { return cpos{seq, uint64(sub), 0xffffffff} }
+
+func ledgerFrames(entries []LedgerEntry) ([]LedgerFrame, error) {
+	var out []LedgerFrame
+	for _, e := range entries {
+		p, err := parseCursor(e.ID)
+		if err != nil {
+			return nil, fmt.Errorf("dexosv1: 流水 id: %w", err)
+		}
+		if p.seq != e.Seq || p.sub != uint64(e.Sub) || p.idx != uint64(e.Idx) {
+			return nil, fmt.Errorf("dexosv1: 流水 %s 的 seq/sub/idx 与 id 不符", e.ID)
+		}
+		if n := len(out); n > 0 && out[n-1].Seq == e.Seq && out[n-1].Sub == e.Sub {
+			out[n-1].Entries = append(out[n-1].Entries, e)
+			continue
+		}
+		out = append(out, LedgerFrame{Seq: e.Seq, Sub: e.Sub, Entries: []LedgerEntry{e}})
+	}
+	return out, nil
+}
+
+func (st *Stream) SubscribeLedgerFrames(ref AccountRef, from HistoryCursor, fn func(LedgerFrame)) (*Subscription, error) {
+	if p, err := parseCursor(from.After); err == nil && p.idx != 0xffffffff && p != (cpos{}) {
+		return nil, fmt.Errorf("dexosv1: ledger 按帧订阅的起点 %s 要在命令末尾(<seq>-<sub>-4294967295)", from.After)
+	}
+	sub, h, err := st.histSub("ledger", ref, from)
+	if err != nil {
+		return nil, err
+	}
+	items := func(frames []LedgerFrame) []histItem {
+		out := make([]histItem, 0, len(frames))
+		for _, f := range frames {
+			end := commandEnd(f.Seq, f.Sub)
+			out = append(out, histItem{id: end.String(), pos: end, emit: func() { fn(f) }})
+		}
+		return out
+	}
+	h.fetch = func(ctx context.Context, after, epoch, upper string) ([]histItem, error) {
+		p, err := parseCursor(upper)
+		if err != nil {
+			return nil, err
+		}
+		p.idx = 0xffffffff
+		res, err := st.c.Ledger(ctx, ref, LedgerQuery{HistoryQuery: HistoryQuery{After: after, Epoch: epoch, Upper: p.String()}})
+		if err != nil {
+			return nil, err
+		}
+		frames, err := ledgerFrames(res.Entries)
+		if err != nil {
+			return nil, err
+		}
+		return items(frames), nil
+	}
+	h.decode = func(f *wsFrame) ([]histItem, error) {
+		entries, err := ledgerFrameEntries(f)
+		if err != nil {
+			return nil, err
+		}
+		if len(entries) == 0 {
+			return nil, fmt.Errorf("dexosv1: ledger 帧没有条目: %s", f.Data)
+		}
+		frames, err := ledgerFrames(entries)
+		if err != nil {
+			return nil, err
+		}
+		if len(frames) != 1 {
+			return nil, fmt.Errorf("dexosv1: ledger 帧跨了不止一条命令(%s 与 %s)", entries[0].ID, frames[1].Entries[0].ID)
+		}
+		if f.Seq != nil && *f.Seq != frames[0].Seq {
+			return nil, fmt.Errorf("dexosv1: ledger 帧的 seq %d 与条目 %s 不符", *f.Seq, entries[0].ID)
+		}
+		return items(frames), nil
 	}
 	return st.add(sub)
 }
