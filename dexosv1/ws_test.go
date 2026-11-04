@@ -840,6 +840,113 @@ func TestStreamLedger(t *testing.T) {
 	quiet(t, entries, 30*time.Millisecond)
 }
 
+func frameIDs(f LedgerFrame) string {
+	ids := make([]string, 0, len(f.Entries))
+	for _, e := range f.Entries {
+		ids = append(ids, e.ID)
+	}
+	return fmt.Sprintf("%d-%d:%s", f.Seq, f.Sub, strings.Join(ids, ","))
+}
+
+func TestStreamLedgerFramesDeliverWholeCommands(t *testing.T) {
+	h := newWSHarness(t, nil)
+	fh := h.history(601)
+	fh.add("/v1/account/ledger", ledgerRow("600-0-0"), ledgerRow("601-0-0"), ledgerRow("601-0-1"), ledgerRow("601-2-0"))
+	frames := make(chan LedgerFrame, 8)
+	for _, bad := range []string{"600-0-0", "600-1-7"} {
+		if _, err := h.st.SubscribeLedgerFrames(h.ref, HistoryCursor{After: bad, Epoch: testEpoch}, func(LedgerFrame) {}); err == nil {
+			t.Fatalf("起点 %s 在命令中间,要拒绝", bad)
+		}
+	}
+	sub, err := h.st.SubscribeLedgerFrames(h.ref, HistoryCursor{After: "600-65535-4294967295", Epoch: testEpoch}, func(f LedgerFrame) { frames <- f })
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.run()
+	conn := h.fw.accept(t)
+	conn.ack(t, conn.subscribes(t, 1)["ledger"], testEpoch, 602)
+	conn.push(t, "ledger", ledgerFrame(ledgerRow("602-1-0"), ledgerRow("602-1-4")), 602, testEpoch, false)
+	quiet(t, frames, 100*time.Millisecond)
+	fh.add("/v1/account/ledger", ledgerRow("602-0-0"), ledgerRow("602-1-0"), ledgerRow("602-1-4"))
+	fh.set(func(fh *fakeHistory) { fh.complete = 602 })
+	if got := ids(t, frames, 4, frameIDs); !reflect.DeepEqual(got, []string{"601-0:601-0-0,601-0-1", "601-2:601-2-0", "602-0:602-0-0", "602-1:602-1-0,602-1-4"}) {
+		t.Fatalf("补拉按命令成帧、再放行缓存的帧: %v", got)
+	}
+	h.waitState(sub, StateLive)
+	if c := sub.Cursor(); c != (HistoryCursor{After: "602-1-4294967295", Epoch: testEpoch}) {
+		t.Fatalf("游标停在命令末尾: %+v", c)
+	}
+
+	conn.push(t, "ledger", ledgerFrame(ledgerRow("602-1-0"), ledgerRow("602-1-4")), 602, testEpoch, false)
+	conn.push(t, "ledger", ledgerFrame(ledgerRow("603-0-2"), ledgerRow("603-0-5")), 603, testEpoch, false)
+	if f := recv(t, frames); frameIDs(f) != "603-0:603-0-2,603-0-5" || f.Entries[1].Kind != "trade" || f.Entries[1].Sub != 0 {
+		t.Fatalf("接上之后整帧交付、重复帧丢掉: %+v", f)
+	}
+	quiet(t, frames, 30*time.Millisecond)
+	for _, q := range fh.asked("/v1/account/ledger") {
+		if q.Get("after") != "600-65535-4294967295" || q.Get("upper") != "602-65535-4294967295" {
+			t.Fatalf("补拉从游标到确认帧起点: %v", q)
+		}
+	}
+
+	conn.push(t, "ledger", ledgerFrame(ledgerRow("604-0-0"), ledgerRow("604-1-0")), 604, testEpoch, false)
+	if e := h.waitState(sub, StateSyncing); e.Err == nil || !strings.Contains(e.Err.Error(), "604-1-0") {
+		t.Fatalf("一帧跨两条命令要报错: %v", e.Err)
+	}
+	quiet(t, frames, 30*time.Millisecond)
+}
+
+func TestStreamLedgerFramesRejectEmptyFrame(t *testing.T) {
+	h := newWSHarness(t, nil)
+	h.history(700)
+	frames := make(chan LedgerFrame, 4)
+	sub, _ := h.st.SubscribeLedgerFrames(h.ref, HistoryCursor{After: "0-0-0", Epoch: testEpoch}, func(f LedgerFrame) { frames <- f })
+	h.run()
+	conn := h.fw.accept(t)
+	conn.ack(t, conn.subscribes(t, 1)["ledger"], testEpoch, 700)
+	h.waitState(sub, StateLive)
+	conn.push(t, "ledger", map[string]any{"address": testAddr, "subaccount": 0, "entries": []any{}}, 701, testEpoch, false)
+	if e := h.waitState(sub, StateSyncing); e.Err == nil || !strings.Contains(e.Err.Error(), "没有条目") {
+		t.Fatalf("空帧要报错: %v", e.Err)
+	}
+	quiet(t, frames, 30*time.Millisecond)
+}
+
+func TestStreamLedgerFramesResumeAfterLaggedAndReconnect(t *testing.T) {
+	h := newWSHarness(t, nil)
+	fh := h.history(800)
+	fh.add("/v1/account/ledger", ledgerRow("801-0-0"), ledgerRow("801-0-1"), ledgerRow("802-3-0"))
+	frames := make(chan LedgerFrame, 8)
+	sub, _ := h.st.SubscribeLedgerFrames(h.ref, HistoryCursor{After: "800-65535-4294967295", Epoch: testEpoch}, func(f LedgerFrame) { frames <- f })
+	h.run()
+	conn := h.fw.accept(t)
+	conn.ack(t, conn.subscribes(t, 1)["ledger"], testEpoch, 800)
+	h.waitState(sub, StateLive)
+	conn.send(t, map[string]any{"channel": "lagged", "data": map[string]any{"dropped": 0, "epoch": testEpoch,
+		"upper": "802-3-4294967295", "reason": "render"}})
+	conn.push(t, "ledger", ledgerFrame(ledgerRow("803-0-0")), 803, testEpoch, false)
+	quiet(t, frames, 100*time.Millisecond)
+	fh.set(func(fh *fakeHistory) { fh.complete = 803 })
+	if got := ids(t, frames, 3, frameIDs); !reflect.DeepEqual(got, []string{"801-0:801-0-0,801-0-1", "802-3:802-3-0", "803-0:803-0-0"}) {
+		t.Fatalf("lagged 之后补拉成帧再接上: %v", got)
+	}
+	h.waitState(sub, StateLive)
+
+	_ = conn.ws.Close()
+	h.waitState(sub, StateSyncing)
+	fh.add("/v1/account/ledger", ledgerRow("804-1-0"), ledgerRow("804-1-2"))
+	fh.set(func(fh *fakeHistory) { fh.complete = 804 })
+	conn = h.fw.accept(t)
+	conn.ack(t, conn.subscribes(t, 1)["ledger"], testEpoch, 804)
+	if f := recv(t, frames); frameIDs(f) != "804-1:804-1-0,804-1-2" {
+		t.Fatalf("重连后从上一帧命令末尾续拉: %+v", f)
+	}
+	asked := fh.asked("/v1/account/ledger")
+	if last := asked[len(asked)-1]; last.Get("after") != "803-0-4294967295" {
+		t.Fatalf("续拉起点: %v", last)
+	}
+}
+
 // lagged:流水按上界补拉(期间到的帧先缓存),快照类等重发的快照;buffer 时公共成交报缺口,render 时事件没丢、不报。
 func TestStreamLagged(t *testing.T) {
 	h := newWSHarness(t, nil)
