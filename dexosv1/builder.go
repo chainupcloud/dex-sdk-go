@@ -20,12 +20,17 @@ type BuilderCatalog struct {
 	Markets []BuilderCatalogRow `json:"markets"`
 }
 
-// BuilderCatalogRow 目录一行。Symbol 是完整市场符号(商户 dex 上是 `<dex 简称>:BASE-QUOTE`),下单、撤单都用它;
+// BuilderCatalogRow 目录一行。Symbol 是完整市场符号(商户 dex 上是 `<dex 简称>:BASE-QUOTE`),Kind 是市场类型:合约与现货
+// 可以同名(dex-os#318),Symbol + Kind 才定位到一个市场([Catalog.Lookup]),或直接按 SigningMarketID([Catalog.MarketByID])。
 // Display 去掉了简称前缀,只供展示,不能反解回符号。Status "listed" | "closeOnly"(closeOnly = 只收只减仓单)。
 type BuilderCatalogRow struct {
-	Symbol  string `json:"symbol"`
-	Display string `json:"display"`
-	Status  string `json:"status"`
+	Symbol string `json:"symbol"`
+	// Kind "" = dex-os#318 之前的节点没给。
+	Kind string `json:"kind"`
+	// SigningMarketID 市场号;nil = dex-os#318 之前的节点没给。
+	SigningMarketID *uint16 `json:"signingMarketId"`
+	Display         string  `json:"display"`
+	Status          string  `json:"status"`
 }
 
 // BuilderFees builder 自己的前端费率(十进制,名义额的比例,与 [MarketFees] 同口径):Default 为 nil 即没设,
@@ -42,9 +47,10 @@ type BuilderFeeRate struct {
 	MakerRate string `json:"makerRate"`
 }
 
-// BuilderMarketFees 某个市场的费率覆盖。
+// BuilderMarketFees 某个市场的费率覆盖。Kind 是市场类型(合约与现货可以同名);"" = dex-os#318 之前的节点没给。
 type BuilderMarketFees struct {
 	Symbol string `json:"symbol"`
+	Kind   string `json:"kind"`
 	BuilderFeeRate
 }
 

@@ -426,10 +426,7 @@ func gatewayAction(t *testing.T, cat *Catalog, path string, body any) ([]byte, d
 	if isBatch {
 		env = m(items[0])
 	}
-	mk, err := cat.Market(env["symbol"].(string))
-	if err != nil {
-		t.Fatal(err)
-	}
+	mk := gatewayMarket(t, cat, env)
 	seq := func(v any) uint64 {
 		n, err := strconv.ParseUint(v.(string), 10, 64)
 		if err != nil {

@@ -382,8 +382,10 @@ type VaultConfigChange struct {
 
 type wireVaultConfigReq struct {
 	*envelope
-	Kind        string   `json:"kind"`
-	Markets     []string `json:"markets,omitempty"`
+	Kind string `json:"kind"`
+	// Markets 发市场号,不发名称:名称不带类型,合约与现货同名时按名称定位不了(dex-os public-api-v1 §5:同名时改填市场号);
+	// 网关两种都收,签名签的也是市场号。
+	Markets     []uint16 `json:"markets,omitempty"`
 	Cap         string   `json:"cap,omitempty"`
 	MaxLeverage uint32   `json:"maxLeverage,omitempty"`
 }
@@ -416,8 +418,9 @@ func (w *Wallet) ChangeVaultConfig(ctx context.Context, vault uint16, c VaultCon
 		if m == nil {
 			return nil, errors.New("dexosv1: 金库配置的市场为空")
 		}
-		ids, req.Markets = append(ids, m.SigningMarketID), append(req.Markets, m.Symbol)
+		ids = append(ids, m.SigningMarketID)
 	}
+	req.Markets = ids
 	markets := make([]byte, 32)
 	if usesMarkets {
 		markets = marketsHash(ids)

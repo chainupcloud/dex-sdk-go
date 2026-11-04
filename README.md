@@ -9,7 +9,7 @@ go get github.com/chainupcloud/dex-sdk-go
 
 | 包 | 是什么 |
 |---|---|
-| [`dexosv1`](dexosv1/doc.go) | **开放 API v1(`/v1/*`)客户端,新接入一律用它。** 市场按符号(`BTC-USD`)寻址,账户按主钱包地址 + 子账户序号(或金库号)寻址 |
+| [`dexosv1`](dexosv1/doc.go) | **开放 API v1(`/v1/*`)客户端,新接入一律用它。** 市场按名称 + 类型(`BTC-USD` + `perp`)寻址,账户按主钱包地址 + 子账户序号(或金库号)寻址 |
 | [`dexos`](dexos/doc.go) | 签名([`Signer`](dexos/signer.go)、EIP-712 [`Domain`](dexos/eip712.go))、地址、规范命令编码、回执类型 —— `dexosv1` 建在它们上面。它的 HTTP 客户端(`Client`、`Session`、`Connect`、`Discover`)走 dex-os 的旧公开端点,dex-os 正在退役那些端点(`public-api-v1.md` §9),这几个入口已标 **Deprecated** |
 
 ## 示例与文档
@@ -97,6 +97,30 @@ res, err := s.Place(ctx, dexosv1.OrderRequest{
 | 读取并维护 **API 钱包自己的** nonce | 与主钱包的 nonce 混用 → `NonceMismatch` |
 
 API 钱包私钥从前端拿:`/app` →「API 钱包」→ 生成 → 主钱包签一次授权,私钥只显示一次。
+
+### 合约与现货同名
+
+dex-os#318 起一个名称至多对应一个合约市场和一个现货市场(如商户的 `demo:ETH-USDC` 合约与 `demo:ETH-USDC` 现货),
+目录不以名称为唯一键。定位市场有三种方式:
+
+```go
+m, err := cat.Market("BTC-USD")                          // 名称只对应一个在用市场时
+m, err  = cat.Lookup("demo:ETH-USDC", dexosv1.KindSpot) // 名称 + 类型(perp | spot)
+m, err  = cat.MarketByID(7)                              // 市场号(signingMarketId),不受同名、改名影响
+```
+
+名称同时对应合约与现货时 `cat.Market` 报 `ErrAmbiguousSymbol`,不替你挑(与服务端一致)。按市场读写的接口都收 `*Market`
+(下单、撤单、换单、杠杆、成对成交、盘口、K 线、`Orders` / `Fills` 的过滤、`AccountFeesIn`、WS 的 `SubscribeBook` /
+`SubscribeBBO` / `SubscribeTrades`),线上自动带 `symbol` + `kind`;返回的市场行带 `Kind`,账户行(持仓、挂单、成交、
+`orders` 推送)另带对到的 `SigningMarketID`,流水行带 `SigningMarketID`。按名称定位被拒是 `*SymbolError`,用 `errors.Is` 判:
+
+| 错误 | 含义 |
+|---|---|
+| `ErrAmbiguousSymbol` | 名称同时对应合约与现货又没给 kind(`Kinds` 是可选的类型) |
+| `ErrBadKind` | kind 不是 `perp` / `spot` |
+| `ErrDuplicateSymbol` | 同一类型里两个在用市场同名(部署方配置错误),按市场号照常可用 |
+
+服务端回的这三种是定序之前的 400 / 409,会话不锁、nonce 不动;`errors.As` 仍能取到 `*dexosv1.Error`。
 
 ### 写回执与错误
 

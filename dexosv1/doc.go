@@ -1,8 +1,15 @@
 // Package dexosv1 是 DEX-OS 开放 API v1(`/v1/*`)的 Go 客户端。
 //
 // 与 [github.com/chainupcloud/dex-sdk-go/dexos] 的分工:dexos 走旧接口(数字市场号 / 账户号);
-// 本包走 v1 —— 市场按符号(`BTC-USD`)寻址,账户按主钱包地址 + 子账户或金库号寻址([AccountRef]),
+// 本包走 v1 —— 市场按名称 + 类型(`BTC-USD` + `perp`)寻址,账户按主钱包地址 + 子账户或金库号寻址([AccountRef]),
 // 线上的价量是十进制字符串。
+//
+// # 市场
+//
+// 合约与现货可以同名(dex-os#318):一个名称至多对应一个合约市场和一个现货市场。[Catalog] 按名称([Catalog.Market],
+// 名称只对应一个在用市场时)、名称 + 类型([Catalog.Lookup])或市场号([Catalog.MarketByID])定位市场;按市场读写的接口
+// 都收 [*Market],线上带 symbol + kind。按名称定位被拒是 [*SymbolError]([ErrAmbiguousSymbol] / [ErrBadKind] /
+// [ErrDuplicateSymbol])。
 //
 // # 价量仍是整数
 //

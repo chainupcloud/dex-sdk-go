@@ -79,10 +79,10 @@ func TestVaultAddressedReads(t *testing.T) {
 	if _, err := c.Positions(ctx, cat, ref); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := c.Orders(ctx, cat, ref, "ETH-USD"); err != nil {
+	if _, err := c.Orders(ctx, cat, ref, mustMarket(t, cat, "ETH-USD")); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := c.Fills(ctx, cat, ref, "", HistoryQuery{}); err != nil {
+	if _, err := c.Fills(ctx, cat, ref, nil, HistoryQuery{}); err != nil {
 		t.Fatal(err)
 	}
 	l, err := c.Ledger(ctx, ref, LedgerQuery{})
@@ -352,11 +352,16 @@ func gatewayVaultDigest(t *testing.T, cat *Catalog, path string, owner dexos.Add
 		kind := vaultConfigKinds[env["kind"].(string)]
 		var ids []uint16
 		for _, s := range asSlice(env["markets"]) {
-			mk, err := cat.Market(s.(string))
-			if err != nil {
-				t.Fatal(err)
+			// 与网关一致(v1_write.rs vault_config):数字是市场号,字符串按名称定位
+			if sym, ok := s.(string); ok {
+				mk, err := cat.Market(sym)
+				if err != nil {
+					t.Fatal(err)
+				}
+				ids = append(ids, mk.SigningMarketID)
+				continue
 			}
-			ids = append(ids, mk.SigningMarketID)
+			ids = append(ids, uint16(num(t, s)))
 		}
 		limit, lev, markets := new(big.Int), uint32(0), make([]byte, 32)
 		if kind == 0 {
@@ -398,7 +403,7 @@ func TestWalletVaultWrites(t *testing.T) {
 			t.Fatalf("应写 %s,写的是 %s", path, req.path)
 		}
 		body := m(req.body)
-		conformsRequest(t, specPath, body)
+		conformsRequest(t, specPath, body, specGapVaultMarkets)
 		var digest []byte
 		if path == "/v1/account/agents/revoke" {
 			digest = testDomain.RevokeAgentHash(owner, signingID, mustAddr(t, body["agent"].(string)), num(t, body["nonce"]))
@@ -470,6 +475,12 @@ func TestWalletVaultWrites(t *testing.T) {
 		body = sent("/v1/vaults/3/config", "/v1/vaults/{id}/config")
 		if body["kind"] != cc.Kind || len(asSlice(body["markets"])) != len(cc.Markets) {
 			t.Fatalf("改配置 %+v: %v", cc, body)
+		}
+		// 市场按市场号上线(名称不带类型,合约与现货同名时定位不了),与签名里的同一组数
+		for i, mk := range asSlice(body["markets"]) {
+			if num(t, mk) != uint64(cc.Markets[i].SigningMarketID) {
+				t.Fatalf("改配置的市场应按市场号上线: %v", body["markets"])
+			}
 		}
 	}
 

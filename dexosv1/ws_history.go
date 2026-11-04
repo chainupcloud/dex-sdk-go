@@ -130,7 +130,7 @@ func (st *Stream) SubscribeFills(ref AccountRef, from HistoryCursor, fn func(Fil
 		return histItem{id: f.ID, pos: p, emit: func() { fn(f) }}, nil
 	}
 	h.fetch = func(ctx context.Context, after, epoch, upper string) ([]histItem, error) {
-		res, err := st.c.Fills(ctx, st.catalog(), ref, "", HistoryQuery{After: after, Epoch: epoch, Upper: upper})
+		res, err := st.c.Fills(ctx, st.catalog(), ref, nil, HistoryQuery{After: after, Epoch: epoch, Upper: upper})
 		if err != nil {
 			return nil, err
 		}

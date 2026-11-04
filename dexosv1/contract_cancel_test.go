@@ -66,7 +66,7 @@ func waitContractCancelBoundary(ctx context.Context, c *Client, cat *Catalog, re
 	ticker := time.NewTicker(20 * time.Millisecond)
 	defer ticker.Stop()
 	for {
-		orders, err := c.Orders(ctx, cat, ref, "")
+		orders, err := c.Orders(ctx, cat, ref, nil)
 		if err != nil {
 			return err
 		}

@@ -466,20 +466,21 @@ func TestStreamSnapshotChannels(t *testing.T) {
 	prices := make(chan *Prices, 8)
 	accounts := make(chan *Account, 8)
 	positions := make(chan []Position, 8)
-	bs, err := h.st.SubscribeBook("eth-usd", 5, func(b *Book) { books <- b })
+	eth := mustMarket(t, h.cat, "eth-usd")
+	bs, err := h.st.SubscribeBook(eth, 5, func(b *Book) { books <- b })
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := h.st.SubscribeBook("ETH-USD", 0, func(*Book) {}); err == nil {
-		t.Fatal("同一市场的第二个盘口订阅要拒绝(帧按符号路由)")
+	if _, err := h.st.SubscribeBook(eth, 0, func(*Book) {}); err == nil {
+		t.Fatal("同一市场的第二个盘口订阅要拒绝(帧按名称 + 类型路由)")
 	}
-	if _, err := h.st.SubscribeBook("BTC-USD", 101, func(*Book) {}); err == nil {
+	if _, err := h.st.SubscribeBook(mustMarket(t, h.cat, "BTC-USD"), 101, func(*Book) {}); err == nil {
 		t.Fatal("档数超过 100 要拒绝")
 	}
-	if _, err := h.st.SubscribeBBO("NOPE-USD", func(BBO) {}); err == nil {
-		t.Fatal("不认识的市场要拒绝")
+	if _, err := h.st.SubscribeBBO(nil, func(BBO) {}); err == nil {
+		t.Fatal("没有市场要拒绝")
 	}
-	bb, _ := h.st.SubscribeBBO("ETH-USD", func(b BBO) { bbos <- b })
+	bb, _ := h.st.SubscribeBBO(eth, func(b BBO) { bbos <- b })
 	ps, _ := h.st.SubscribePrices(func(p *Prices) { prices <- p })
 	as, _ := h.st.SubscribeAccount(h.ref, func(a *Account) { accounts <- a })
 	pos, _ := h.st.SubscribePositions(h.ref, func(p []Position) { positions <- p })
@@ -487,7 +488,7 @@ func TestStreamSnapshotChannels(t *testing.T) {
 
 	conn := h.fw.accept(t)
 	reqs := conn.subscribes(t, 5)
-	if want := map[string]any{"channel": "book", "symbol": "ETH-USD", "depth": float64(5)}; !reflect.DeepEqual(reqs["book"].Params, want) {
+	if want := map[string]any{"channel": "book", "symbol": "ETH-USD", "kind": "perp", "depth": float64(5)}; !reflect.DeepEqual(reqs["book"].Params, want) {
 		t.Fatalf("book 订阅参数 %v", reqs["book"].Params)
 	}
 	if want := map[string]any{"channel": "account", "address": testAddr, "subaccount": float64(0)}; !reflect.DeepEqual(reqs["account"].Params, want) {
@@ -581,7 +582,7 @@ func TestStreamPricesStayLiveWhenMarketListed(t *testing.T) {
 	if p := recv(t, prices); len(p.Prices) != 2 || p.Prices[1].Last != 24930 || !reflect.DeepEqual(p.Uncataloged, []string{"XRP-USD"}) {
 		t.Fatalf("目录外的行只列符号、目录里的照常换算: %+v", p)
 	}
-	if _, err := h.st.SubscribeBook("XRP-USD", 5, func(*Book) {}); err == nil {
+	if _, err := h.cat.Market("XRP-USD"); err == nil {
 		t.Fatal("换目录之前不认识新市场")
 	}
 
@@ -613,7 +614,7 @@ func TestStreamPricesStayLiveWhenMarketListed(t *testing.T) {
 	if p := recv(t, prices); len(p.Prices) != 3 || p.Prices[2].SigningMarketID != 9 || p.Prices[2].Last != 25 || len(p.Uncataloged) != 0 {
 		t.Fatalf("换目录之后新市场那一行照常换算: %+v", p)
 	}
-	if _, err := h.st.SubscribeBook("XRP-USD", 5, func(*Book) {}); err != nil {
+	if _, err := h.st.SubscribeBook(mustMarket(t, cat, "XRP-USD"), 5, func(*Book) {}); err != nil {
 		t.Fatalf("换目录之后能订新市场的盘口: %v", err)
 	}
 	if trail := h.trail(ps); !reflect.DeepEqual(trail, []State{StateLive}) {
@@ -848,8 +849,8 @@ func TestStreamLagged(t *testing.T) {
 	books := make(chan *Book, 8)
 	trades := make(chan Trade, 8)
 	fs, _ := h.st.SubscribeFills(h.ref, HistoryCursor{After: "200-65535-4294967295", Epoch: testEpoch}, func(f Fill) { fills <- f })
-	bs, _ := h.st.SubscribeBook("ETH-USD", 0, func(b *Book) { books <- b })
-	ts, _ := h.st.SubscribeTrades("ETH-USD", func(t Trade) { trades <- t })
+	bs, _ := h.st.SubscribeBook(mustMarket(t, h.cat, "ETH-USD"), 0, func(b *Book) { books <- b })
+	ts, _ := h.st.SubscribeTrades(mustMarket(t, h.cat, "ETH-USD"), func(t Trade) { trades <- t })
 	h.run()
 	conn := h.fw.accept(t)
 	reqs := conn.subscribes(t, 3)
@@ -929,8 +930,8 @@ func TestStreamReconnectResumes(t *testing.T) {
 	fh.add("/v1/account/fills", fillRow("301-0-0"), fillRow("302-0-0"))
 	fills := make(chan Fill, 8)
 	fs, _ := h.st.SubscribeFills(h.ref, HistoryCursor{After: "300-65535-4294967295", Epoch: testEpoch}, func(f Fill) { fills <- f })
-	bs, _ := h.st.SubscribeBook("ETH-USD", 0, func(*Book) {})
-	ts, _ := h.st.SubscribeTrades("ETH-USD", func(Trade) {})
+	bs, _ := h.st.SubscribeBook(mustMarket(t, h.cat, "ETH-USD"), 0, func(*Book) {})
+	ts, _ := h.st.SubscribeTrades(mustMarket(t, h.cat, "ETH-USD"), func(Trade) {})
 	h.run()
 	conn := h.fw.accept(t)
 	for _, q := range conn.subscribes(t, 3) {
@@ -981,7 +982,7 @@ func TestStreamEpochChangeOnReconnect(t *testing.T) {
 	fh := h.history(400)
 	fs, _ := h.st.SubscribeFills(h.ref, HistoryCursor{After: "400-65535-4294967295", Epoch: testEpoch}, func(Fill) {})
 	as, _ := h.st.SubscribeAccount(h.ref, func(*Account) {})
-	bs, _ := h.st.SubscribeBook("ETH-USD", 0, func(*Book) {})
+	bs, _ := h.st.SubscribeBook(mustMarket(t, h.cat, "ETH-USD"), 0, func(*Book) {})
 	h.run()
 	conn := h.fw.accept(t)
 	for _, q := range conn.subscribes(t, 3) {
@@ -1057,7 +1058,7 @@ func TestStreamHeartbeatAndReadTimeout(t *testing.T) {
 		o.PingInterval = 20 * time.Millisecond
 		o.ReadTimeout = 200 * time.Millisecond
 	})
-	bs, _ := h.st.SubscribeBook("ETH-USD", 0, func(*Book) {})
+	bs, _ := h.st.SubscribeBook(mustMarket(t, h.cat, "ETH-USD"), 0, func(*Book) {})
 	h.run()
 	conn := h.fw.accept(t)
 	pings := 0
@@ -1119,7 +1120,7 @@ func TestStreamSubscribeRejected(t *testing.T) {
 // 确认帧没有起点 seq:流水接不上续传,按协议错误断开重连并报出。
 func TestStreamAckWithoutSeqIsConnError(t *testing.T) {
 	h := newWSHarness(t, nil)
-	if _, err := h.st.SubscribeBook("ETH-USD", 0, func(*Book) {}); err != nil {
+	if _, err := h.st.SubscribeBook(mustMarket(t, h.cat, "ETH-USD"), 0, func(*Book) {}); err != nil {
 		t.Fatal(err)
 	}
 	h.run()
@@ -1167,7 +1168,7 @@ func TestStreamSnapshotErrorResubscribes(t *testing.T) {
 func TestStreamUnsubscribe(t *testing.T) {
 	h := newWSHarness(t, nil)
 	books := make(chan *Book, 4)
-	bs, _ := h.st.SubscribeBook("ETH-USD", 0, func(b *Book) { books <- b })
+	bs, _ := h.st.SubscribeBook(mustMarket(t, h.cat, "ETH-USD"), 0, func(b *Book) { books <- b })
 	h.run()
 	conn := h.fw.accept(t)
 	q := conn.subscribes(t, 1)["book"]
@@ -1180,7 +1181,7 @@ func TestStreamUnsubscribe(t *testing.T) {
 	}
 	conn.push(t, "book", jsonObj(t, fixture(t, "book.json"), nil), 2, "", false)
 	quiet(t, books, 50*time.Millisecond)
-	if _, err := h.st.SubscribeBook("ETH-USD", 0, func(*Book) {}); err != nil {
+	if _, err := h.st.SubscribeBook(mustMarket(t, h.cat, "ETH-USD"), 0, func(*Book) {}); err != nil {
 		t.Fatal(err)
 	}
 	if q := conn.next(t); q.Method != "subscribe" {

@@ -52,6 +52,19 @@
           "maximum": 5000
         },
         "description": "`ack=result` only: how long to wait for the outcome before answering 202 (default = the gateway's `V1_ACK_WAIT_MS`, 1500 ms; `0` = do not wait). Not accepted with `ack=sequenced`"
+      },
+      "MarketKind": {
+        "name": "kind",
+        "in": "query",
+        "required": false,
+        "schema": {
+          "type": "string",
+          "enum": [
+            "perp",
+            "spot"
+          ]
+        },
+        "description": "Market type, used together with `symbol`. A perp and a spot market may share a symbol (case-insensitive): when the symbol names both and `kind` is missing, the gateway answers 400 `GatewayBadRequest` with `details.rule = ambiguous_symbol` and `details.kinds` listing the choices, never picking one. May be omitted when the symbol names one market."
       }
     },
     "responses": {
@@ -312,6 +325,14 @@
                     "symbol": {
                       "type": "string"
                     },
+                    "kind": {
+                      "type": "string",
+                      "enum": [
+                        "perp",
+                        "spot"
+                      ],
+                      "description": "Market type. A perp and a spot market may share a symbol; `symbol` + `kind` names exactly one market."
+                    },
                     "maker": {
                       "type": "object",
                       "required": [
@@ -427,6 +448,14 @@
                   "examples": [
                     "BTC-USD"
                   ]
+                },
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "perp",
+                    "spot"
+                  ],
+                  "description": "Market type. A perp and a spot market may share a symbol; `symbol` + `kind` names exactly one market."
                 },
                 "leverage": {
                   "type": "integer"
@@ -843,6 +872,13 @@
                     "BTC-USD"
                   ]
                 },
+                "signingMarketId": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "description": "Market id of the row (`signingMarketId` in `/v1/markets`); tells apart a perp and a spot market that share a symbol."
+                },
                 "orderId": {
                   "type": "string",
                   "description": "Place items: the new order; cancel items: the order to cancel; modify items accepted: the new order"
@@ -913,6 +949,14 @@
             "examples": [
               "BTC-USD"
             ]
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "perp",
+              "spot"
+            ],
+            "description": "Market type. A perp and a spot market may share a symbol; `symbol` + `kind` names exactly one market."
           },
           "depth": {
             "type": "integer",
@@ -1059,6 +1103,14 @@
                       "type": "string",
                       "description": "Full market symbol (`<dex code>:BASE-QUOTE` on a merchant dex): the only key to trade, cancel or close with"
                     },
+                    "kind": {
+                      "type": "string",
+                      "enum": [
+                        "perp",
+                        "spot"
+                      ],
+                      "description": "Market type. A perp and a spot market may share a symbol; `symbol` + `kind` names exactly one market."
+                    },
                     "display": {
                       "type": "string",
                       "description": "The symbol without the `<dex code>:` prefix (`BTC-USD`, `WBTC-USDC`): what a builder front end shows. Unique among listed / hidden rows only; never resolve it back to a symbol",
@@ -1141,6 +1193,14 @@
                     "symbol": {
                       "type": "string",
                       "description": "Full market symbol"
+                    },
+                    "kind": {
+                      "type": "string",
+                      "enum": [
+                        "perp",
+                        "spot"
+                      ],
+                      "description": "Market type. A perp and a spot market may share a symbol; `symbol` + `kind` names exactly one market."
                     },
                     "takerRate": {
                       "type": "string",
@@ -2222,6 +2282,70 @@
               "type": "integer"
             },
             "description": "Spot markets of this dex (dex 0 = platform spot pairs, dex ≥ 1 = the merchant's spot pairs)"
+          },
+          "insurance": {
+            "type": "object",
+            "description": "Merchant insurance fund (dex-os#311, `docs/specs/merchant-insurance-isolation.md` §5.5). dex 0 reports its platform fund with no policy.",
+            "required": [
+              "balance",
+              "principal",
+              "minAmount",
+              "withdrawDelayMs",
+              "pendingWithdraw",
+              "reduceOnly",
+              "uncoveredLoss"
+            ],
+            "properties": {
+              "balance": {
+                "type": "string",
+                "pattern": "^-?[0-9]+$",
+                "description": "Fund balance"
+              },
+              "principal": {
+                "type": "string",
+                "pattern": "^-?[0-9]+$",
+                "description": "Withdrawable principal (funding minus withdrawals; liquidation fees are not principal)"
+              },
+              "minAmount": {
+                "type": "string",
+                "pattern": "^-?[0-9]+$",
+                "description": "Minimum set by the platform; below it every perpetual market of the dex only accepts orders that reduce a position"
+              },
+              "withdrawDelayMs": {
+                "type": "integer",
+                "format": "uint64",
+                "description": "Timelock between requesting and executing a withdrawal"
+              },
+              "pendingWithdraw": {
+                "type": [
+                  "object",
+                  "null"
+                ],
+                "properties": {
+                  "to": {
+                    "type": "integer"
+                  },
+                  "amount": {
+                    "type": "string",
+                    "pattern": "^-?[0-9]+$",
+                    "description": "Integer string in the collateral token's smallest unit"
+                  },
+                  "unlockMs": {
+                    "type": "integer",
+                    "format": "uint64"
+                  }
+                }
+              },
+              "reduceOnly": {
+                "type": "boolean",
+                "description": "At least one perpetual market of the dex is reduce-only because the fund is below its minimum"
+              },
+              "uncoveredLoss": {
+                "type": "string",
+                "pattern": "^-?[0-9]+$",
+                "description": "Shortfall on this dex's markets the fund could not cover"
+              }
+            }
           }
         },
         "additionalProperties": true
@@ -2557,6 +2681,14 @@
               "BTC-USD"
             ]
           },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "perp",
+              "spot"
+            ],
+            "description": "Market type. A perp and a spot market may share a symbol; `symbol` + `kind` names exactly one market."
+          },
           "side": {
             "type": "string",
             "enum": [
@@ -2712,6 +2844,13 @@
               "string",
               "null"
             ]
+          },
+          "signingMarketId": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Market id of the row (`signingMarketId` in `/v1/markets`); tells apart a perp and a spot market that share a symbol."
           },
           "order": {
             "type": [
@@ -3347,6 +3486,14 @@
               "BTC-USD"
             ]
           },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "perp",
+              "spot"
+            ],
+            "description": "Market type. A perp and a spot market may share a symbol; `symbol` + `kind` names exactly one market."
+          },
           "side": {
             "type": "string",
             "enum": [
@@ -3458,6 +3605,14 @@
               "BTC-USD"
             ]
           },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "perp",
+              "spot"
+            ],
+            "description": "Market type. A perp and a spot market may share a symbol; `symbol` + `kind` names exactly one market."
+          },
           "event": {
             "type": "string",
             "enum": [
@@ -3565,6 +3720,14 @@
             "examples": [
               "BTC-USD"
             ]
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "perp",
+              "spot"
+            ],
+            "description": "Market type. Required only when `symbol` names both a perp and a spot market (otherwise 400 `rule: ambiguous_symbol`); may be omitted when the symbol names one market."
           },
           "side": {
             "type": "string",
@@ -3697,6 +3860,14 @@
             "examples": [
               "BTC-USD"
             ]
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "perp",
+              "spot"
+            ],
+            "description": "Market type. A perp and a spot market may share a symbol; `symbol` + `kind` names exactly one market."
           },
           "status": {
             "type": "string",
@@ -4060,6 +4231,14 @@
               "BTC-USD"
             ]
           },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "perp",
+              "spot"
+            ],
+            "description": "Market type. A perp and a spot market may share a symbol; `symbol` + `kind` names exactly one market."
+          },
           "side": {
             "type": "string",
             "enum": [
@@ -4179,6 +4358,14 @@
             "examples": [
               "BTC-USD"
             ]
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "perp",
+              "spot"
+            ],
+            "description": "Market type. A perp and a spot market may share a symbol; `symbol` + `kind` names exactly one market."
           },
           "last": {
             "type": "string",
@@ -4476,6 +4663,14 @@
             "examples": [
               "BTC-USD"
             ]
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "perp",
+              "spot"
+            ],
+            "description": "Market type. A perp and a spot market may share a symbol; `symbol` + `kind` names exactly one market."
           },
           "open": {
             "type": [
@@ -5305,6 +5500,9 @@
             "description": "Limit `fees.markets` to this market; omitted = every tradable market. An unknown symbol is 404."
           },
           {
+            "$ref": "#/components/parameters/MarketKind"
+          },
+          {
             "$ref": "#/components/parameters/MinSeq"
           }
         ],
@@ -5683,6 +5881,9 @@
             "description": "Only this market"
           },
           {
+            "$ref": "#/components/parameters/MarketKind"
+          },
+          {
             "name": "after",
             "in": "query",
             "required": false,
@@ -5938,6 +6139,14 @@
                     "symbol": {
                       "type": "string"
                     },
+                    "kind": {
+                      "type": "string",
+                      "enum": [
+                        "perp",
+                        "spot"
+                      ],
+                      "description": "Market type. A perp and a spot market may share a symbol; `symbol` + `kind` names exactly one market."
+                    },
                     "amount": {
                       "type": "string",
                       "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
@@ -6007,6 +6216,14 @@
                         "examples": [
                           "BTC-USD"
                         ]
+                      },
+                      "kind": {
+                        "type": "string",
+                        "enum": [
+                          "perp",
+                          "spot"
+                        ],
+                        "description": "Market type. Required only when `symbol` names both a perp and a spot market (otherwise 400 `rule: ambiguous_symbol`); may be omitted when the symbol names one market."
                       },
                       "amount": {
                         "type": "string",
@@ -6233,6 +6450,14 @@
                     "symbol": {
                       "type": "string"
                     },
+                    "kind": {
+                      "type": "string",
+                      "enum": [
+                        "perp",
+                        "spot"
+                      ],
+                      "description": "Market type. A perp and a spot market may share a symbol; `symbol` + `kind` names exactly one market."
+                    },
                     "leverage": {
                       "type": "integer"
                     },
@@ -6312,6 +6537,14 @@
                         "examples": [
                           "BTC-USD"
                         ]
+                      },
+                      "kind": {
+                        "type": "string",
+                        "enum": [
+                          "perp",
+                          "spot"
+                        ],
+                        "description": "Market type. Required only when `symbol` names both a perp and a spot market (otherwise 400 `rule: ambiguous_symbol`); may be omitted when the symbol names one market."
                       },
                       "leverage": {
                         "type": "integer"
@@ -6463,6 +6696,9 @@
             "description": "Only this market"
           },
           {
+            "$ref": "#/components/parameters/MarketKind"
+          },
+          {
             "$ref": "#/components/parameters/MinSeq"
           }
         ],
@@ -6565,6 +6801,9 @@
               ]
             },
             "description": "Only this market"
+          },
+          {
+            "$ref": "#/components/parameters/MarketKind"
           },
           {
             "name": "after",
@@ -7958,6 +8197,9 @@
             "description": ""
           },
           {
+            "$ref": "#/components/parameters/MarketKind"
+          },
+          {
             "name": "address",
             "in": "query",
             "required": false,
@@ -8201,6 +8443,9 @@
             "description": "Market symbol"
           },
           {
+            "$ref": "#/components/parameters/MarketKind"
+          },
+          {
             "$ref": "#/components/parameters/MinSeq"
           }
         ],
@@ -8242,6 +8487,9 @@
               ]
             },
             "description": "Market symbol"
+          },
+          {
+            "$ref": "#/components/parameters/MarketKind"
           },
           {
             "name": "depth",
@@ -8318,6 +8566,9 @@
             "description": "Market symbol"
           },
           {
+            "$ref": "#/components/parameters/MarketKind"
+          },
+          {
             "name": "interval",
             "in": "query",
             "required": false,
@@ -8392,6 +8643,14 @@
                         "BTC-USD"
                       ]
                     },
+                    "kind": {
+                      "type": "string",
+                      "enum": [
+                        "perp",
+                        "spot"
+                      ],
+                      "description": "Market type. A perp and a spot market may share a symbol; `symbol` + `kind` names exactly one market."
+                    },
                     "interval": {
                       "type": "string"
                     },
@@ -8439,6 +8698,9 @@
               ]
             },
             "description": "Market symbol"
+          },
+          {
+            "$ref": "#/components/parameters/MarketKind"
           },
           {
             "name": "startTime",
@@ -8490,6 +8752,14 @@
                         "BTC-USD"
                       ]
                     },
+                    "kind": {
+                      "type": "string",
+                      "enum": [
+                        "perp",
+                        "spot"
+                      ],
+                      "description": "Market type. A perp and a spot market may share a symbol; `symbol` + `kind` names exactly one market."
+                    },
                     "funding": {
                       "type": "array",
                       "items": {
@@ -8536,6 +8806,9 @@
             "description": "Market symbol"
           },
           {
+            "$ref": "#/components/parameters/MarketKind"
+          },
+          {
             "name": "limit",
             "in": "query",
             "required": false,
@@ -8562,6 +8835,14 @@
                       "examples": [
                         "BTC-USD"
                       ]
+                    },
+                    "kind": {
+                      "type": "string",
+                      "enum": [
+                        "perp",
+                        "spot"
+                      ],
+                      "description": "Market type. A perp and a spot market may share a symbol; `symbol` + `kind` names exactly one market."
                     },
                     "trades": {
                       "type": "array",
@@ -8750,6 +9031,14 @@
                 "properties": {
                   "symbol": {
                     "type": "string"
+                  },
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "perp",
+                      "spot"
+                    ],
+                    "description": "Market type. Required only when `symbol` names both a perp and a spot market (otherwise 400 `rule: ambiguous_symbol`); may be omitted when the symbol names one market."
                   },
                   "price": {
                     "type": "string",
@@ -8976,6 +9265,14 @@
                         "BTC-USD"
                       ]
                     },
+                    "kind": {
+                      "type": "string",
+                      "enum": [
+                        "perp",
+                        "spot"
+                      ],
+                      "description": "Market type. A perp and a spot market may share a symbol; `symbol` + `kind` names exactly one market."
+                    },
                     "canceled": {
                       "type": "boolean"
                     },
@@ -9058,6 +9355,14 @@
                               "BTC-USD"
                             ]
                           },
+                          "kind": {
+                            "type": "string",
+                            "enum": [
+                              "perp",
+                              "spot"
+                            ],
+                            "description": "Market type. Required only when `symbol` names both a perp and a spot market (otherwise 400 `rule: ambiguous_symbol`); may be omitted when the symbol names one market."
+                          },
                           "orderId": {
                             "type": "string"
                           },
@@ -9088,6 +9393,14 @@
                               "examples": [
                                 "BTC-USD"
                               ]
+                            },
+                            "kind": {
+                              "type": "string",
+                              "enum": [
+                                "perp",
+                                "spot"
+                              ],
+                              "description": "Market type. Required only when `symbol` names both a perp and a spot market (otherwise 400 `rule: ambiguous_symbol`); may be omitted when the symbol names one market."
                             },
                             "orderId": {
                               "type": "string"
@@ -9427,6 +9740,14 @@
                           "BTC-USD"
                         ]
                       },
+                      "kind": {
+                        "type": "string",
+                        "enum": [
+                          "perp",
+                          "spot"
+                        ],
+                        "description": "Market type. Required only when `symbol` names both a perp and a spot market (otherwise 400 `rule: ambiguous_symbol`); may be omitted when the symbol names one market."
+                      },
                       "orderId": {
                         "type": "string",
                         "description": "The resting order to modify (decimal string, same market as `symbol`)"
@@ -9586,6 +9907,14 @@
                         "examples": [
                           "BTC-USD"
                         ]
+                      },
+                      "kind": {
+                        "type": "string",
+                        "enum": [
+                          "perp",
+                          "spot"
+                        ],
+                        "description": "Market type. Required only when `symbol` names both a perp and a spot market (otherwise 400 `rule: ambiguous_symbol`); may be omitted when the symbol names one market."
                       },
                       "cancels": {
                         "type": "array",
@@ -9866,6 +10195,14 @@
                           "BTC-USD"
                         ]
                       },
+                      "kind": {
+                        "type": "string",
+                        "enum": [
+                          "perp",
+                          "spot"
+                        ],
+                        "description": "Market type. Required only when `symbol` names both a perp and a spot market (otherwise 400 `rule: ambiguous_symbol`); may be omitted when the symbol names one market."
+                      },
                       "side": {
                         "type": "string",
                         "enum": [
@@ -10099,6 +10436,14 @@
                         "examples": [
                           "BTC-USD"
                         ]
+                      },
+                      "kind": {
+                        "type": "string",
+                        "enum": [
+                          "perp",
+                          "spot"
+                        ],
+                        "description": "Market type. Required only when `symbol` names both a perp and a spot market (otherwise 400 `rule: ambiguous_symbol`); may be omitted when the symbol names one market."
                       },
                       "closeSide": {
                         "type": "string",
@@ -10400,6 +10745,9 @@
               ]
             },
             "description": "Only this market (case-insensitive); unknown symbols return 404"
+          },
+          {
+            "$ref": "#/components/parameters/MarketKind"
           }
         ],
         "responses": {
@@ -12069,6 +12417,138 @@
           }
         }
       }
+    },
+    "/v1/dexes/{id}/insurance/fund": {
+      "post": {
+        "tags": [
+          "Funds"
+        ],
+        "summary": "Fund a merchant dex insurance fund",
+        "description": "The account owner signs a sigVersion 2 action whose inner command is `FundDexInsurance { account: placeholder, dex, amount }` (tag 0x8D); the amount moves from the account's withdrawable balance of the dex collateral token into the dex insurance account and counts as principal. API wallets get 403 `AgentScopeViolation`; dex 0 → 422 `InvalidDexConfig`. `token` (default USDC) only selects the decimals of `amount`. See `docs/specs/merchant-insurance-isolation.md` §4.1.",
+        "operationId": "v1_dex_insurance_fund",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            },
+            "description": "Dex id (≥ 1)"
+          },
+          {
+            "name": "ack",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "result",
+                "sequenced"
+              ],
+              "default": "result"
+            },
+            "description": "Default: wait for the fold and return the business outcome; high-frequency clients use `sequenced` to get only `{status, seq, sub, requestId}`"
+          },
+          {
+            "$ref": "#/components/parameters/WaitMs"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string"
+                    },
+                    "dex": {
+                      "type": "integer"
+                    },
+                    "token": {
+                      "type": "string"
+                    },
+                    "amount": {
+                      "type": "string",
+                      "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
+                      "description": "Decimal string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "202": {
+            "$ref": "#/components/responses/Sequenced"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "description": "Bad signature",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Ownership / scope (an API wallet cannot move funds)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Business rejection (`code` = the CoreError variant name)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "allOf": [
+                  {
+                    "$ref": "#/components/schemas/SignedEnvelope"
+                  },
+                  {
+                    "type": "object",
+                    "required": [
+                      "amount"
+                    ],
+                    "properties": {
+                      "amount": {
+                        "type": "string",
+                        "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
+                        "description": "Decimal amount of the dex collateral token"
+                      },
+                      "token": {
+                        "description": "Token symbol or id; default USDC"
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
     }
   },
   "servers": [
@@ -12204,7 +12684,8 @@
       "Resume: the subscribe ack carries the ledger `epoch` and the start position `seq`: every event after `seq` is sent on the subscription (unless a `lagged` follows); backfill time series up to `upper=<seq>-65535-4294967295` over REST and de-duplicate by `id` to join without gaps. Private frames carry `epoch` and `seq`, public book / bbo frames carry `seq`. `lagged{dropped, epoch, upper, reason}` means frames were not sent: `reason: buffer` = the server-side broadcast fell behind and `dropped` events were dropped; `reason: render` = the connection could not render time-series frames (execution history unreadable, market metadata missing; `dropped` is 0). **Frames not sent are never resent**. Right after it every snapshot subscription receives one `isSnapshot:true` frame, and fills / ledger frames at or before `upper` are no longer sent: backfill them with `after=<last id received>&epoch=<epoch>&upper=<upper>` (retry later on 400 `GatewayHistoryIncomplete`); the two parts join without gaps or duplicates. If `epoch` changed after a reconnect, rebuild state instead of resuming old cursors.",
       "At most 200 subscriptions per connection; the server closes a connection that has sent no frame (pings count) for 60 s.",
       "Rate limiting: REST uses fixed 60-second windows per IP and, for writes, per main wallet (weights: reads 1, order book / prices 2, history 5, writes 1 + floor(n / 40); default 1200 per minute each); every response carries `ratelimit` / `ratelimit-policy`, writes also `x-ratelimit-account`, and exceeding a budget yields 429 with `retry-after`. The WebSocket connection itself carries no weight.",
-      "Private channels (orders / fills / account / positions / ledger) accept `vault` instead of `address` / `subaccount` (specification v1.1 §4.3; giving both is an error frame); their frames then show `vault` in place of `address` / `subaccount`."
+      "Private channels (orders / fills / account / positions / ledger) accept `vault` instead of `address` / `subaccount` (specification v1.1 §4.3; giving both is an error frame); their frames then show `vault` in place of `address` / `subaccount`.",
+      "Channels that take `symbol` (book / bbo / trades / candles / funding) also take `kind` (`perp` | `spot`). A perp and a spot market may share a symbol; subscribing to such a symbol without `kind` is an error frame naming the choices (the gateway never picks one). Market frames carry `kind` next to `symbol`."
     ],
     "channels": {
       "prices": {
@@ -12214,6 +12695,7 @@
       "book": {
         "params": [
           "symbol",
+          "kind?",
           "depth?",
           "aggTicks?"
         ],
@@ -12221,15 +12703,17 @@
       },
       "bbo": {
         "params": [
-          "symbol"
+          "symbol",
+          "kind?"
         ],
-        "data": "`{symbol, bid:[price,size]|null, ask, ts}`"
+        "data": "`{symbol, kind, bid:[price,size]|null, ask, ts}`"
       },
       "trades": {
         "params": [
-          "symbol"
+          "symbol",
+          "kind?"
         ],
-        "data": "`{symbol, id, price, size, side, ts}`"
+        "data": "`{symbol, kind, id, price, size, side, ts}`"
       },
       "orders": {
         "params": [
@@ -12237,7 +12721,7 @@
           "subaccount?",
           "vault?"
         ],
-        "data": "Snapshot: `{address, subaccount, orders:[OpenOrder]}`. Update: `{address, subaccount, orderId, clientOrderId, symbol, event: accepted|fill|canceled|expired, status: open|filled|canceled|expired, remaining, side?, price?, size?, filled?, lastFilled?, fillId?, ts}` (`status` and `remaining` always present)"
+        "data": "Snapshot: `{address, subaccount, orders:[OpenOrder]}`. Update: `{address, subaccount, orderId, clientOrderId, symbol, kind, event: accepted|fill|canceled|expired, status: open|filled|canceled|expired, remaining, side?, price?, size?, filled?, lastFilled?, fillId?, ts}` (`status` and `remaining` always present)"
       },
       "fills": {
         "params": [
@@ -12266,15 +12750,17 @@
       "candles": {
         "params": [
           "symbol",
+          "kind?",
           "interval"
         ],
-        "data": "Candle (`{symbol, i, t, T, o, h, l, c, v}`); the current bar is sent on every fill. `interval` takes the same values as REST; an unknown one is an error frame"
+        "data": "Candle (`{symbol, kind, i, t, T, o, h, l, c, v}`); the current bar is sent on every fill. `interval` takes the same values as REST; an unknown one is an error frame"
       },
       "funding": {
         "params": [
-          "symbol"
+          "symbol",
+          "kind?"
         ],
-        "data": "`{symbol, rate, index, ts}`, one frame per funding settlement"
+        "data": "`{symbol, kind, rate, index, ts}`, one frame per funding settlement"
       },
       "ledger": {
         "params": [

@@ -2,6 +2,7 @@ package dexosv1
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -71,6 +72,88 @@ func (e *HistoryUnavailableError) Error() string {
 
 func (e *HistoryUnavailableError) Unwrap() error { return e.Err }
 
+// 按名称定位市场的三种拒绝(dex-os public-api-v1 §5「符号解析」,dex-os#318):一个名称至多对应一个合约市场和一个
+// 现货市场,按名称定位时另带 kind(perp | spot)。用 errors.Is 判;名称、可选的类型用 errors.As 取 [*SymbolError]。
+// 服务端回的与本包按目录判出的([Catalog.Lookup])是同一套。
+var (
+	// ErrAmbiguousSymbol 名称同时对应合约与现货市场,又没给 kind(400 `ambiguous_symbol`)。服务端不替你挑,本包也不挑:
+	// 从 [SymbolError.Kinds] 里选一个,用 [Catalog.Lookup] 或市场号([Catalog.MarketByID])重新定位。
+	ErrAmbiguousSymbol = errors.New("dexosv1: 名称同时对应合约与现货市场,须指明 kind")
+	// ErrBadKind kind 不是 perp / spot(400 `bad_kind`)。
+	ErrBadKind = errors.New("dexosv1: kind 只能是 perp 或 spot")
+	// ErrDuplicateSymbol 同一类型里有两个在用市场同名(409 `duplicate_symbol`):部署方的配置错误,按名称定位不了它们,
+	// 按市场号照常可用。
+	ErrDuplicateSymbol = errors.New("dexosv1: 同一类型里有两个在用市场同名")
+)
+
+// 服务端 `details.rule` 的取值。
+const (
+	ruleAmbiguousSymbol = "ambiguous_symbol"
+	ruleBadKind         = "bad_kind"
+	ruleDuplicateSymbol = "duplicate_symbol"
+)
+
+var symbolRules = map[string]error{
+	ruleAmbiguousSymbol: ErrAmbiguousSymbol,
+	ruleBadKind:         ErrBadKind,
+	ruleDuplicateSymbol: ErrDuplicateSymbol,
+}
+
+// SymbolError 按名称定位市场被拒。errors.Is 对得上 [ErrAmbiguousSymbol] / [ErrBadKind] / [ErrDuplicateSymbol] 之一;
+// 服务端回的(Err 非 nil)经 errors.As 仍能取到 [*Error](状态码 400 / 409:定序之前就拒了,会话不锁、nonce 不动)。
+type SymbolError struct {
+	// Rule "ambiguous_symbol" | "bad_kind" | "duplicate_symbol"(同服务端的 details.rule)。
+	Rule   string
+	Symbol string
+	// Kind 请求里给的 kind("" = 没给;服务端回的错误里没有这一项,也为 "")。
+	Kind string
+	// Kinds ambiguous_symbol:这个名称对应的类型,从中选一个作 kind;bad_kind:合法的取值;
+	// duplicate_symbol:重名的那个类型。
+	Kinds []string
+	// Err 服务端的错误体;本包按目录判出时为 nil。
+	Err *Error
+}
+
+func (e *SymbolError) Error() string {
+	var msg string
+	switch e.Rule {
+	case ruleAmbiguousSymbol:
+		msg = fmt.Sprintf("dexosv1: 名称 %q 同时对应 %s 市场,须指明 kind", e.Symbol, strings.Join(e.Kinds, " / "))
+	case ruleBadKind:
+		msg = fmt.Sprintf("dexosv1: kind %q 不是 %s", e.Kind, strings.Join(e.Kinds, " / "))
+	case ruleDuplicateSymbol:
+		msg = fmt.Sprintf("dexosv1: 名称 %q 有不止一个在用的 %s 市场(部署方配置错误),请按市场号定位", e.Symbol, strings.Join(e.Kinds, " / "))
+	default:
+		msg = fmt.Sprintf("dexosv1: 按名称 %q 定位市场被拒(%s)", e.Symbol, e.Rule)
+	}
+	if e.Err != nil {
+		return msg + ": " + e.Err.Error()
+	}
+	return msg
+}
+
+func (e *SymbolError) Is(target error) bool { return target != nil && symbolRules[e.Rule] == target }
+
+func (e *SymbolError) Unwrap() error {
+	if e.Err == nil {
+		return nil
+	}
+	return e.Err
+}
+
+// symbolError 服务端按名称定位市场的拒绝(400 GatewayBadRequest / 409 GatewayConflict 带 details.rule);不是就返回 nil。
+func symbolError(e *Error) *SymbolError {
+	rule := detailString(e.Details, "rule")
+	if _, ok := symbolRules[rule]; !ok || (e.Status != http.StatusBadRequest && e.Status != http.StatusConflict) {
+		return nil
+	}
+	se := &SymbolError{Rule: rule, Symbol: detailString(e.Details, "symbol"), Err: e}
+	if raw, ok := e.Details["kinds"]; ok {
+		_ = json.Unmarshal(raw, &se.Kinds)
+	}
+	return se
+}
+
 // parseError 把非 2xx 响应解析成类型化错误。执行历史的两类契约错误复用 dexos 包的哨兵值,
 // 调用方用 errors.Is(err, dexos.ErrHistoryEpochMismatch) 判,两套接口一个写法。
 func parseError(status int, header http.Header, raw []byte) error {
@@ -102,6 +185,9 @@ func parseError(status int, header http.Header, raw []byte) error {
 			}
 		}
 		return &HistoryUnavailableError{Gaps: gaps, Err: e}
+	}
+	if se := symbolError(e); se != nil {
+		return se
 	}
 	return e
 }

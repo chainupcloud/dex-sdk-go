@@ -96,6 +96,16 @@ func catalog(t *testing.T, f *fakeV1, c *Client) *Catalog {
 	return cat
 }
 
+// mustMarket 目录里名称唯一的在用市场。
+func mustMarket(t testing.TB, cat *Catalog, symbol string) *Market {
+	t.Helper()
+	m, err := cat.Market(symbol)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return m
+}
+
 func TestCatalogAndBookScaleToTicksAndLots(t *testing.T) {
 	f, c := newFake(t)
 	cat := catalog(t, f, c)
@@ -161,7 +171,8 @@ func TestCatalogRejectsMisalignedPrice(t *testing.T) {
 }
 
 // dex-os 下市后名称释放、可再上同名新市场（dex-os docs/deploy.md §6i，v_market_meta v2）：目录里同一符号可以有一个 Delisted
-// 的旧市场和一个在用的新市场。按符号只认在用的那个，旧市场仍在 Markets() 里；两个在用的市场同名才是目录错误。
+// 的旧市场和一个在用的新市场。按符号只认在用的那个，旧市场仍在 Markets() 里。同一类型两个在用的市场同名是部署方配置错误:
+// 与服务端一样(409 duplicate_symbol)只是按名称定位不了它们,目录照常读出、按市场号照常定位(dex-os#318 之前整份目录报错)。
 func TestCatalogResolvesRelistedSymbolToLiveMarket(t *testing.T) {
 	relisted := func(status string) string {
 		var doc struct {
@@ -214,9 +225,27 @@ func TestCatalogResolvesRelistedSymbolToLiveMarket(t *testing.T) {
 		t.Fatalf("下市的旧市场仍应在 Markets() 里: %d", delisted)
 	}
 
+	if old, err := cat.MarketByID(0); err != nil || old.Status != "Delisted" || old.Symbol != "BTC-USD" {
+		t.Fatalf("按市场号能取到下市的旧市场: %+v %v", old, err)
+	}
+
 	body = relisted("Active")
-	if _, err := c.Catalog(context.Background()); err == nil || !strings.Contains(err.Error(), "重复") {
-		t.Fatalf("两个在用的市场同名应报目录错误: %v", err)
+	cat, err = c.Catalog(context.Background())
+	if err != nil {
+		t.Fatalf("同类型两个在用市场同名不该让整份目录读不出来: %v", err)
+	}
+	var se *SymbolError
+	if _, err := cat.Market("BTC-USD"); !errors.Is(err, ErrDuplicateSymbol) || !errors.As(err, &se) || !slices.Equal(se.Kinds, []string{"perp"}) {
+		t.Fatalf("按名称定位同类型重名的市场应报 ErrDuplicateSymbol: %v", err)
+	}
+	if _, err := cat.Lookup("btc-usd", KindPerp); !errors.Is(err, ErrDuplicateSymbol) {
+		t.Fatalf("带上类型也定位不了同类型重名: %v", err)
+	}
+	if m, err := cat.MarketByID(8); err != nil || m.Symbol != "BTC-USD" {
+		t.Fatalf("按市场号照常定位: %+v %v", m, err)
+	}
+	if eth, err := cat.Market("ETH-USD"); err != nil || eth.SigningMarketID != 1 {
+		t.Fatalf("别的市场不受影响: %+v %v", eth, err)
 	}
 }
 
@@ -347,7 +376,7 @@ func TestAccountReads(t *testing.T) {
 		t.Fatal(err)
 	}
 	if a.Equity != "13928.966644" || a.Balances[0].Amount != "-1282.814453" || a.FeeTier != nil || *a.TakerFee != "0.0005" ||
-		a.Leverage[0] != (MarketLeverage{"ETH-USD", 10}) || a.Nonce != 2 {
+		a.Leverage[0] != (MarketLeverage{Symbol: "ETH-USD", Leverage: 10}) || a.Nonce != 2 {
 		t.Fatalf("账户汇总不对: %+v", a)
 	}
 	if a.Epoch != "k1-1" || a.AsOfSeq != 231461888 || a.OpenOrderMargin != "12.5" || len(a.Groups) != 1 ||
@@ -355,7 +384,7 @@ func TestAccountReads(t *testing.T) {
 		t.Fatalf("账户风险头不对: %+v", a)
 	}
 	if a.Fees.Builder == nil || *a.Fees.Builder != 1 || len(a.Fees.Markets) != 2 ||
-		a.Fees.Markets[0] != (AccountMarketFees{"BTC-USD", MakerFeeRates{"0", "0", "0"}, TakerFeeRates{"0.0005", "0.0005", "0", "0", "0"}, FeeSource{"tier", "account"}}) ||
+		a.Fees.Markets[0] != (AccountMarketFees{Symbol: "BTC-USD", Maker: MakerFeeRates{"0", "0", "0"}, Taker: TakerFeeRates{"0.0005", "0.0005", "0", "0", "0"}, Source: FeeSource{"tier", "account"}}) ||
 		a.Fees.Markets[1].Maker != (MakerFeeRates{"0.00035", "0.00015", "0.0002"}) || a.Fees.Markets[1].Source != (FeeSource{"market", "default"}) {
 		t.Fatalf("账户实收费率不对: %+v", a.Fees)
 	}
@@ -370,7 +399,7 @@ func TestAccountReads(t *testing.T) {
 	}
 
 	f.routes["/v1/account/orders"] = serve(t, 200, "orders.json")
-	orders, err := c.Orders(ctx, cat, ref, "")
+	orders, err := c.Orders(ctx, cat, ref, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -407,22 +436,25 @@ func TestAccountReads(t *testing.T) {
 // 按市场读实收费率:带上 symbol,应答只能有这一个市场。
 func TestAccountFeesIn(t *testing.T) {
 	f, c := newFake(t)
+	cat := catalog(t, f, c)
+	btc, _ := cat.Market("BTC-USD")
+	eth, _ := cat.Market("ETH-USD")
 	ref := AccountRef{Address: mustAddr(t, testAddr)}
 	ctx := context.Background()
 	f.routes["/v1/account"] = func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write(fixture(t, map[string]string{"": "account_vault.json", "BTC-USD": "account_vault.json", "ETH-USD": "account.json"}[r.URL.Query().Get("symbol")]))
 	}
-	got, err := c.AccountFeesIn(ctx, ref, "BTC-USD")
+	got, err := c.AccountFeesIn(ctx, ref, btc)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got.Maker != (MakerFeeRates{"0", "0", "0"}) || got.Source != (FeeSource{"tier", "none"}) {
 		t.Fatalf("BTC-USD 的实收费率不对: %+v", got)
 	}
-	if q := f.requests()[0].URL.Query(); q.Get("symbol") != "BTC-USD" || q.Get("address") != testAddr {
+	if q := f.requests()[1].URL.Query(); q.Get("symbol") != "BTC-USD" || q.Get("kind") != "perp" || q.Get("address") != testAddr {
 		t.Fatalf("按市场读费率的参数不对: %v", q)
 	}
-	if _, err := c.AccountFeesIn(ctx, ref, "ETH-USD"); err == nil {
+	if _, err := c.AccountFeesIn(ctx, ref, eth); err == nil {
 		t.Fatal("应答不止一个市场应报错")
 	}
 }
@@ -639,7 +671,7 @@ func TestFillsPageThroughCarriesEpochAndUpper(t *testing.T) {
 		page++
 		serve(t, 200, map[int]string{1: "fills_p1.json", 2: "fills_p2.json"}[page])(w, r)
 	}
-	h, err := c.Fills(context.Background(), cat, AccountRef{Address: mustAddr(t, testAddr)}, "", HistoryQuery{PageSize: 1})
+	h, err := c.Fills(context.Background(), cat, AccountRef{Address: mustAddr(t, testAddr)}, nil, HistoryQuery{PageSize: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -670,14 +702,14 @@ func TestHistoryResumeRules(t *testing.T) {
 	ctx := context.Background()
 
 	// 游标没有纪元:不发请求,直接报错
-	if _, err := c.Fills(ctx, cat, ref, "", HistoryQuery{After: "1-0-0"}); err == nil {
+	if _, err := c.Fills(ctx, cat, ref, nil, HistoryQuery{After: "1-0-0"}); err == nil {
 		t.Fatal("从游标续拉却不给纪元应当报错")
 	}
 
 	// 给了游标与纪元、没给上界:先不带游标探一页取上界,再从游标续拉
 	f.routes["/v1/account/fills"] = serve(t, 200, "fills_p2.json")
 	before := len(f.requests())
-	if _, err := c.Fills(ctx, cat, ref, "", HistoryQuery{After: "34186497-0-1", Epoch: "k1-1"}); err != nil {
+	if _, err := c.Fills(ctx, cat, ref, nil, HistoryQuery{After: "34186497-0-1", Epoch: "k1-1"}); err != nil {
 		t.Fatal(err)
 	}
 	reqs := f.requests()[before:]
@@ -696,7 +728,7 @@ func TestHistoryResumeRules(t *testing.T) {
 	f.routes["/v1/account/fills"] = func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`{"epoch":"k1-1","upper":"9-0-0","fills":[],"hasMore":true,"next":"` + r.URL.Query().Get("after") + `"}`))
 	}
-	if _, err := c.Fills(ctx, cat, ref, "", HistoryQuery{After: "5-0-0", Epoch: "k1-1", Upper: "9-0-0"}); err == nil ||
+	if _, err := c.Fills(ctx, cat, ref, nil, HistoryQuery{After: "5-0-0", Epoch: "k1-1", Upper: "9-0-0"}); err == nil ||
 		!strings.Contains(err.Error(), "游标没有前进") {
 		t.Fatalf("游标不前进应当报错,得到 %v", err)
 	}
@@ -706,7 +738,7 @@ func TestHistoryLimitTruncates(t *testing.T) {
 	f, c := newFake(t)
 	cat := catalog(t, f, c)
 	f.routes["/v1/account/fills"] = serve(t, 200, "fills_p1.json")
-	h, err := c.Fills(context.Background(), cat, AccountRef{Address: mustAddr(t, testAddr)}, "", HistoryQuery{Limit: 1})
+	h, err := c.Fills(context.Background(), cat, AccountRef{Address: mustAddr(t, testAddr)}, nil, HistoryQuery{Limit: 1})
 	if err != nil || len(h.Fills) != 1 || !h.Truncated {
 		t.Fatalf("Limit 截断应当标 Truncated: %+v, %v", h, err)
 	}
@@ -787,7 +819,7 @@ func TestTypedErrors(t *testing.T) {
 	ref := AccountRef{Address: mustAddr(t, testAddr)}
 
 	f.routes["/v1/markets/NOPE-USD"] = serve(t, 404, "err404.json")
-	_, err := c.Market(ctx, "NOPE-USD")
+	_, err := c.Market(ctx, "NOPE-USD", "")
 	var e *Error
 	if !errors.As(err, &e) || e.Status != 404 || e.Code != "GatewayNotFound" || e.Num != 10404 || string(e.Details["symbol"]) != `"NOPE-USD"` {
 		t.Fatalf("404 应解析成 *Error: %#v", err)
