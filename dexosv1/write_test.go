@@ -145,19 +145,12 @@ func gatewayRequestID(t *testing.T, cat *Catalog, path string, body any) string 
 	if isBatch {
 		env = m(items[0])
 	}
-	market := func(sym any) *Market {
-		mk, err := cat.Market(sym.(string))
-		if err != nil {
-			t.Fatal(err)
-		}
-		return mk
-	}
-	orderID := func(sym, id any) dexos.OrderID {
+	orderID := func(item map[string]any, id any) dexos.OrderID {
 		seq, err := strconv.ParseUint(id.(string), 10, 64)
 		if err != nil {
 			t.Fatal(err)
 		}
-		return dexos.NewOrderID(market(sym).SigningMarketID, seq)
+		return dexos.NewOrderID(gatewayMarket(t, cat, item).SigningMarketID, seq)
 	}
 	nonce := num(t, env["nonce"])
 	if (path == "/v1/orders/replace" || path == "/v1/orders/cancel") && env["sigVersion"] != nil && num(t, env["sigVersion"]) == 2 {
@@ -182,13 +175,13 @@ func gatewayRequestID(t *testing.T, cat *Catalog, path string, body any) string 
 		case "/v1/orders/cancel":
 			ids := make([]dexos.OrderID, len(items))
 			for i, it := range items {
-				ids[i] = orderID(m(it)["symbol"], m(it)["orderId"])
+				ids[i] = orderID(m(it), m(it)["orderId"])
 			}
 			cmd = dexos.EncodeBatchCancel(acct, ids)
 		case "/v1/orders/replace":
 			var ids []dexos.OrderID
 			for _, c := range env["cancels"].([]any) {
-				ids = append(ids, orderID(env["symbol"], c))
+				ids = append(ids, orderID(env, c))
 			}
 			var orders []dexos.BatchOrder
 			for _, o := range env["orders"].([]any) {
@@ -196,7 +189,7 @@ func gatewayRequestID(t *testing.T, cat *Catalog, path string, body any) string 
 			}
 			// 与网关一致:带了非空 modifies 就整条编成 BatchReplace2(dex-os v1_write.rs replace)
 			if mods, _ := env["modifies"].([]any); len(mods) > 0 {
-				mk, _ := cat.Market(env["symbol"].(string))
+				mk := gatewayMarket(t, cat, env)
 				var modifies []dexos.BatchModify
 				for _, x := range mods {
 					modifies = append(modifies, gatewayModify(t, mk, m(x)))
@@ -227,14 +220,14 @@ func gatewayRequestID(t *testing.T, cat *Catalog, path string, body any) string 
 			g := gatewayOrder(t, cat, env)
 			digest = orderHash(testDomain, owner, signingID, g.Market, g.Side, g.Price, g.Lots, g.TIF, g.ReduceOnly, nonce, optional("expiresAt"))
 		case "/v1/orders/cancel":
-			id := orderID(env["symbol"], env["orderId"])
+			id := orderID(env, env["orderId"])
 			digest = cancelHash(testDomain, owner, signingID, id.Market(), id.Seq(), nonce)
 		case "/v1/account/leverage":
 			var imf uint32
 			if lev := num(t, env["leverage"]); lev > 0 {
 				imf = uint32(1_000_000 / lev)
 			}
-			digest = leverageHash(testDomain, owner, signingID, market(env["symbol"]).SigningMarketID, imf, nonce)
+			digest = leverageHash(testDomain, owner, signingID, gatewayMarket(t, cat, env).SigningMarketID, imf, nonce)
 		case "/v1/account/agents/approve":
 			if env["sigVersion"] != nil && num(t, env["sigVersion"]) == 2 {
 				mask, err := strconv.ParseUint(env["subaccountMask"].(string), 10, 64)
@@ -267,10 +260,7 @@ func gatewayRequestID(t *testing.T, cat *Catalog, path string, body any) string 
 // 价量按普通限价单换算,内层 PairedTradeLeg 的对手取另一条腿的账户。返回摘要与声明的签名者(缺省 = owner)。
 func gatewayPairedLeg(t *testing.T, cat *Catalog, body map[string]any, role string) ([]byte, string) {
 	t.Helper()
-	mk, err := cat.Market(body["symbol"].(string))
-	if err != nil {
-		t.Fatal(err)
-	}
+	mk := gatewayMarket(t, cat, body)
 	price, err := mk.Scale.Ticks(body["price"].(string))
 	if err != nil {
 		t.Fatal(err)
@@ -373,13 +363,22 @@ func gatewayModify(t *testing.T, mk *Market, item map[string]any) dexos.BatchMod
 	return dexos.BatchModify{Order: dexos.NewOrderID(mk.SigningMarketID, seq), Price: price, Lots: lots, TIF: tif, ReduceOnly: ro}
 }
 
-// gatewayOrder 按网关的做法把线上的一张单换回执行层参数(符号 → 市场号,十进制 → tick / lot)。
+// gatewayMarket 按网关的做法(dex-os#321 v1_write.rs market_of)把请求体里的 symbol + 可选的 kind 定位到市场:
+// 合约与现货同名又没带 kind 是 400 ambiguous_symbol,假网关在这里就判测试失败。
+func gatewayMarket(t *testing.T, cat *Catalog, item map[string]any) *Market {
+	t.Helper()
+	kind, _ := item["kind"].(string)
+	mk, err := cat.Lookup(item["symbol"].(string), kind)
+	if err != nil {
+		t.Fatalf("网关按 symbol %v + kind %q 定位不到市场: %v", item["symbol"], kind, err)
+	}
+	return mk
+}
+
+// gatewayOrder 按网关的做法把线上的一张单换回执行层参数(符号 + 类型 → 市场号,十进制 → tick / lot)。
 func gatewayOrder(t *testing.T, cat *Catalog, item map[string]any) dexos.BatchOrder {
 	t.Helper()
-	mk, err := cat.Market(item["symbol"].(string))
-	if err != nil {
-		t.Fatal(err)
-	}
+	mk := gatewayMarket(t, cat, item)
 	price, err := mk.Scale.Ticks(item["price"].(string))
 	if err != nil {
 		t.Fatal(err)
@@ -787,10 +786,17 @@ func TestWalletWrites(t *testing.T) {
 var specDeviations = map[string][]string{
 	// `POST /v1/orders/paired` 的 200 响应在规格里只是 `{type: object}`,字段只写在 description 里
 	// (`{status: "filled", symbol, price, size, makerOrderId, takerOrderId, fills, avgPrice, seq, sub, requestId}`);
-	// 本包照 dex-os v1_write.rs paired_result + conclude_try 读。
-	"PairedResult":      {"status", "symbol", "price", "size", "makerOrderId", "takerOrderId", "avgPrice", "fills"},
+	// 本包照 dex-os v1_write.rs paired_result + conclude_try 读(`kind` 是 dex-os#321 加的,description 里也还没写)。
+	"PairedResult":      {"status", "symbol", "kind", "price", "size", "makerOrderId", "takerOrderId", "avgPrice", "fills"},
 	"PairedResult(ack)": {"status", "seq", "sub", "duplicate", "requestId"},
+	// `GET /v1/builder` 的目录行:dex-os#321 的实现带 `signingMarketId`(api_e2e test_v1_builder 断言了它),
+	// 规格的 BuilderView.catalog.markets[] 只加了 `kind`(TestDecodedFieldsExistInPinnedSpec 按这张表放行)。
+	"BuilderView.catalog.markets[]": {"signingMarketId"},
 }
+
+// specGapVaultMarkets 金库改配置的 `markets[]`:本包发市场号(名称不带类型,合约与现货同名时按名称定位不了,
+// dex-os public-api-v1 §5「同名时改填市场号」,v1_write.rs vault_config 两种都收),规格只写了字符串。
+const specGapVaultMarkets = "body.markets["
 
 // 本包解码 / 发送用到的每个字段都必须在规格里,specDeviations 除外。
 func TestWriteFieldsExistInPinnedSpec(t *testing.T) {

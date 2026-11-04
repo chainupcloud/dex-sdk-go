@@ -308,6 +308,11 @@ func canonical(params map[string]any) (string, error) {
 	return string(out), err
 }
 
+// marketRoute 公共市场频道(book / bbo / trades)的路由键:名称 + 类型(合约与现货可以同名,dex-os#318)。
+func marketRoute(channel, symbol, kind string) string {
+	return channel + ":" + strings.ToUpper(symbol) + ":" + kind
+}
+
 // accountRoute 私有频道的路由键:钱包 = 地址 + 子账户,金库身份 = 金库号(帧里只回显其一)。
 func accountRoute(channel string, ref AccountRef) string {
 	if ref.Vault != nil {
@@ -680,7 +685,7 @@ func (st *Stream) handle(raw []byte) error {
 	if f.Epoch != nil && st.epoch != "" && *f.Epoch != st.epoch {
 		st.epochChanged(*f.Epoch)
 	}
-	route, err := routeOf(f.Channel, f.Data)
+	route, err := st.routeOf(f.Channel, f.Data)
 	if err != nil {
 		return err
 	}
@@ -721,10 +726,11 @@ type resyncError struct{ err error }
 
 func (e *resyncError) Error() string { return e.err.Error() }
 
-// routeOf 数据帧 → 路由键,与 Subscribe* 登记时的一致。
-func routeOf(channel string, data json.RawMessage) (string, error) {
+// routeOf 数据帧 → 路由键,与 Subscribe* 登记时的一致。只在 Run 的 goroutine 里调用(读 st.routes)。
+func (st *Stream) routeOf(channel string, data json.RawMessage) (string, error) {
 	var h struct {
 		Symbol     string  `json:"symbol"`
+		Kind       string  `json:"kind"`
 		Address    string  `json:"address"`
 		Subaccount *uint32 `json:"subaccount"`
 		Vault      *uint16 `json:"vault"`
@@ -736,7 +742,24 @@ func routeOf(channel string, data json.RawMessage) (string, error) {
 	case "prices":
 		return "prices", nil
 	case "book", "bbo", "trades":
-		return channel + ":" + strings.ToUpper(h.Symbol), nil
+		if r := marketRoute(channel, h.Symbol, h.Kind); h.Kind != "" && st.routes[r] != nil {
+			return r, nil
+		}
+		// 帧不带 kind(dex-os#318 之前的节点:那时名称只对应一个在用市场),或订阅的市场没有 Kind(不是从目录取的):
+		// 按这条连接上这个名称订的那一个路由
+		var found []string
+		for _, kind := range []string{KindPerp, KindSpot, ""} {
+			if r := marketRoute(channel, h.Symbol, kind); st.routes[r] != nil && (h.Kind == "" || kind == "") {
+				found = append(found, r)
+			}
+		}
+		switch len(found) {
+		case 0:
+			return "unsubscribed:" + channel, nil
+		case 1:
+			return found[0], nil
+		}
+		return "", fmt.Errorf("dexosv1: %s 帧不带 kind,名称 %q 在这条连接上订了不止一种类型,分不出是哪个", channel, h.Symbol)
 	case "orders", "fills", "account", "positions", "ledger":
 		switch {
 		case h.Vault != nil && h.Address == "" && h.Subaccount == nil:

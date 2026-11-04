@@ -7,7 +7,6 @@ import (
 	"math"
 	"net/http"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 
@@ -120,8 +119,10 @@ type PairedTradeResult struct {
 	// Status 恒为 "filled"。
 	Status string
 	Symbol string
-	Price  uint32
-	Lots   uint64
+	// Kind 成交市场的类型(回执带了 kind 就已核对过与请求的市场一致)。
+	Kind  string
+	Price uint32
+	Lots  uint64
 	// MakerOrderID / TakerOrderID 两条腿的订单号(订单序号)。
 	MakerOrderID uint64
 	TakerOrderID uint64
@@ -222,6 +223,7 @@ type wirePairedLeg struct {
 
 type wirePairedReq struct {
 	Symbol    string        `json:"symbol"`
+	Kind      string        `json:"kind,omitempty"`
 	Price     string        `json:"price"`
 	Size      string        `json:"size"`
 	MakerSide string        `json:"makerSide"`
@@ -239,7 +241,7 @@ func (p *PairedSession) send(ctx context.Context, t PairedTrade, now uint64, jou
 	if !t.ExpiresAt.IsZero() {
 		expiry = uint64(t.ExpiresAt.UnixMilli())
 	}
-	body := wirePairedReq{Symbol: t.Market.Symbol, Price: t.Market.Scale.Price(t.Price), Size: t.Market.Scale.Size(t.Lots),
+	body := wirePairedReq{Symbol: t.Market.Symbol, Kind: t.Market.Kind, Price: t.Market.Scale.Price(t.Price), Size: t.Market.Scale.Size(t.Lots),
 		MakerSide: t.MakerSide.String(), NowMs: now}
 	var makerDigest []byte
 	for _, leg := range []struct {
@@ -298,6 +300,7 @@ func (p *PairedSession) post(ctx context.Context, m *Market, body wirePairedReq,
 type wirePairedResult struct {
 	Status       string            `json:"status"`
 	Symbol       string            `json:"symbol"`
+	Kind         string            `json:"kind"`
 	Price        string            `json:"price"`
 	Size         string            `json:"size"`
 	MakerOrderID string            `json:"makerOrderId"`
@@ -312,10 +315,10 @@ func pairedResult(m *Market, r Receipt, raw []byte) (*PairedTradeResult, error) 
 	if err := decodeInto(raw, &w, "成对成交回执"); err != nil {
 		return nil, err
 	}
-	if w.Status != "filled" || !strings.EqualFold(w.Symbol, m.Symbol) {
-		return nil, fmt.Errorf("dexosv1: 在 %s 成对成交,回执是 %q/%q", m.Symbol, w.Status, w.Symbol)
+	if w.Status != "filled" || !sameMarketRow(m, w.Symbol, w.Kind) {
+		return nil, fmt.Errorf("dexosv1: 在 %s(%s)成对成交,回执是 %q/%q(%s)", m.Symbol, m.Kind, w.Status, w.Symbol, w.Kind)
 	}
-	out := &PairedTradeResult{Receipt: r, Status: w.Status, Symbol: w.Symbol}
+	out := &PairedTradeResult{Receipt: r, Status: w.Status, Symbol: w.Symbol, Kind: m.Kind}
 	var err error
 	if out.MakerOrderID, err = strconv.ParseUint(w.MakerOrderID, 10, 64); err != nil {
 		return nil, fmt.Errorf("dexosv1: 成对成交回执 makerOrderId %q: %w", w.MakerOrderID, err)

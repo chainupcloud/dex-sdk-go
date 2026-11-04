@@ -135,10 +135,13 @@ type Fill struct {
 	Seq     uint64
 	OrderID *uint64
 	Symbol  string
-	Side    string // 本账户这一边:"buy" | "sell"
-	Role    string // "taker" | "maker"
-	Price   uint32
-	Lots    uint64
+	// Kind / SigningMarketID 这笔成交所在的目录市场(按名称 + 类型对,见 [Catalog])。
+	Kind            string
+	SigningMarketID uint16
+	Side            string // 本账户这一边:"buy" | "sell"
+	Role            string // "taker" | "maker"
+	Price           uint32
+	Lots            uint64
 	// Fee 本账户这一边的费(十进制,FeeToken 单位;maker 为负 = 返佣)。
 	Fee      string
 	FeeToken string
@@ -151,6 +154,7 @@ type wireFill struct {
 	Seq      uint64  `json:"seq"`
 	OrderID  *string `json:"orderId"`
 	Symbol   string  `json:"symbol"`
+	Kind     string  `json:"kind"`
 	Side     string  `json:"side"`
 	Role     string  `json:"role"`
 	Price    string  `json:"price"`
@@ -168,15 +172,15 @@ type FillHistory struct {
 	Fills     []Fill
 }
 
-// Fills 账户成交(`/v1/account/fills`),自动翻页到上界。symbol 为空 = 全市场。
+// Fills 账户成交(`/v1/account/fills`),自动翻页到上界。m 为 nil = 全市场,否则只要市场 m 上的(`?symbol=&kind=`)。
 // 失败时返回已取到的部分与错误。
-func (c *Client) Fills(ctx context.Context, cat *Catalog, ref AccountRef, symbol string, q HistoryQuery) (*FillHistory, error) {
+func (c *Client) Fills(ctx context.Context, cat *Catalog, ref AccountRef, m *Market, q HistoryQuery) (*FillHistory, error) {
 	params, err := ref.values()
 	if err != nil {
 		return nil, err
 	}
-	if symbol != "" {
-		params.Set("symbol", symbol)
+	if m != nil {
+		params = marketQuery(params, m, true)
 	}
 	cur := &cursor{after: q.After, epoch: q.Epoch, upper: q.Upper, pageSize: q.PageSize, limit: q.Limit}
 	wires, err := pageThrough[wireFill](ctx, c, "/v1/account/fills", params, "fills", cur)
@@ -192,11 +196,12 @@ func (c *Client) Fills(ctx context.Context, cat *Catalog, ref AccountRef, symbol
 }
 
 func (w wireFill) fill(cat *Catalog) (Fill, error) {
-	m, err := cat.rowMarket(w.Symbol)
+	m, err := cat.rowMarket(w.Symbol, w.Kind)
 	if err != nil {
 		return Fill{}, err
 	}
-	f := Fill{ID: w.ID, Seq: w.Seq, Symbol: w.Symbol, Side: w.Side, Role: w.Role, Fee: w.Fee, FeeToken: w.FeeToken, TS: w.TS}
+	f := Fill{ID: w.ID, Seq: w.Seq, Symbol: w.Symbol, Kind: m.Kind, SigningMarketID: m.SigningMarketID, Side: w.Side, Role: w.Role,
+		Fee: w.Fee, FeeToken: w.FeeToken, TS: w.TS}
 	if w.OrderID != nil {
 		oid, err := strconv.ParseUint(*w.OrderID, 10, 64)
 		if err != nil {
@@ -214,6 +219,7 @@ func (w wireFill) fill(cat *Catalog) (Fill, error) {
 }
 
 // LedgerEntry 一条资金流水。Amount 带符号,Token 单位的十进制;Symbol nil = 与市场无关(入金等)。
+// Kind 是流水种类(trade、funding……),不是市场类型:流水按 SigningMarketID 区分同名的合约与现货市场。
 type LedgerEntry struct {
 	ID     string  `json:"id"`
 	Seq    uint64  `json:"seq"`
@@ -223,6 +229,8 @@ type LedgerEntry struct {
 	Token  string  `json:"token"`
 	Amount string  `json:"amount"`
 	Symbol *string `json:"symbol"`
+	// SigningMarketID 流水所属的市场号([Catalog.MarketByID]);nil = 与市场无关,或 dex-os#318 之前的节点没给。
+	SigningMarketID *uint16 `json:"signingMarketId"`
 	// Vault 只在 `vault_*` 条目上有(v1.1 §4.3):以金库身份查 = 该金库;否则 = 对手账户所属的金库,
 	// 对手不是金库(creator 一侧的 vault_fee)为 nil。WS `ledger` 帧的条目与 REST 相同。
 	Vault *uint16 `json:"vault"`

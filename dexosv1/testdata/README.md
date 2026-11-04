@@ -1,7 +1,10 @@
-- `openapi-v1.json`:dex-os 开放 API v1 规格的副本,取自 chainupcloud/dex-os `web/openapi-v1.json` @ `c5ce1049`(main,含成对成交
+- `openapi-v1.json`:dex-os 开放 API v1 规格的副本,取自 chainupcloud/dex-os `web/openapi-v1.json` @ `e6691cfa`(main,#321 合并:
+  合约与现货可以同名,按名称定位处另收 `kind`,市场行带 `kind`、流水与批量回执项带 `signingMarketId`;含成对成交
   `POST /v1/orders/paired` 与子账户模型 v2 的 `sigVersion: 2` 信封、owner 级授权),逐字节相同。
   dex-os 改了 v1 接口面就整份同步这份副本,再跑 `go test ./dexosv1/`;`write_test.go` 的 `specDeviations`
-  登记已知的规格与实现差异,条目过期(规格已修好)测试会失败,提醒删掉。
+  登记已知的规格与实现差异(读写两侧都按它放行),条目过期(规格已修好)测试会失败,提醒删掉。
+  从 `c5ce1049` 同步到 `e6691cfa` 时规格只加了可选字段(`kind`、`signingMarketId`、#311 的商户保险基金),既有样例不用改;
+  样例保持 #321 之前的形状(价格、盘口、挂单、成交等行上没有 `kind`),用来测老节点照常可用,同名场景的响应在 `same_symbol*_test.go` 里按 #321 的形状现造。
 - 整份同步到 `c5ce1049` 时,规格给既有响应加的必填字段在样例里按同一含义补齐(本包不读它们):`markets.json` 的
   `tags` / `priceSource`;`account.json` / `account_vault.json` 的 `crossEquity` / `crossMarginUsed` / `crossMaintenanceMargin`
   (样例里没有逐仓,与全账户同值)、`leverage[].type`、`groups[].isolatedEquity`;`positions.json` 的 `marginMode` 与逐仓字段

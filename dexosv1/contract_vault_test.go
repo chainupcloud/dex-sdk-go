@@ -138,11 +138,11 @@ func TestContractVault(t *testing.T) {
 		t.Fatalf("Positions(vault): %v", err)
 	}
 	conforms("/v1/account/positions", vq, "/v1/account/positions", 200)
-	if _, err := c.Orders(ctx, cat, ref, ""); err != nil {
+	if _, err := c.Orders(ctx, cat, ref, nil); err != nil {
 		t.Fatalf("Orders(vault): %v", err)
 	}
 	conforms("/v1/account/orders", vq, "/v1/account/orders", 200)
-	if _, err := c.Fills(ctx, cat, ref, "", HistoryQuery{PageSize: 3, Limit: 3}); err != nil {
+	if _, err := c.Fills(ctx, cat, ref, nil, HistoryQuery{PageSize: 3, Limit: 3}); err != nil {
 		t.Fatalf("Fills(vault): %v", err)
 	}
 	small := cloneValues(vq)
@@ -315,7 +315,7 @@ func TestContractVault(t *testing.T) {
 	}
 	oid := *placed.Items[0].OrderID
 	wait(t, orders, "金库挂单进集合", func(u OrdersUpdate) bool { return hasOrder(u.Open, oid) })
-	if rest, err := c.Orders(ctx, cat, ref, m.Symbol); err != nil || !hasOrder(rest, oid) {
+	if rest, err := c.Orders(ctx, cat, ref, m); err != nil || !hasOrder(rest, oid) {
 		t.Fatalf("REST 按金库读挂单: %v %v", rest, err)
 	}
 	o2 := o
@@ -505,7 +505,7 @@ func bestInside(t *testing.T, ctx context.Context, c *Client, m *Market, side de
 	}
 	switch {
 	case len(book.Bids) == 0 && len(book.Asks) == 0:
-		mk, err := c.Market(ctx, m.Symbol)
+		mk, err := c.Market(ctx, m.Symbol, m.Kind)
 		if err != nil || mk.MarkPrice == nil {
 			t.Fatalf("读标记价: %v", err)
 		}

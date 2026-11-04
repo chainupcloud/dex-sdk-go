@@ -181,7 +181,7 @@ func (w *ActionWriter) SignCancelAt(m *Market, nonce uint64, orderIDs []uint64, 
 	}
 	items := make([]wireCancelReq, len(orderIDs))
 	for i, seq := range orderIDs {
-		items[i] = wireCancelReq{envelope: env, Symbol: m.Symbol, OrderID: strconv.FormatUint(seq, 10)}
+		items[i] = cancelItem(env, m, seq)
 	}
 	body, err := json.Marshal(items)
 	if err != nil {
@@ -251,7 +251,8 @@ func (c *Client) SendCancel(ctx context.Context, a *SignedAction) (*BatchResult,
 	if err != nil {
 		return nil, err
 	}
-	return &BatchResult{Receipt: r, Items: []BatchItem{{Kind: "cancel", Index: 0, Status: "canceled", Symbol: a.Market.Symbol, OrderID: &seq, CanceledLots: one.RemainingLots}}}, nil
+	return &BatchResult{Receipt: r, Items: []BatchItem{{Kind: "cancel", Index: 0, Status: "canceled", Symbol: a.Market.Symbol,
+		SigningMarketID: a.Market.SigningMarketID, OrderID: &seq, CanceledLots: one.RemainingLots}}}, nil
 }
 
 func (c *Client) sendAction(ctx context.Context, a *SignedAction) (Receipt, []byte, error) {

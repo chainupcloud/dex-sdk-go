@@ -250,14 +250,14 @@ func (s *Session) exec(ctx context.Context, nonce uint64, cmd []byte, path strin
 
 func nowMs() uint64 { return uint64(time.Now().UnixMilli()) }
 
-// sameMarket 批量里每张单必须在 m 上(v1 的批量回执按一个符号核对)。
+// sameMarket 批量里每张单必须在 m 上(v1 的批量回执按一个市场核对)。按市场号比:合约与现货可以同名(dex-os#318)。
 func sameMarket(m *Market, orders []OrderRequest) error {
 	if m == nil {
 		return errors.New("dexosv1: 缺市场")
 	}
 	for i, o := range orders {
-		if o.Market == nil || o.Market.Symbol != m.Symbol {
-			return fmt.Errorf("dexosv1: 第 %d 张单不在 %s 上", i, m.Symbol)
+		if o.Market == nil || o.Market.SigningMarketID != m.SigningMarketID || !strings.EqualFold(o.Market.Symbol, m.Symbol) {
+			return fmt.Errorf("dexosv1: 第 %d 张单不在 %s(%s,市场 %d)上", i, m.Symbol, m.Kind, m.SigningMarketID)
 		}
 	}
 	return nil
@@ -309,7 +309,12 @@ func (s *Session) Place(ctx context.Context, orders ...OrderRequest) (*BatchResu
 type wireCancelReq struct {
 	*envelope
 	Symbol  string `json:"symbol"`
+	Kind    string `json:"kind,omitempty"`
 	OrderID string `json:"orderId"`
+}
+
+func cancelItem(env *envelope, m *Market, orderID uint64) wireCancelReq {
+	return wireCancelReq{envelope: env, Symbol: m.Symbol, Kind: m.Kind, OrderID: strconv.FormatUint(orderID, 10)}
 }
 
 // Cancel 在一个市场上批量撤单(orderIDs 是 v1 的 orderId,即订单序号)。逐项尽力而为:撤不到的项 rejected。
@@ -326,7 +331,7 @@ func (s *Session) Cancel(ctx context.Context, m *Market, orderIDs ...uint64) (*B
 		id, status, raw, err := s.exec(ctx, nonce, dexos.EncodeBatchCancel(s.signingID, ids), "/v1/orders/cancel", func(env *envelope) any {
 			body := make([]wireCancelReq, len(orderIDs))
 			for i, seq := range orderIDs {
-				body[i] = wireCancelReq{envelope: env, Symbol: m.Symbol, OrderID: strconv.FormatUint(seq, 10)}
+				body[i] = cancelItem(env, m, seq)
 			}
 			return body
 		})
@@ -346,6 +351,7 @@ func (s *Session) Cancel(ctx context.Context, m *Market, orderIDs ...uint64) (*B
 type wireReplaceReq struct {
 	*envelope
 	Symbol  string   `json:"symbol"`
+	Kind    string   `json:"kind,omitempty"`
 	Cancels []string `json:"cancels"`
 	// 没有改单项时不出现,请求体与没有改单能力之前一字不差
 	Modifies []wireModifyReq `json:"modifies,omitempty"`
@@ -416,7 +422,7 @@ func (p *replaceParts) command(account uint32, now uint64) []byte {
 }
 
 func (p *replaceParts) body(env *envelope, m *Market) wireReplaceReq {
-	return wireReplaceReq{envelope: env, Symbol: m.Symbol, Cancels: p.wireCancels, Modifies: p.modifies, Orders: p.items}
+	return wireReplaceReq{envelope: env, Symbol: m.Symbol, Kind: m.Kind, Cancels: p.wireCancels, Modifies: p.modifies, Orders: p.items}
 }
 
 // Replace **原子换单**:撤旧挂新落在同一个状态机转移里,没有无报价的中间窗口。做市刷新报价用它。
@@ -611,7 +617,7 @@ func (w *Wallet) Cancel(ctx context.Context, m *Market, orderID uint64) (*Cancel
 		if err != nil {
 			return id, err
 		}
-		status, raw, err := w.Client.post(ctx, "/v1/orders/cancel", wireCancelReq{envelope: env, Symbol: m.Symbol, OrderID: strconv.FormatUint(orderID, 10)})
+		status, raw, err := w.Client.post(ctx, "/v1/orders/cancel", cancelItem(env, m, orderID))
 		if err != nil {
 			return id, err
 		}
@@ -628,14 +634,15 @@ func (w *Wallet) Cancel(ctx context.Context, m *Market, orderID uint64) (*Cancel
 func cancelResult(m *Market, r Receipt, raw []byte, orderID uint64) (*CancelResult, error) {
 	var wr struct {
 		Symbol    string  `json:"symbol"`
+		Kind      string  `json:"kind"`
 		OrderID   string  `json:"orderId"`
 		Remaining *string `json:"remaining"`
 	}
 	if err := decodeInto(raw, &wr, "撤单回执"); err != nil {
 		return nil, err
 	}
-	if !strings.EqualFold(wr.Symbol, m.Symbol) || wr.OrderID != strconv.FormatUint(orderID, 10) {
-		return nil, fmt.Errorf("dexosv1: 撤 %s/%d,回执是 %s/%s", m.Symbol, orderID, wr.Symbol, wr.OrderID)
+	if !sameMarketRow(m, wr.Symbol, wr.Kind) || wr.OrderID != strconv.FormatUint(orderID, 10) {
+		return nil, fmt.Errorf("dexosv1: 撤 %s(%s)/%d,回执是 %s(%s)/%s", m.Symbol, m.Kind, orderID, wr.Symbol, wr.Kind, wr.OrderID)
 	}
 	out := &CancelResult{Receipt: r, OrderID: orderID}
 	if wr.Remaining != nil {
@@ -651,6 +658,7 @@ func cancelResult(m *Market, r Receipt, raw []byte, orderID uint64) (*CancelResu
 type wireLeverageReq struct {
 	*envelope
 	Symbol   string `json:"symbol"`
+	Kind     string `json:"kind,omitempty"`
 	Leverage uint32 `json:"leverage"`
 }
 
@@ -667,7 +675,7 @@ func (w *Wallet) SetLeverage(ctx context.Context, m *Market, leverage uint32) (*
 		if err != nil {
 			return id, err
 		}
-		status, raw, err := w.Client.post(ctx, "/v1/account/leverage", wireLeverageReq{envelope: env, Symbol: m.Symbol, Leverage: leverage})
+		status, raw, err := w.Client.post(ctx, "/v1/account/leverage", wireLeverageReq{envelope: env, Symbol: m.Symbol, Kind: m.Kind, Leverage: leverage})
 		if err != nil {
 			return id, err
 		}

@@ -202,7 +202,7 @@ func main() {
 
 	// ── 7. 挂单在金库主账户上,不在 manager 账户上 ──
 	has := func(ref dexosv1.AccountRef) (bool, error) {
-		open, err := c.Orders(ctx, cat, ref, m.Symbol)
+		open, err := c.Orders(ctx, cat, ref, m)
 		return slices.ContainsFunc(open, func(o dexosv1.Order) bool { return o.OrderID == id }), err
 	}
 	onVault, err := has(vaultRef)

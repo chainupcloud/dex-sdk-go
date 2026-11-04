@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"sort"
 	"strconv"
-	"strings"
 )
 
 // ── 公共频道 ──
@@ -29,21 +28,33 @@ func (st *Stream) SubscribePrices(fn func(*Prices)) (*Subscription, error) {
 	return st.add(sub)
 }
 
-// SubscribeBook 盘口(`book`):每帧都是前 depth 档的整份盘口(块边界合并,变了才推)。depth 0 = 服务端缺省 20,上限 100。
-// 同一个市场只能有一个盘口订阅(帧按符号路由)。
-func (st *Stream) SubscribeBook(symbol string, depth int, fn func(*Book)) (*Subscription, error) {
-	m, err := st.catalog().Market(symbol)
-	if err != nil {
-		return nil, err
+// marketSub 公共市场频道(book / bbo / trades)订阅的公共部分:参数带 symbol 与 kind(合约与现货同名时 kind 必填,
+// dex-os#318),帧按名称 + 类型路由。
+func marketSub(channel string, m *Market, snapshot bool) (*Subscription, error) {
+	if m == nil {
+		return nil, fmt.Errorf("dexosv1: %s 订阅缺市场", channel)
 	}
+	params := map[string]any{"channel": channel, "symbol": m.Symbol}
+	if m.Kind != "" {
+		params["kind"] = m.Kind
+	}
+	return &Subscription{channel: channel, route: marketRoute(channel, m.Symbol, m.Kind), snapshot: snapshot, params: params}, nil
+}
+
+// SubscribeBook 市场 m 的盘口(`book`):每帧都是前 depth 档的整份盘口(块边界合并,变了才推)。depth 0 = 服务端缺省 20,上限 100。
+// 同一个市场只能有一个盘口订阅(帧按名称 + 类型路由)。m 从目录取([Catalog.Market] / [Catalog.Lookup] / [Catalog.MarketByID]),
+// 价量按它的 Scale 换算。
+func (st *Stream) SubscribeBook(m *Market, depth int, fn func(*Book)) (*Subscription, error) {
 	if depth < 0 || depth > 100 {
 		return nil, fmt.Errorf("dexosv1: 盘口档数 %d 不在 1..=100(0 = 缺省)", depth)
 	}
-	params := map[string]any{"channel": "book", "symbol": m.Symbol}
-	if depth > 0 {
-		params["depth"] = depth
+	sub, err := marketSub("book", m, true)
+	if err != nil {
+		return nil, err
 	}
-	sub := &Subscription{channel: "book", route: "book:" + strings.ToUpper(m.Symbol), snapshot: true, params: params}
+	if depth > 0 {
+		sub.params["depth"] = depth
+	}
 	sub.apply = func(f *wsFrame) error {
 		var w wireBook
 		if err := json.Unmarshal(f.Data, &w); err != nil {
@@ -59,22 +70,21 @@ func (st *Stream) SubscribeBook(symbol string, depth int, fn func(*Book)) (*Subs
 	return st.add(sub)
 }
 
-// BBO 最优一档。Bid / Ask nil = 那一侧没有挂单。
+// BBO 最优一档。Bid / Ask nil = 那一侧没有挂单。Kind 是订阅的市场的类型。
 type BBO struct {
 	Symbol string
+	Kind   string
 	Bid    *Level
 	Ask    *Level
 	TS     int64
 }
 
-// SubscribeBBO 最优一档(`bbo`),最优价或量变了才推。
-func (st *Stream) SubscribeBBO(symbol string, fn func(BBO)) (*Subscription, error) {
-	m, err := st.catalog().Market(symbol)
+// SubscribeBBO 市场 m 的最优一档(`bbo`),最优价或量变了才推。
+func (st *Stream) SubscribeBBO(m *Market, fn func(BBO)) (*Subscription, error) {
+	sub, err := marketSub("bbo", m, true)
 	if err != nil {
 		return nil, err
 	}
-	sub := &Subscription{channel: "bbo", route: "bbo:" + strings.ToUpper(m.Symbol), snapshot: true,
-		params: map[string]any{"channel": "bbo", "symbol": m.Symbol}}
 	sub.apply = func(f *wsFrame) error {
 		var w struct {
 			Symbol string     `json:"symbol"`
@@ -85,7 +95,7 @@ func (st *Stream) SubscribeBBO(symbol string, fn func(BBO)) (*Subscription, erro
 		if err := json.Unmarshal(f.Data, &w); err != nil {
 			return fmt.Errorf("dexosv1: bbo 帧解析失败: %w", err)
 		}
-		out := BBO{Symbol: w.Symbol, TS: w.TS}
+		out := BBO{Symbol: w.Symbol, Kind: m.Kind, TS: w.TS}
 		for _, side := range []struct {
 			in  *[2]string
 			out **Level
@@ -105,24 +115,23 @@ func (st *Stream) SubscribeBBO(symbol string, fn func(BBO)) (*Subscription, erro
 	return st.add(sub)
 }
 
-// Trade 一笔公共成交。Side 是吃单方向;ID 与 `GET /v1/markets/{symbol}/trades` 的 id 相同。
+// Trade 一笔公共成交。Side 是吃单方向;ID 与 `GET /v1/markets/{symbol}/trades` 的 id 相同。Kind 是订阅的市场的类型。
 type Trade struct {
 	ID     string
 	Symbol string
+	Kind   string
 	Side   string
 	Price  uint32
 	Lots   uint64
 	TS     int64
 }
 
-// SubscribeTrades 公共成交(`trades`),逐笔推。断线 / 丢帧时缺的帧不补,以 [*TradesGapError] 报出。
-func (st *Stream) SubscribeTrades(symbol string, fn func(Trade)) (*Subscription, error) {
-	m, err := st.catalog().Market(symbol)
+// SubscribeTrades 市场 m 的公共成交(`trades`),逐笔推。断线 / 丢帧时缺的帧不补,以 [*TradesGapError] 报出。
+func (st *Stream) SubscribeTrades(m *Market, fn func(Trade)) (*Subscription, error) {
+	sub, err := marketSub("trades", m, false)
 	if err != nil {
 		return nil, err
 	}
-	sub := &Subscription{channel: "trades", route: "trades:" + strings.ToUpper(m.Symbol),
-		params: map[string]any{"channel": "trades", "symbol": m.Symbol}}
 	sub.apply = func(f *wsFrame) error {
 		var w struct {
 			ID     string `json:"id"`
@@ -135,7 +144,8 @@ func (st *Stream) SubscribeTrades(symbol string, fn func(Trade)) (*Subscription,
 		if err := json.Unmarshal(f.Data, &w); err != nil {
 			return fmt.Errorf("dexosv1: trades 帧解析失败: %w", err)
 		}
-		t := Trade{ID: w.ID, Symbol: w.Symbol, Side: w.Side, TS: w.TS}
+		t := Trade{ID: w.ID, Symbol: w.Symbol, Kind: m.Kind, Side: w.Side, TS: w.TS}
+		var err error
 		if t.Price, err = m.Scale.Ticks(w.Price); err != nil {
 			return fmt.Errorf("dexosv1: 成交 %s price: %w", w.ID, err)
 		}
@@ -197,6 +207,9 @@ type OrderEvent struct {
 	OrderID       uint64
 	ClientOrderID *string
 	Symbol        string
+	// MarketKind / SigningMarketID 这张单所在的目录市场(按名称 + 类型对,见 [Catalog];Kind 是事件种类,不是市场类型)。
+	MarketKind      string
+	SigningMarketID uint16
 	// Status 本条命令结束时这张单的状态:"open" | "filled" | "canceled" | "expired"(吃单成交帧与它的
 	// accepted 帧相同;协议代下的单 OrderID 为 0、"filled")。
 	Status string
@@ -225,6 +238,7 @@ type wireOrderEvent struct {
 	OrderID       string  `json:"orderId"`
 	ClientOrderID *string `json:"clientOrderId"`
 	Symbol        string  `json:"symbol"`
+	MarketKind    string  `json:"kind"`
 	Event         string  `json:"event"`
 	Status        *string `json:"status"`
 	Side          *string `json:"side"`
@@ -301,7 +315,7 @@ func (st *Stream) SubscribeOrders(ref AccountRef, fn func(OrdersUpdate)) (*Subsc
 }
 
 func (w wireOrderEvent) event(cat *Catalog) (*OrderEvent, error) {
-	m, err := cat.Market(w.Symbol)
+	m, err := cat.lookup(w.Symbol, w.MarketKind)
 	if err != nil {
 		return nil, err
 	}
@@ -309,7 +323,8 @@ func (w wireOrderEvent) event(cat *Catalog) (*OrderEvent, error) {
 	if w.Status == nil || w.Remaining == nil {
 		return nil, fmt.Errorf("dexosv1: orders %s 帧 %s 缺 status / remaining", w.Event, w.OrderID)
 	}
-	ev := &OrderEvent{Kind: w.Event, ClientOrderID: w.ClientOrderID, Symbol: w.Symbol, Status: *w.Status, TS: w.TS}
+	ev := &OrderEvent{Kind: w.Event, ClientOrderID: w.ClientOrderID, Symbol: w.Symbol, MarketKind: m.Kind, SigningMarketID: m.SigningMarketID,
+		Status: *w.Status, TS: w.TS}
 	if ev.OrderID, err = strconv.ParseUint(w.OrderID, 10, 64); err != nil {
 		return nil, fmt.Errorf("dexosv1: orders 帧 orderId %q: %w", w.OrderID, err)
 	}
@@ -368,8 +383,9 @@ func applyOrderEvent(open map[uint64]Order, ev *OrderEvent) error {
 		return nil
 	}
 	if ev.Kind == "accepted" {
-		open[ev.OrderID] = Order{OrderID: ev.OrderID, ClientOrderID: ev.ClientOrderID, Symbol: ev.Symbol, Side: ev.Side,
-			Price: ev.Price, Lots: ev.Lots, FilledLots: ev.FilledLots, RemainingLots: ev.RemainingLots, Status: "open"}
+		open[ev.OrderID] = Order{OrderID: ev.OrderID, ClientOrderID: ev.ClientOrderID, Symbol: ev.Symbol, Kind: ev.MarketKind,
+			SigningMarketID: ev.SigningMarketID, Side: ev.Side, Price: ev.Price, Lots: ev.Lots, FilledLots: ev.FilledLots,
+			RemainingLots: ev.RemainingLots, Status: "open"}
 		return nil
 	}
 	o, ok := open[ev.OrderID]

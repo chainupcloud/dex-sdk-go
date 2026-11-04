@@ -114,9 +114,9 @@ func TestContractStream(t *testing.T) {
 		}
 		subs = append(subs, s)
 	}
-	must(st.SubscribeBook(m.Symbol, 10, func(b *Book) { put(books, b) }))
-	must(st.SubscribeBBO(m.Symbol, func(b BBO) { put(bbos, b) }))
-	must(st.SubscribeTrades(m.Symbol, func(tr Trade) { put(trades, tr) }))
+	must(st.SubscribeBook(m, 10, func(b *Book) { put(books, b) }))
+	must(st.SubscribeBBO(m, func(b BBO) { put(bbos, b) }))
+	must(st.SubscribeTrades(m, func(tr Trade) { put(trades, tr) }))
 	must(st.SubscribePrices(func(p *Prices) { put(prices, p) }))
 	must(st.SubscribeAccount(mw.Account, func(a *Account) { put(accounts, a) }))
 	must(st.SubscribePositions(mw.Account, func(p []Position) { put(positions, p) }))
@@ -283,7 +283,7 @@ func unwind(t *testing.T, c *Client, m *Market, mw, tw *Wallet, lots uint64) {
 		t.Errorf("平仓读盘口: %v", err)
 		return
 	}
-	mk, err := c.Market(ctx, m.Symbol)
+	mk, err := c.Market(ctx, m.Symbol, m.Kind)
 	if err != nil {
 		t.Errorf("平仓读标记价: %v", err)
 		return

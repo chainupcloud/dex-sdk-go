@@ -55,7 +55,7 @@ func main() {
 	}
 	fmt.Printf("%s 挂买 %s × %s → 订单 %d\n", m.Symbol, m.Scale.Price(price), m.Scale.Size(lots), *it.OrderID)
 
-	open, err := c.Orders(ctx, cat, ref, m.Symbol)
+	open, err := c.Orders(ctx, cat, ref, m)
 	must(err, "读挂单")
 	fmt.Printf("%s 在挂 %d 张\n", m.Symbol, len(open))
 

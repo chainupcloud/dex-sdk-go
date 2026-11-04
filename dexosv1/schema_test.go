@@ -324,7 +324,7 @@ func TestFixturesConformToPinnedSpec(t *testing.T) {
 	}
 }
 
-// 本包解码用到的 json 字段都必须是规格里有的属性。
+// 本包解码用到的 json 字段都必须是规格里有的属性,specDeviations 除外。
 func TestDecodedFieldsExistInPinnedSpec(t *testing.T) {
 	spec := loadSpec(t)
 	props := func(s map[string]any) map[string]any { return obj(deref(spec, s)["properties"]) }
@@ -391,19 +391,31 @@ func TestDecodedFieldsExistInPinnedSpec(t *testing.T) {
 		if c.props == nil {
 			t.Fatalf("%s: 规格里找不到属性表", c.name)
 		}
-		var missing []string
+		allowed := map[string]bool{}
+		for _, f := range specDeviations[c.name] {
+			allowed[f] = true
+		}
+		var missing, stale []string
 		for i := range c.typ.NumField() {
 			tag, _, _ := strings.Cut(c.typ.Field(i).Tag.Get("json"), ",")
 			if tag == "" || tag == "-" {
 				continue
 			}
-			if _, ok := c.props[tag]; !ok {
+			_, inSpec := c.props[tag]
+			switch {
+			case !inSpec && !allowed[tag]:
 				missing = append(missing, tag)
+			case inSpec && allowed[tag]:
+				stale = append(stale, tag)
 			}
 		}
 		sort.Strings(missing)
+		sort.Strings(stale)
 		if len(missing) > 0 {
 			t.Errorf("%s 读了规格里没有的字段: %v", c.name, missing)
+		}
+		if len(stale) > 0 {
+			t.Errorf("%s: 规格已经有了 %v,从 specDeviations 里删掉", c.name, stale)
 		}
 	}
 }

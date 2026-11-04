@@ -131,11 +131,11 @@ func TestContractReadOnly(t *testing.T) {
 		t.Fatalf("Positions: %v", err)
 	}
 	conforms("/v1/account/positions", q, "/v1/account/positions")
-	if _, err := c.Orders(ctx, cat, ref, ""); err != nil {
+	if _, err := c.Orders(ctx, cat, ref, nil); err != nil {
 		t.Fatalf("Orders: %v", err)
 	}
 	conforms("/v1/account/orders", q, "/v1/account/orders")
-	if _, err := c.Fills(ctx, cat, ref, "", HistoryQuery{PageSize: 3, Limit: 3}); err != nil {
+	if _, err := c.Fills(ctx, cat, ref, nil, HistoryQuery{PageSize: 3, Limit: 3}); err != nil {
 		t.Fatalf("Fills: %v", err)
 	}
 	small := cloneValues(q)

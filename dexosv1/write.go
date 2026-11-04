@@ -103,7 +103,9 @@ type envelope struct {
 // 换单里的新单不带(*envelope 为 nil 时整组字段不出现)。
 type wireOrderReq struct {
 	*envelope
-	Symbol        string `json:"symbol"`
+	Symbol string `json:"symbol"`
+	// Kind 合约与现货同名时必填(dex-os#318);本包每项都带,换单里的新单也带(网关按各项自己的 symbol + kind 定位)。
+	Kind          string `json:"kind,omitempty"`
 	Side          string `json:"side"`
 	Type          string `json:"type"`
 	Price         string `json:"price"`
@@ -155,6 +157,7 @@ func (o OrderRequest) wire(env *envelope) (wireOrderReq, error) {
 	return wireOrderReq{
 		envelope:      env,
 		Symbol:        o.Market.Symbol,
+		Kind:          o.Market.Kind,
 		Side:          o.Side.String(),
 		Type:          "limit",
 		Price:         o.Market.Scale.Price(o.Price),
@@ -364,6 +367,8 @@ type OrderResult struct {
 	OrderID       uint64
 	ClientOrderID *string
 	Symbol        string
+	// Kind 下单市场的类型(回执带了 kind 就已核对过与请求的市场一致)。
+	Kind string
 	// Status resting | partiallyFilled | filled | canceled(IOC / FOK 未成部分被撤)。
 	Status     string
 	Price      uint32
@@ -377,6 +382,7 @@ type OrderResult struct {
 type wireOrderResult struct {
 	Status        string            `json:"status"`
 	Symbol        string            `json:"symbol"`
+	Kind          string            `json:"kind"`
 	OrderID       string            `json:"orderId"`
 	ClientOrderID *string           `json:"clientOrderId"`
 	Price         string            `json:"price"`
@@ -391,10 +397,10 @@ func orderResult(m *Market, r Receipt, raw []byte) (*OrderResult, error) {
 	if err := json.Unmarshal(raw, &w); err != nil {
 		return nil, fmt.Errorf("dexosv1: 下单回执解析失败: %w", err)
 	}
-	if !strings.EqualFold(w.Symbol, m.Symbol) {
-		return nil, fmt.Errorf("dexosv1: 在 %s 下单,回执是 %q", m.Symbol, w.Symbol)
+	if !sameMarketRow(m, w.Symbol, w.Kind) {
+		return nil, fmt.Errorf("dexosv1: 在 %s(%s)下单,回执是 %q(%s)", m.Symbol, m.Kind, w.Symbol, w.Kind)
 	}
-	o := &OrderResult{Receipt: r, ClientOrderID: w.ClientOrderID, Symbol: w.Symbol, Status: w.Status}
+	o := &OrderResult{Receipt: r, ClientOrderID: w.ClientOrderID, Symbol: w.Symbol, Kind: m.Kind, Status: w.Status}
 	var err error
 	if o.OrderID, err = strconv.ParseUint(w.OrderID, 10, 64); err != nil {
 		return nil, fmt.Errorf("dexosv1: 下单回执 orderId %q: %w", w.OrderID, err)
@@ -429,6 +435,8 @@ type BatchItem struct {
 	// Status place / modify → accepted | rejected;cancel → canceled | rejected。
 	Status string
 	Symbol string
+	// SigningMarketID 这一项的市场号(批量只在一个市场上;回执带了 signingMarketId 就已核对过,dex-os#318)。
+	SigningMarketID uint16
 	// OrderID 下单 / 改单成功时是新单号;撤单项是被撤(或撤不到)的单号。
 	OrderID *uint64
 	// ReplacedOrderID 改单项要改的旧单号。
@@ -459,6 +467,7 @@ type wireBatchItem struct {
 	Kind          string            `json:"kind"`
 	Status        string            `json:"status"`
 	Symbol        string            `json:"symbol"`
+	Market        *uint16           `json:"signingMarketId"`
 	OrderID       *string           `json:"orderId"`
 	Replaced      *string           `json:"replacedOrderId"`
 	Code          string            `json:"code"`
@@ -470,7 +479,8 @@ type wireBatchItem struct {
 	Fills         []wireReceiptFill `json:"fills"`
 }
 
-// batchResult 解析并核对逐项结局:每个 (kind, index) 恰好一项,项数与请求相同,符号是本市场。
+// batchResult 解析并核对逐项结局:每个 (kind, index) 恰好一项,项数与请求相同,符号与市场号是本市场
+// (项上的 kind 是项的种类,市场按 signingMarketId 核;dex-os#318 之前的节点不给它,只核符号)。
 func batchResult(m *Market, r Receipt, raw []byte, places, cancels, modifies int) (*BatchResult, error) {
 	var w struct {
 		Items []wireBatchItem `json:"items"`
@@ -490,8 +500,8 @@ func batchResult(m *Market, r Receipt, raw []byte, places, cancels, modifies int
 			return nil, fmt.Errorf("%w: %s 出现两次", ErrIncompleteBatch, key)
 		}
 		seen[key] = true
-		if !strings.EqualFold(wi.Symbol, m.Symbol) {
-			return nil, fmt.Errorf("%w: %s 的符号是 %q,请求的是 %s", ErrIncompleteBatch, key, wi.Symbol, m.Symbol)
+		if !strings.EqualFold(wi.Symbol, m.Symbol) || (wi.Market != nil && *wi.Market != m.SigningMarketID) {
+			return nil, fmt.Errorf("%w: %s 的市场是 %q(%v),请求的是 %s(%d)", ErrIncompleteBatch, key, wi.Symbol, optU16(wi.Market), m.Symbol, m.SigningMarketID)
 		}
 		it, err := wi.item(m)
 		if err != nil {
@@ -505,8 +515,16 @@ func batchResult(m *Market, r Receipt, raw []byte, places, cancels, modifies int
 	return out, nil
 }
 
+// optU16 可空数字的展示形式(nil = 没给)。
+func optU16(v *uint16) string {
+	if v == nil {
+		return "-"
+	}
+	return strconv.FormatUint(uint64(*v), 10)
+}
+
 func (w wireBatchItem) item(m *Market) (BatchItem, error) {
-	it := BatchItem{Kind: w.Kind, Index: *w.Index, Status: w.Status, Symbol: w.Symbol, Code: w.Code,
+	it := BatchItem{Kind: w.Kind, Index: *w.Index, Status: w.Status, Symbol: w.Symbol, SigningMarketID: m.SigningMarketID, Code: w.Code,
 		Resting: w.Resting, ClientOrderID: w.ClientOrderID}
 	switch {
 	case w.Status == "rejected" && w.Code == "":

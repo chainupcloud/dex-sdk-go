@@ -3,6 +3,7 @@ package dexosv1
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/url"
 	"strconv"
@@ -67,9 +68,10 @@ type RiskGroup struct {
 	Withdrawable    string `json:"withdrawable"`
 }
 
-// MarketLeverage 一个市场上设过的杠杆倍数。
+// MarketLeverage 一个市场上设过的杠杆倍数。Kind 是市场类型(合约与现货可以同名);"" = dex-os#318 之前的节点没给。
 type MarketLeverage struct {
 	Symbol   string `json:"symbol"`
+	Kind     string `json:"kind"`
 	Leverage int    `json:"leverage"`
 }
 
@@ -81,8 +83,10 @@ type AccountFees struct {
 }
 
 // AccountMarketFees 一个市场的实收费率,十进制、名义额的比例,负数是返佣 / 补贴;Rate 是各腿之和。
+// Kind 是市场类型(合约与现货可以同名);"" = dex-os#318 之前的节点没给。
 type AccountMarketFees struct {
 	Symbol string        `json:"symbol"`
+	Kind   string        `json:"kind"`
 	Maker  MakerFeeRates `json:"maker"`
 	Taker  TakerFeeRates `json:"taker"`
 	Source FeeSource     `json:"source"`
@@ -124,23 +128,25 @@ func (c *Client) Account(ctx context.Context, ref AccountRef) (*Account, error) 
 	return decodeAccount(raw, "/v1/account")
 }
 
-// AccountFeesIn 本账户在 symbol 市场实际被收的费率(`GET /v1/account?symbol=` 的 fees)。应答里没有恰好这一个市场即报错。
-func (c *Client) AccountFeesIn(ctx context.Context, ref AccountRef, symbol string) (*AccountMarketFees, error) {
+// AccountFeesIn 本账户在市场 m 上实际被收的费率(`GET /v1/account?symbol=&kind=` 的 fees)。应答里没有恰好这一个市场即报错。
+func (c *Client) AccountFeesIn(ctx context.Context, ref AccountRef, m *Market) (*AccountMarketFees, error) {
+	if m == nil {
+		return nil, errors.New("dexosv1: 缺市场")
+	}
 	q, err := ref.values()
 	if err != nil {
 		return nil, err
 	}
-	q.Set("symbol", symbol)
 	var raw json.RawMessage
-	if err := c.get(ctx, "/v1/account", q, accountRead, &raw); err != nil {
+	if err := c.get(ctx, "/v1/account", marketQuery(q, m, true), accountRead, &raw); err != nil {
 		return nil, err
 	}
 	a, err := decodeAccount(raw, "/v1/account")
 	if err != nil {
 		return nil, err
 	}
-	if len(a.Fees.Markets) != 1 || !strings.EqualFold(a.Fees.Markets[0].Symbol, symbol) {
-		return nil, fmt.Errorf("dexosv1: /v1/account?symbol=%s 的费率应只有这一个市场: %+v", symbol, a.Fees.Markets)
+	if len(a.Fees.Markets) != 1 || !sameMarketRow(m, a.Fees.Markets[0].Symbol, a.Fees.Markets[0].Kind) {
+		return nil, fmt.Errorf("dexosv1: /v1/account?symbol=%s&kind=%s 的费率应只有这一个市场: %+v", m.Symbol, m.Kind, a.Fees.Markets)
 	}
 	return &a.Fees.Markets[0], nil
 }
@@ -164,18 +170,22 @@ func decodeAccount(raw json.RawMessage, where string) (*Account, error) {
 // Position 一个持仓。Lots 带符号:多为正、空为负(同 Hyperliquid 的 szi),与 Side 一致;MarkPrice 是 tick。
 // 开仓均价是派生的平均值,未必落在 tick 上,保持十进制字符串。
 type Position struct {
-	Symbol        string
-	Side          string // "long" | "short"
-	Lots          int64
-	EntryPrice    string
-	MarkPrice     uint32
-	Notional      string // USDC
-	UnrealizedPnl string // USDC,带符号
-	FundingIndex  string
+	Symbol string
+	// Kind / SigningMarketID 这一行对到的目录市场(按名称 + 类型对,见 [Catalog])。
+	Kind            string
+	SigningMarketID uint16
+	Side            string // "long" | "short"
+	Lots            int64
+	EntryPrice      string
+	MarkPrice       uint32
+	Notional        string // USDC
+	UnrealizedPnl   string // USDC,带符号
+	FundingIndex    string
 }
 
 type wirePosition struct {
 	Symbol        string `json:"symbol"`
+	Kind          string `json:"kind"`
 	Side          string `json:"side"`
 	Size          string `json:"size"`
 	EntryPrice    string `json:"entryPrice"`
@@ -203,12 +213,12 @@ func (c *Client) Positions(ctx context.Context, cat *Catalog, ref AccountRef) ([
 func positionsFrom(cat *Catalog, in []wirePosition) ([]Position, error) {
 	out := make([]Position, 0, len(in))
 	for _, w := range in {
-		m, err := cat.rowMarket(w.Symbol)
+		m, err := cat.rowMarket(w.Symbol, w.Kind)
 		if err != nil {
 			return nil, err
 		}
-		p := Position{Symbol: w.Symbol, Side: w.Side, EntryPrice: w.EntryPrice, Notional: w.Notional,
-			UnrealizedPnl: w.UnrealizedPnl, FundingIndex: w.FundingIndex}
+		p := Position{Symbol: w.Symbol, Kind: m.Kind, SigningMarketID: m.SigningMarketID, Side: w.Side, EntryPrice: w.EntryPrice,
+			Notional: w.Notional, UnrealizedPnl: w.UnrealizedPnl, FundingIndex: w.FundingIndex}
 		if p.Lots, err = m.Scale.signedLots(w.Size); err != nil {
 			return nil, fmt.Errorf("dexosv1: 持仓 %s size: %w", w.Symbol, err)
 		}
@@ -232,12 +242,15 @@ type Order struct {
 	// ClientOrderID nil = 没有(只有带 clientOrderId 且等结论下单的单才有映射)。
 	ClientOrderID *string
 	Symbol        string
-	Side          string // "buy" | "sell"
-	Price         uint32
-	Lots          uint64
-	FilledLots    uint64
-	RemainingLots uint64
-	Status        string
+	// Kind / SigningMarketID 这张单所在的目录市场(按名称 + 类型对,见 [Catalog])。
+	Kind            string
+	SigningMarketID uint16
+	Side            string // "buy" | "sell"
+	Price           uint32
+	Lots            uint64
+	FilledLots      uint64
+	RemainingLots   uint64
+	Status          string
 	// TIF "gtc" | "ioc" | "alo" | "fok",只有条件单有;nil = 在簿挂单(执行层不保留簿上单的 tif,`alo` 进簿后同 `gtc`)。
 	TIF *string
 	// ReduceOnly nil = 账户的挂单台账里没有这张单的记录。
@@ -259,6 +272,7 @@ type wireOrder struct {
 	OrderID       string  `json:"orderId"`
 	ClientOrderID *string `json:"clientOrderId"`
 	Symbol        string  `json:"symbol"`
+	Kind          string  `json:"kind"`
 	Side          string  `json:"side"`
 	Price         string  `json:"price"`
 	Size          string  `json:"size"`
@@ -277,14 +291,15 @@ type wireOrderTrigger struct {
 	PositionTpsl bool   `json:"positionTpsl"`
 }
 
-// Orders 账户的挂单(含待触发的条件单,按 Order.Trigger 区分);symbol 为空 = 全市场。
-func (c *Client) Orders(ctx context.Context, cat *Catalog, ref AccountRef, symbol string) ([]Order, error) {
+// Orders 账户的挂单(含待触发的条件单,按 Order.Trigger 区分);m 为 nil = 全市场,否则只要市场 m 上的
+// (`?symbol=&kind=`,合约与现货同名时也只是这一个市场)。
+func (c *Client) Orders(ctx context.Context, cat *Catalog, ref AccountRef, m *Market) ([]Order, error) {
 	q, err := ref.values()
 	if err != nil {
 		return nil, err
 	}
-	if symbol != "" {
-		q.Set("symbol", symbol)
+	if m != nil {
+		q = marketQuery(q, m, true)
 	}
 	var resp struct {
 		Orders []wireOrder `json:"orders"`
@@ -305,11 +320,12 @@ func (c *Client) Orders(ctx context.Context, cat *Catalog, ref AccountRef, symbo
 
 // order 挂单行(REST 响应与 WS `orders` 快照同形)换算成 tick / lot。
 func (w wireOrder) order(cat *Catalog) (Order, error) {
-	m, err := cat.rowMarket(w.Symbol)
+	m, err := cat.rowMarket(w.Symbol, w.Kind)
 	if err != nil {
 		return Order{}, err
 	}
-	o := Order{ClientOrderID: w.ClientOrderID, Symbol: w.Symbol, Side: w.Side, Status: w.Status, TIF: w.TIF, ReduceOnly: w.ReduceOnly}
+	o := Order{ClientOrderID: w.ClientOrderID, Symbol: w.Symbol, Kind: m.Kind, SigningMarketID: m.SigningMarketID, Side: w.Side,
+		Status: w.Status, TIF: w.TIF, ReduceOnly: w.ReduceOnly}
 	if o.OrderID, err = strconv.ParseUint(w.OrderID, 10, 64); err != nil {
 		return Order{}, fmt.Errorf("dexosv1: 挂单 orderId %q: %w", w.OrderID, err)
 	}
