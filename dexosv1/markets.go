@@ -78,6 +78,7 @@ type Market struct {
 	// cross = normal,isolated + false = noCross,isolated + true = strictIsolated。
 	StrictIsolated bool
 	Scale          Scale
+	TradingRules   *TradingRules
 	// QuotePerTickLot 每 tick × lot 折多少计价币原子单位:名义额(原子单位)= ticks × lots × QuotePerTickLot。
 	QuotePerTickLot uint64
 	// BaseToken / QuoteToken 现货的 base / quote token 号(与 [Token] 的 Token 同一编号),
@@ -118,29 +119,34 @@ type MarketFees struct {
 
 // wireMarket `components.schemas.Market` 的线上形状。
 type wireMarket struct {
-	Symbol          string      `json:"symbol"`
-	SigningMarketID uint16      `json:"signingMarketId"`
-	Kind            string      `json:"kind"`
-	Status          string      `json:"status"`
-	MarginMode      string      `json:"marginMode"`
-	StrictIsolated  bool        `json:"strictIsolated"`
-	PriceDecimals   uint8       `json:"priceDecimals"`
-	SizeDecimals    uint8       `json:"sizeDecimals"`
-	QuotePerTickLot string      `json:"quotePerTickLot"`
-	BaseToken       *uint32     `json:"baseToken"`
-	QuoteToken      *uint32     `json:"quoteToken"`
-	BasePerLot      *string     `json:"basePerLot"`
-	MinNotional     string      `json:"minNotional"`
-	MaxLeverage     *uint32     `json:"maxLeverage"`
-	LastPrice       string      `json:"lastPrice"`
-	OraclePrice     *string     `json:"oraclePrice"`
-	MarkPrice       *string     `json:"markPrice"`
-	BestBid         *string     `json:"bestBid"`
-	BestAsk         *string     `json:"bestAsk"`
-	OpenInterest    *string     `json:"openInterest"`
-	FundingRate     *string     `json:"fundingRate"`
-	Fees            *MarketFees `json:"fees"`
-	AggTicks        []uint64    `json:"aggTicks"`
+	rulesPresent        bool
+	Symbol              string      `json:"symbol"`
+	SigningMarketID     uint16      `json:"signingMarketId"`
+	Kind                string      `json:"kind"`
+	Status              string      `json:"status"`
+	MarginMode          string      `json:"marginMode"`
+	StrictIsolated      bool        `json:"strictIsolated"`
+	PriceDecimals       uint8       `json:"priceDecimals"`
+	SizeDecimals        uint8       `json:"sizeDecimals"`
+	QuotePerTickLot     string      `json:"quotePerTickLot"`
+	TickSize            *string     `json:"tickSize"`
+	SubticksPerTick     *uint32     `json:"subticksPerTick"`
+	TradingRulesVersion *string     `json:"tradingRulesVersion"`
+	TickChangePending   *bool       `json:"tickChangePending"`
+	BaseToken           *uint32     `json:"baseToken"`
+	QuoteToken          *uint32     `json:"quoteToken"`
+	BasePerLot          *string     `json:"basePerLot"`
+	MinNotional         string      `json:"minNotional"`
+	MaxLeverage         *uint32     `json:"maxLeverage"`
+	LastPrice           string      `json:"lastPrice"`
+	OraclePrice         *string     `json:"oraclePrice"`
+	MarkPrice           *string     `json:"markPrice"`
+	BestBid             *string     `json:"bestBid"`
+	BestAsk             *string     `json:"bestAsk"`
+	OpenInterest        *string     `json:"openInterest"`
+	FundingRate         *string     `json:"fundingRate"`
+	Fees                *MarketFees `json:"fees"`
+	AggTicks            []uint64    `json:"aggTicks"`
 }
 
 func (w wireMarket) market() (Market, error) {
@@ -166,6 +172,9 @@ func (w wireMarket) market() (Market, error) {
 	var err error
 	if m.QuotePerTickLot, err = strconv.ParseUint(w.QuotePerTickLot, 10, 64); err != nil {
 		return Market{}, fmt.Errorf("dexosv1: %s quotePerTickLot: %w", w.Symbol, err)
+	}
+	if m.TradingRules, err = w.tradingRules(m.Scale); err != nil {
+		return Market{}, fmt.Errorf("dexosv1: %s trading rules: %w", w.Symbol, err)
 	}
 	if w.BasePerLot != nil {
 		n, err := strconv.ParseUint(*w.BasePerLot, 10, 64)
