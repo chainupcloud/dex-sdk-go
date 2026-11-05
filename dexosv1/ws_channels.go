@@ -256,19 +256,54 @@ type wireOrderEvent struct {
 // remaining 时不猜,退订重订换一帧新快照(期间 Syncing)。服务端自己算不出某帧时会直接重发快照。
 // 待触发的条件单也在集合里(Order.Trigger 非 nil):它被下单、触发、拒绝、自动撤时服务端重发快照,被撤时推 canceled 帧。
 func (st *Stream) SubscribeOrders(ref AccountRef, fn func(OrdersUpdate)) (*Subscription, error) {
+	return st.subscribeOrders(ref, func(snapshot bool, ev *OrderEvent, open map[uint64]Order, seq uint64) {
+		fn(OrdersUpdate{Snapshot: snapshot, Event: ev, Open: sortedOrders(open), Seq: seq})
+	})
+}
+
+// OrderChange `orders` 订阅只交付变化的一次更新。快照:Snapshot 为真,Open 是全部在挂单(按 OrderID 升序),
+// Event 与 Order 为 nil。增量:Event 是这个事件,Order 是应用之后这张单的状态(已不在挂为 nil),Open 为 nil。
+// 每帧开销与在挂单总数无关,给在挂单多、事件密的账户自己维护集合用。
+type OrderChange struct {
+	Snapshot bool
+	Open     []Order
+	Event    *OrderEvent
+	Order    *Order
+	Seq      uint64
+}
+
+// SubscribeOrderChanges 与 [Stream.SubscribeOrders] 订同一个频道,快照、校验与对不上时重订都相同;
+// 只是增量帧不再附带全部在挂单,只给这一张单应用之后的状态。
+func (st *Stream) SubscribeOrderChanges(ref AccountRef, fn func(OrderChange)) (*Subscription, error) {
+	return st.subscribeOrders(ref, func(snapshot bool, ev *OrderEvent, open map[uint64]Order, seq uint64) {
+		if snapshot {
+			fn(OrderChange{Snapshot: true, Open: sortedOrders(open), Seq: seq})
+			return
+		}
+		c := OrderChange{Event: ev, Seq: seq}
+		if o, ok := open[ev.OrderID]; ok {
+			c.Order = &o
+		}
+		fn(c)
+	})
+}
+
+func sortedOrders(open map[uint64]Order) []Order {
+	list := make([]Order, 0, len(open))
+	for _, o := range open {
+		list = append(list, o)
+	}
+	sort.Slice(list, func(i, j int) bool { return list[i].OrderID < list[j].OrderID })
+	return list
+}
+
+func (st *Stream) subscribeOrders(ref AccountRef, emitTo func(snapshot bool, ev *OrderEvent, open map[uint64]Order, seq uint64)) (*Subscription, error) {
 	sub, err := accountSub("orders", ref, true)
 	if err != nil {
 		return nil, err
 	}
 	open := map[uint64]Order{}
-	emit := func(snapshot bool, ev *OrderEvent, seq uint64) {
-		list := make([]Order, 0, len(open))
-		for _, o := range open {
-			list = append(list, o)
-		}
-		sort.Slice(list, func(i, j int) bool { return list[i].OrderID < list[j].OrderID })
-		fn(OrdersUpdate{Snapshot: snapshot, Event: ev, Open: list, Seq: seq})
-	}
+	emit := func(snapshot bool, ev *OrderEvent, seq uint64) { emitTo(snapshot, ev, open, seq) }
 	sub.apply = func(f *wsFrame) error {
 		var seq uint64
 		if f.Seq != nil {
