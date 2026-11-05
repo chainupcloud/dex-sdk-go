@@ -332,6 +332,7 @@ res, err := s.ReplaceModify(ctx, btc, cancelIDs,
 ```go
 st, _ := dexosv1.NewStream(c, cat, dexosv1.StreamOptions{OnState: func(e dexosv1.StateEvent) { /* … */ }})
 st.SubscribeOrders(ref, func(u dexosv1.OrdersUpdate) { /* u.Open = 应用之后的全部在挂单 */ })
+st.SubscribeOrderChanges(ref, func(c dexosv1.OrderChange) { /* 快照给 c.Open;增量只给 c.Order(移除为 nil),每帧开销与挂单总数无关 */ })
 st.SubscribeFills(ref, cursor, func(f dexosv1.Fill) { /* 从游标起不缺不重 */ })
 go st.Run(ctx)
 ```

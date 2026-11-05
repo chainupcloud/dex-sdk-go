@@ -729,6 +729,58 @@ func TestStreamOrdersStateMachine(t *testing.T) {
 	quiet(t, ups, 30*time.Millisecond)
 }
 
+// 只交付变化的订阅:快照给全部在挂单,增量只给这一张单应用之后的状态(移除为 nil),对不上同样重订换快照。
+func TestStreamOrderChangesCarryOnlyTheChangedOrder(t *testing.T) {
+	h := newWSHarness(t, nil)
+	ups := make(chan OrderChange, 16)
+	sub, _ := h.st.SubscribeOrderChanges(h.ref, func(c OrderChange) { ups <- c })
+	h.run()
+	conn := h.fw.accept(t)
+	q := conn.subscribes(t, 1)["orders"]
+	conn.ack(t, q, testEpoch, 9)
+
+	conn.push(t, "orders", jsonObj(t, fixture(t, "orders.json"), nil), 11, testEpoch, true)
+	c := recv(t, ups)
+	if !c.Snapshot || c.Event != nil || c.Order != nil || len(c.Open) != 3 || c.Open[0].OrderID != 2240412712968 || c.Seq != 11 {
+		t.Fatalf("快照不对: %+v", c)
+	}
+	h.waitState(sub, StateLive)
+
+	conn.push(t, "orders", orderFrame(map[string]any{"orderId": "2240412712970", "clientOrderId": "mm-2", "event": "accepted", "status": "open",
+		"side": "sell", "price": "2495", "size": "1", "filled": "0.25", "remaining": "0.75"}), 12, testEpoch, false)
+	c = recv(t, ups)
+	if c.Snapshot || c.Open != nil || c.Event.Kind != "accepted" || c.Seq != 12 || c.Order == nil || c.Order.OrderID != 2240412712970 ||
+		c.Order.Price != 24950 || c.Order.Lots != 100 || c.Order.RemainingLots != 75 || c.Order.Side != "sell" {
+		t.Fatalf("accepted 只给这张单: %+v", c)
+	}
+	conn.push(t, "orders", orderFrame(map[string]any{"orderId": "2240412712968", "clientOrderId": "mm-1", "event": "fill", "fillId": "13-0-1",
+		"lastFilled": "0.1", "remaining": "0.3", "status": "open"}), 13, testEpoch, false)
+	if c = recv(t, ups); c.Open != nil || c.Order == nil || c.Order.RemainingLots != 30 || c.Order.FilledLots != 20 || c.Event.FillID != "13-0-1" {
+		t.Fatalf("maker 成交给更新后的这张单: %+v", c)
+	}
+	conn.push(t, "orders", orderFrame(map[string]any{"orderId": "2240412712969", "symbol": "BTC-USD", "event": "canceled", "status": "canceled",
+		"remaining": "0.002"}), 15, testEpoch, false)
+	if c = recv(t, ups); c.Open != nil || c.Order != nil || c.Event.OrderID != 2240412712969 {
+		t.Fatalf("撤单给 nil: %+v", c)
+	}
+	conn.push(t, "orders", orderFrame(map[string]any{"orderId": "999", "event": "fill", "fillId": "16-0-0", "lastFilled": "0.1",
+		"remaining": "0.1", "status": "open"}), 16, testEpoch, false)
+	if e := h.waitState(sub, StateSyncing); e.Err == nil {
+		t.Fatal("进 Syncing 要带原因")
+	}
+	if q := conn.next(t); q.Method != "unsubscribe" || q.Params["channel"] != "orders" {
+		t.Fatalf("要先退订: %+v", q)
+	}
+	q = conn.next(t)
+	conn.ack(t, q, testEpoch, 16)
+	conn.push(t, "orders", map[string]any{"address": testAddr, "subaccount": 0, "orders": []any{}}, 18, testEpoch, true)
+	if c = recv(t, ups); !c.Snapshot || len(c.Open) != 0 || c.Open == nil {
+		t.Fatalf("重订之后第一帧要是新快照: %+v", c)
+	}
+	h.waitState(sub, StateLive)
+	quiet(t, ups, 30*time.Millisecond)
+}
+
 // fills 补拉:确认帧之后补拉到它给的起点(历史没写到就等,期间到的帧先缓存);接上之后的帧直接交付;不缺不重。
 func TestStreamFillsBackfillAndDedup(t *testing.T) {
 	h := newWSHarness(t, nil)
