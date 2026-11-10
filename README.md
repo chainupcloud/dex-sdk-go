@@ -1,170 +1,153 @@
 # dex-sdk-go
 
-DEX-OS(永续合约 + 现货)交易所的 Go SDK。围绕 **API 钱包(代理钱包)** 设计 —— 主钱包授权一个
-派生密钥代为交易,该密钥**动不了钱**。
+**English** | [简体中文](README.zh-CN.md)
+
+Go SDK for the DEX-OS exchange (perpetuals + spot). It is built around the **API wallet (agent wallet)**: the master wallet authorizes a derived key to trade on its behalf, and that key **cannot move funds**.
 
 ```bash
 go get github.com/chainupcloud/dex-sdk-go
 ```
 
-| 包 | 是什么 |
+| Package | What it is |
 |---|---|
-| [`dexosv1`](dexosv1/doc.go) | **开放 API v1(`/v1/*`)客户端,新接入一律用它。** 市场按名称 + 类型(`BTC-USD` + `perp`)寻址,账户按主钱包地址 + 子账户序号(或金库号)寻址 |
-| [`dexos`](dexos/doc.go) | 签名([`Signer`](dexos/signer.go)、EIP-712 [`Domain`](dexos/eip712.go))、地址、规范命令编码、回执类型 —— `dexosv1` 建在它们上面。它的 HTTP 客户端(`Client`、`Session`、`Connect`、`Discover`)走 dex-os 的旧公开端点,dex-os 正在退役那些端点(`public-api-v1.md` §9),这几个入口已标 **Deprecated** |
+| [`dexosv1`](dexosv1/doc.go) | **Client for the open API v1 (`/v1/*`). Use it for all new integrations.** Markets are addressed by name + kind (`BTC-USD` + `perp`); accounts by master wallet address plus subaccount index (or vault ID) |
+| [`dexos`](dexos/doc.go) | Signing ([`Signer`](dexos/signer.go), EIP-712 [`Domain`](dexos/eip712.go)), addresses, canonical command encoding and receipt types. `dexosv1` is built on top of them. Its HTTP client (`Client`, `Session`, `Connect`, `Discover`) talks to dex-os's legacy public endpoints, which dex-os is retiring (`public-api-v1.md` §9); those entry points are marked **Deprecated** |
 
-## 示例与文档
+## Examples and docs
 
-| | 什么时候用 |
+| | When to use it |
 |---|---|
-| [`examples/session`](examples/session/main.go) | **最小接入**:URL + 一把 API 钱包私钥,挂单撤单 |
-| [`examples/onboard`](examples/onboard/main.go) | 从零接入:连接参数 → 地址 → 账户 →(可选)API 钱包交易 |
-| [`examples/quickstart`](examples/quickstart/main.go) | API 钱包完整生命周期(授权 → 批量下单 → 原子换单 → 断线保护 → 撤全部 → 撤销 → 反证),也是对着真节点的集成自检 |
-| [`examples/vault`](examples/vault/main.go) | **以金库身份交易**(测试栈:入金 → 建库 → manager 账户授权 API 钱包 → 金库身份会话 → 挂单 / 撤单);`GW=… ADMIN_TOKEN=… go run ./examples/vault -state <文件>` |
-| [`examples/wslatency`](examples/wslatency/main.go) | 实测「写回执 ↔ 推送收到」的时延分布 |
-| [`examples/subaccounts`](examples/subaccounts/main.go) | **多子账户做市**:读网页「API」页导出的密钥文件,每个子账户一把 API 钱包并发挂单 / 撤单,核对互不串号;`-rounds` 跑多轮,中途撤销一把只影响它自己 |
-| `dexosv1` 契约测试 | 对着真节点逐个响应对规格:读(`contract_test.go`)、写(`TestContractWrites`)、推送(`contract_ws_test.go`)、金库(`contract_vault_test.go`);`go test -tags dexos_contract`,环境变量见各文件头 |
-| [`docs/`](docs/) | 写于旧接口客户端时期。概念部分(账号体系、原子换单、读一致性、拒因、做市完整性边界)仍然适用;**代码以本 README、`dexosv1` 文档注释与上面的示例为准** |
+| [`examples/session`](examples/session/main.go) | **Minimal integration**: a URL and one API wallet private key; place and cancel orders |
+| [`examples/onboard`](examples/onboard/main.go) | Onboarding from scratch: connection parameters → address → account → (optionally) trade with an API wallet |
+| [`examples/quickstart`](examples/quickstart/main.go) | Full API wallet lifecycle (authorize → batch place → atomic replace → disconnect protection → cancel all → revoke → negative proof); also an integration self-check against a real node |
+| [`examples/vault`](examples/vault/main.go) | **Trading as a vault** (test stack: deposit → create vault → authorize an API wallet on the manager account → vault-identity session → place / cancel); `GW=… ADMIN_TOKEN=… go run ./examples/vault -state <file>` |
+| [`examples/wslatency`](examples/wslatency/main.go) | Measures the latency distribution between a write receipt and the push notification arriving |
+| [`examples/subaccounts`](examples/subaccounts/main.go) | **Multi-subaccount market making**: reads the key file exported by the web "API" page, one API wallet per subaccount placing / cancelling concurrently, and checks they never cross over; `-rounds` runs several rounds, and revoking one mid-run affects only that one |
+| `dexosv1` contract tests | Check every response against the spec on a real node: reads (`contract_test.go`), writes (`TestContractWrites`), pushes (`contract_ws_test.go`), vaults (`contract_vault_test.go`); run with `go test -tags dexos_contract`, environment variables are listed in each file header |
+| [`docs/`](docs/) | Written in the era of the legacy client (in Chinese). The concepts (account model, atomic replace, read consistency, rejection reasons, market-making integrity boundaries) still apply; **for code, this README, the `dexosv1` doc comments and the examples above are authoritative** |
 
 ---
 
-## 账号体系
+## Account model
 
 ```
-主钱包(EVM 地址;名下账户按子账户序号区分,0 = 主账户)
-  │  能做一切:入金、提款、授权 / 撤销 API 钱包、建金库
-  └─ 授权 ─→ API 钱包(agent 地址)
-              只能交易:下单 / 撤单 / 换单 / 撤全部 / 断线保护
-              动不了钱:提款、转账不在执行层的 agent 白名单内
+Master wallet (EVM address; accounts under it are told apart by subaccount index, 0 = main account)
+  │  can do everything: deposit, withdraw, approve / revoke API wallets, create vaults
+  └─ approves ─→ API wallet (agent address)
+                  can only trade: place / cancel / replace / cancel all / disconnect protection
+                  cannot move funds: withdrawals and transfers are not on the agent allowlist in the execution layer
 ```
 
-**为什么这么分。** 跑策略的机器早晚会被摸进去 —— 可能是依赖投毒、可能是运维失误。
-把主钱包私钥放在那台机器上,被摸进去等于资产清零;放 API 钱包私钥,最坏后果是被人
-代你交易,钱还在账上,撤销授权即止损。
+**Why the split.** The machine running your strategy will eventually be compromised, through a poisoned dependency or an operations mistake. If the master wallet key lives there, a breach wipes out your assets. If only an API wallet key lives there, the worst case is someone trading on your behalf; the funds stay in the account and revoking the authorization stops the loss.
 
-这个边界是**在确定性状态机里强制**的,不是网关的一层检查:不在 agent 白名单里的命令一律
-`AgentScopeViolation`。新增命令不会自动获得 agent 权限。
+This boundary is **enforced inside the deterministic state machine**, not by a gateway check: any command outside the agent allowlist is rejected with `AgentScopeViolation`. A new command does not get agent permission automatically.
 
-v1 不按内核账户号寻址,也不在响应里给它。签名结构体里要填的 `accountId` 由 SDK 从
-`/v1/account/nonce` 读出来填,调用方不用管。
+v1 does not address accounts by kernel account number and does not return it in responses. The `accountId` that goes into the signed struct is read by the SDK from `/v1/account/nonce`; callers need not care.
 
-### 两种写入身份,两条 nonce
+### Two write identities, two nonces
 
-| 身份 | 做什么 | nonce |
+| Identity | What it does | Nonce |
 |---|---|---|
-| [`Session`](dexosv1/session.go)(API 钱包代签) | 批量下单 / 撤单 / 原子换单、撤全部、断线保护 —— 做市跑在这里 | API 钱包**自己的**计数器 |
-| [`Wallet`](dexosv1/session.go)(主钱包自签) | 授权 / 撤销 API 钱包、单笔下单 / 撤单、设杠杆、金库的建库 / 存入 / 赎回 / 认领 / 改配置 | 主钱包作用域的计数器 |
+| [`Session`](dexosv1/session.go) (signed by the API wallet) | Batch place / cancel / atomic replace, cancel all, disconnect protection. Market making runs here | The API wallet's **own** counter |
+| [`Wallet`](dexosv1/session.go) (signed by the master wallet) | Approve / revoke API wallets, single place / cancel, set leverage, vault create / deposit / redeem / claim / configure | The master-wallet-scoped counter |
 
-两者都替你维护 nonce、把写串行化。混用两个计数器得到的是 `NonceMismatch`,错误信息里看不出是
-哪个错了 —— 这是最常见的接入坑,也正是这两个类型要替你挡掉的东西。
+Both maintain the nonce and serialize writes for you. Mixing the two counters gives `NonceMismatch`, and the error message does not say which one was wrong. This is the most common integration pitfall, and exactly what these two types are meant to shield you from.
 
 ---
 
-## 初始化
+## Initialization
 
-**一个网关地址 + 一把 API 钱包私钥。**
+**One gateway address plus one API wallet private key.**
 
 ```go
-c := dexosv1.NewClient("http://<部署机 IP>:17807")
-agent, _ := dexos.NewSigner("0x<API 钱包私钥>")
+c := dexosv1.NewClient("http://<host IP>:17807")
+agent, _ := dexos.NewSigner("0x<API wallet private key>")
 
-// 按 API 钱包地址反查它被授权的账户;只授权了一个账户时就是它
+// Look up the accounts this API wallet is authorized on; if there is only one, that is the one
 grants, _ := c.AgentGrants(ctx, agent.Address())
 owner, _ := dexos.ParseAddress(grants[0].Address)
 ref := dexosv1.AccountRef{Address: owner, Subaccount: *grants[0].Subaccount}
 
-s, err := dexosv1.NewSession(ctx, c, agent, ref)   // 读 EIP-712 域、核对授权、读 nonce
+s, err := dexosv1.NewSession(ctx, c, agent, ref)   // reads the EIP-712 domain, checks the grant, reads the nonce
 if err != nil { log.Fatal(err) }
 
 cat, _ := c.Catalog(ctx)
 btc, _ := cat.Market("BTC-USD")
-px, _ := btc.Scale.Ticks("70000")      // 十进制价 → tick,不整除就报错
+px, _ := btc.Scale.Ticks("70000")      // decimal price → ticks; errors if not exact
 sz, _ := btc.Scale.Lots("0.001")
 res, err := s.Place(ctx, dexosv1.OrderRequest{
     Market: btc, Side: dexos.Buy, Price: px, Lots: sz, TIF: dexos.PostOnly,
 })
 ```
 
-一把 API 钱包可以被主账户与各个子账户**分别**授权(状态机按「账户 × agent」记账,撤销其中一个
-不影响其余)。授权了不止一个账户时**必须指明** `AccountRef`,SDK 不替你挑 ——
-挑错的表现是订单落到另一个子账户上,仓位、保证金、风险全记在别处,**而且没有任何报错**。
-[`examples/session`](examples/session/main.go) 演示了过期授权先剔除、剩下不止一个就报错的挑法。
+One API wallet can be authorized **separately** on the main account and on each subaccount (the state machine keeps the books per "account × agent"; revoking one leaves the rest untouched). When it is authorized on more than one account you **must name** the `AccountRef`; the SDK will not pick for you. A wrong pick means orders land on another subaccount, with positions, margin and risk all booked elsewhere, **and no error at all**. [`examples/session`](examples/session/main.go) shows how to pick: drop expired grants first, and fail if more than one remains.
 
-`NewSession` 替你做掉三件容易错的事:
+`NewSession` does three easy-to-get-wrong things for you:
 
-| | 做错了会怎样 |
+| | What goes wrong if you get it wrong |
 |---|---|
-| 从 `/v1/exchange` 读 EIP-712 域(链号、合约地址) | 链号填错 → 每笔签名被拒,而盘口 / K 线全正常,像「只有下单坏了」 |
-| 核对这把钥匙确实被 `ref` 授权、没过期 | 没授权 → 一片拒绝;本地先报 `ErrAgentNotAuthorized` / `ErrAgentExpired` |
-| 读取并维护 **API 钱包自己的** nonce | 与主钱包的 nonce 混用 → `NonceMismatch` |
+| Reads the EIP-712 domain (chain ID, contract address) from `/v1/exchange` | Wrong chain ID → every signature is rejected while the order book and candles look fine, so it seems that "only placing orders is broken" |
+| Checks that this key is really authorized by `ref` and not expired | Not authorized → a wall of rejections; the SDK reports `ErrAgentNotAuthorized` / `ErrAgentExpired` locally first |
+| Reads and maintains the API wallet's **own** nonce | Mixing it with the master wallet's nonce → `NonceMismatch` |
 
-API 钱包私钥从前端拿:`/app` →「API 钱包」→ 生成 → 主钱包签一次授权,私钥只显示一次。
+Get the API wallet private key from the frontend: `/app` → "API wallet" → generate → the master wallet signs one authorization; the private key is shown only once.
 
-### 合约与现货同名
+### Perp and spot sharing a name
 
-dex-os#318 起一个名称至多对应一个合约市场和一个现货市场(如商户的 `demo:ETH-USDC` 合约与 `demo:ETH-USDC` 现货),
-目录不以名称为唯一键。定位市场有三种方式:
+Since dex-os#318 one name maps to at most one perp market and one spot market (for example a merchant's `demo:ETH-USDC` perp and `demo:ETH-USDC` spot), so the catalog does not use the name as a unique key. There are three ways to locate a market:
 
 ```go
-m, err := cat.Market("BTC-USD")                          // 名称只对应一个在用市场时
-m, err  = cat.Lookup("demo:ETH-USDC", dexosv1.KindSpot) // 名称 + 类型(perp | spot)
-m, err  = cat.MarketByID(7)                              // 市场号(signingMarketId),不受同名、改名影响
+m, err := cat.Market("BTC-USD")                          // when the name maps to a single active market
+m, err  = cat.Lookup("demo:ETH-USDC", dexosv1.KindSpot) // name + kind (perp | spot)
+m, err  = cat.MarketByID(7)                              // market ID (signingMarketId), unaffected by shared names or renames
 ```
 
-名称同时对应合约与现货时 `cat.Market` 报 `ErrAmbiguousSymbol`,不替你挑(与服务端一致)。按市场读写的接口都收 `*Market`
-(下单、撤单、换单、杠杆、成对成交、盘口、K 线、`Orders` / `Fills` 的过滤、`AccountFeesIn`、WS 的 `SubscribeBook` /
-`SubscribeBBO` / `SubscribeTrades`),线上自动带 `symbol` + `kind`;返回的市场行带 `Kind`,账户行(持仓、挂单、成交、
-`orders` 推送)另带对到的 `SigningMarketID`,流水行带 `SigningMarketID`。按名称定位被拒是 `*SymbolError`,用 `errors.Is` 判:
+When a name maps to both perp and spot, `cat.Market` returns `ErrAmbiguousSymbol` and does not pick for you (consistent with the server). Every market-scoped interface takes a `*Market` (place, cancel, replace, leverage, paired trade, order book, candles, the `Orders` / `Fills` filters, `AccountFeesIn`, and WS `SubscribeBook` / `SubscribeBBO` / `SubscribeTrades`), and the wire automatically carries `symbol` + `kind`. Market rows returned carry `Kind`; account rows (positions, open orders, fills, `orders` pushes) also carry the matched `SigningMarketID`, and ledger rows carry `SigningMarketID`. A rejected name lookup is a `*SymbolError`; test it with `errors.Is`:
 
-| 错误 | 含义 |
+| Error | Meaning |
 |---|---|
-| `ErrAmbiguousSymbol` | 名称同时对应合约与现货又没给 kind(`Kinds` 是可选的类型) |
-| `ErrBadKind` | kind 不是 `perp` / `spot` |
-| `ErrDuplicateSymbol` | 同一类型里两个在用市场同名(部署方配置错误),按市场号照常可用 |
+| `ErrAmbiguousSymbol` | The name maps to both perp and spot and no kind was given (`Kinds` lists the available kinds) |
+| `ErrBadKind` | The kind is neither `perp` nor `spot` |
+| `ErrDuplicateSymbol` | Two active markets of the same kind share a name (an operator misconfiguration); lookup by market ID still works |
 
-服务端回的这三种是定序之前的 400 / 409,会话不锁、nonce 不动;`errors.As` 仍能取到 `*dexosv1.Error`。
+The server returns these three as 400 / 409 before sequencing, so the session is not locked and the nonce is untouched; `errors.As` can still extract a `*dexosv1.Error`.
 
-### 写回执与错误
+### Write receipts and errors
 
-写入一律等结论(`ack=result`,等待上限 `Client.AckWait`,最多 5s)。`Place` / `Cancel` / `Replace` 返回
-[`*BatchResult`](dexosv1/write.go):逐项结局(`accepted` / `canceled` / `rejected`,带订单号、成交、拒因码)。
+Writes always wait for a verdict (`ack=result`, wait capped by `Client.AckWait`, at most 5s). `Place` / `Cancel` / `Replace` return a [`*BatchResult`](dexosv1/write.go): per-item outcomes (`accepted` / `canceled` / `rejected`) with order ID, fills and rejection code.
 
-| 错误 | 含义 | 怎么办 |
+| Error | Meaning | What to do |
 |---|---|---|
-| `*dexosv1.Error` | 业务拒绝或网关拒绝(`Code` 是拒因,如 `InsufficientMargin`) | 终局结论,会话不锁,改参数再发 |
-| `*dexosv1.RateLimitedError` | 429:扣光的是 IP 桶还是账户桶、`RetryAfter` | SDK 不重试;怎么退让(例如只暂停一个币对)由你定 |
-| `dexosv1.ErrNotSent` | 请求没发出(本地校验失败、连接没建起来) | 确定没发出,会话不锁、nonce 不动,可以原样重发 |
-| `dexosv1.ErrPending` | 已定序,结论未知(202 / 连上之后的传输失败 / 5xx) | **不要重发**。会话已锁,用 `s.Pending()` 的请求身份查 `c.Request`,核对后新建会话 |
-| `dexosv1.ErrIncompleteBatch` | 批量回执的逐项结局对不上请求 | 批次已执行但说不清哪些成了:先按账户读取核对 |
-| `dexosv1.ErrSessionBlocked` | 上一次写入结论未知,会话禁止继续消耗 nonce | 同 `ErrPending` |
+| `*dexosv1.Error` | Business or gateway rejection (`Code` is the reason, e.g. `InsufficientMargin`) | Final verdict; the session is not locked; change parameters and resend |
+| `*dexosv1.RateLimitedError` | 429: whether the IP bucket or the account bucket ran dry, and `RetryAfter` | The SDK does not retry; how to back off (for example, pausing one market only) is up to you |
+| `dexosv1.ErrNotSent` | The request was not sent (local validation failed, or the connection was never established) | Definitely not sent; the session is not locked and the nonce is untouched; resend as is |
+| `dexosv1.ErrPending` | Sequenced, verdict unknown (202 / transport failure after connecting / 5xx) | **Do not resend.** The session is locked; use the request identity from `s.Pending()` to query `c.Request`, reconcile, then create a new session |
+| `dexosv1.ErrIncompleteBatch` | The per-item outcomes of a batch receipt do not match the request | The batch was executed but which items succeeded is unclear: reconcile by reading the account first |
+| `dexosv1.ErrSessionBlocked` | The previous write's verdict is unknown, so the session may not consume further nonces | Same as `ErrPending` |
 
-要把「换单发出 → 结论」写进自己的持久化日志(进程崩溃后能对账),用 `Session.ReplaceJournaled`。
+To write "replace sent → verdict" into your own durable log (so it can be reconciled after a crash), use `Session.ReplaceJournaled`.
 
-### 以金库身份交易
+### Trading as a vault
 
-金库主账户由 manager 操盘:API 钱包授权在 manager **认领金库所用的那个账户**上
-(`Vault.Manager` / `Vault.ManagerSubaccount`),会话用金库身份寻址:
+A vault's main account is operated by its manager: the API wallet is authorized on the account the manager used to claim the vault (`Vault.Manager` / `Vault.ManagerSubaccount`), and the session addresses the vault identity:
 
 ```go
 s, err := dexosv1.NewSession(ctx, c, agent, dexosv1.VaultAccount(vaultID))
 ```
 
-读写的是金库主账户,nonce 仍是这把 API 钱包自己的计数器。金库身份只能交易(下单、撤单、换单、
-撤全部、断线保护),资金类动作网关以 403 拒。读接口同样接受 `VaultAccount(id)`。
-完整流程见 [`examples/vault`](examples/vault/main.go)。
+It reads and writes the vault's main account; the nonce is still the API wallet's own counter. A vault identity can only trade (place, cancel, replace, cancel all, disconnect protection); fund-moving actions are rejected by the gateway with 403. Read endpoints accept `VaultAccount(id)` too. See [`examples/vault`](examples/vault/main.go) for the full flow.
 
-### 成对成交(仅测试链)与 owner 级授权
+### Paired trades (test chain only) and owner-level grants
 
-`POST /v1/orders/paired` 让两个账户在一次请求里原子成交(挂单腿 M、吃单腿 T,价格必须严格在买一与卖一之间,
-两腿都不进簿),用来在测试环境画成交 K 线。只在测试链上可用,网关只对白名单账户开放(名单为空时 404)。
-两条腿都是 `sigVersion: 2` 的签名:账户 = (owner 地址, 子账户编号),nonce 是签名者自己取的毫秒时间戳(窗口 nonce)。
+`POST /v1/orders/paired` makes two accounts trade atomically in one request (a maker leg M and a taker leg T; the price must lie strictly between the best bid and best ask, and neither leg rests on the book). It is used to paint trade candles in test environments. It is only available on the test chain, and the gateway opens it only to allowlisted accounts (404 when the list is empty). Both legs are `sigVersion: 2` signatures: the account is (owner address, subaccount index), and the nonce is a millisecond timestamp the signer picks itself (window nonce).
 
 ```go
-// 主钱包在别处(浏览器钱包)签一次 owner 级授权:位图只覆盖 M、T 两个编号
+// The master wallet signs one owner-level grant elsewhere (browser wallet): the bitmap covers only subaccounts M and T
 ex, _ := c.Exchange(ctx)
 domain, _ := ex.SigningDomain()
 nonce := dexosv1.WindowNonce(owner)
 payload := domain.ApproveAgentScopeTypedData(owner, agent.Address(), 1<<1|1<<2, 0, nonce)
-// …… 拿回签名 sig 之后
+// ... after getting the signature sig back
 _, err := c.SubmitAgentScope(ctx, dexosv1.SignedAgentScope{Owner: owner, Domain: domain, Agent: agent.Address(),
     SubaccountMask: 1<<1 | 1<<2, Nonce: nonce, Signature: sig})
 
@@ -173,143 +156,126 @@ p, err := dexosv1.NewPairedSession(ctx, c, agent,
 res, err := p.Trade(ctx, dexosv1.PairedTrade{Market: btc, MakerSide: dexos.Sell, Price: px, Lots: sz})
 ```
 
-422(`PairedTradeOutsideSpread`、被拒那条腿的 `InsufficientMargin` …)与定序前的 4xx 是终局结论,会话照常可用;
-202 / 传输失败 / 5xx 是结论未知,会话锁定,`p.Pending()` 给出挂单腿的请求身份(成对成交的 requestId 就是它)。
-要在发出之前落账,用 `PairedSession.TradeJournaled`。撤销 owner 级授权:主钱包签 `domain.RevokeAgentScopeTypedData`
-(位图与有效期都为 0 的 `ApproveAgentScope`),交给 `c.SubmitAgentScopeRevoke`(走 `/v1/account/agents/revoke`;授权端点不收位图 0)。`Agents` 的结果里 owner 级授权是 `Scope == "owner"`:
-它出现在 owner 名下每个编号的列表里,能不能交易某个编号看 `SubaccountMask`。
+A 422 (`PairedTradeOutsideSpread`, `InsufficientMargin` on the rejected leg, ...) or a 4xx before sequencing is a final verdict and the session stays usable; a 202 / transport failure / 5xx means the verdict is unknown and the session locks; `p.Pending()` gives the maker leg's request identity (which is the paired trade's requestId). To journal before sending, use `PairedSession.TradeJournaled`. To revoke an owner-level grant: the master wallet signs `domain.RevokeAgentScopeTypedData` (an `ApproveAgentScope` with both bitmap and expiry set to 0) and hands it to `c.SubmitAgentScopeRevoke` (via `/v1/account/agents/revoke`; the approve endpoint does not accept bitmap 0). In the `Agents` result an owner-level grant has `Scope == "owner"`: it appears in the list for every index under the owner, and whether it can trade a given index is determined by `SubaccountMask`.
 
-### 多子账户做市:一个子账户一把 API 钱包
+### Multi-subaccount market making: one API wallet per subaccount
 
-做市商常把不同策略放在不同子账户里,每个子账户配一把自己的 API 钱包(和 Hyperliquid 的做法一样)。
+Market makers often put different strategies in different subaccounts, each with its own API wallet (as on Hyperliquid).
 
-- **建钥匙**:主钱包在网页「API」页点「创建 API」,勾选几个子账户。浏览器会给每个子账户各生成一把钥匙,并导出一个**密钥文件**(只导出这一次,里面是明文私钥)。然后主钱包为每把钥匙各签一次 owner 级授权,位图只有一位,所以每把钥匙只能交易它自己那个子账户。
-- **用钥匙**:[`dexosv1.ParseKeyFile`](dexosv1/keyfile.go) 读这个文件,核对私钥与地址对得上、子账户不重复。每把钥匙建一个 `ActionWriter`,各用各的 `NonceSource`:签名者窗口 nonce 互不排队,几个进程同时签也不会互相顶掉。
-- **撤销**:在网页上撤销其中一把,执行层随即拒它(`UnknownAgent`),其余照常。
+- **Create the keys**: on the web "API" page the master wallet clicks "Create API" and ticks a few subaccounts. The browser generates one key per subaccount and exports a **key file** (exported only this once; it contains plaintext private keys). The master wallet then signs one owner-level grant per key; the bitmap has a single bit, so each key can trade only its own subaccount.
+- **Use the keys**: [`dexosv1.ParseKeyFile`](dexosv1/keyfile.go) reads this file and checks that each private key matches its address and that subaccounts are not duplicated. Build one `ActionWriter` per key, each with its own `NonceSource`: signer window nonces do not queue behind one another, so several processes signing at once do not knock each other out.
+- **Revoke**: revoke one on the web page and the execution layer immediately rejects it (`UnknownAgent`); the rest carry on.
 
 ```go
 kf, _ := dexosv1.ParseKeyFile(raw)
 for _, w := range kf.Wallets {
     aw, err := dexosv1.NewActionWriter(ctx, c, w.Signer, w.Account(kf.Owner), dexosv1.NewNonceSource(0))
-    // …… 每个子账户一个 goroutine:aw.SignReplace / c.SendReplace 挂单,aw.SignCancel / c.SendCancel 撤单
+    // ... one goroutine per subaccount: aw.SignReplace / c.SendReplace to place, aw.SignCancel / c.SendCancel to cancel
 }
 ```
 
-完整示例见 [`examples/subaccounts`](examples/subaccounts/main.go):`go run ./examples/subaccounts -keys api-wallets-xxxx.json -rounds 5`。
-子账户要先从主账户划转保证金,否则挂单被拒 `InsufficientMargin`。
+For the full example see [`examples/subaccounts`](examples/subaccounts/main.go): `go run ./examples/subaccounts -keys api-wallets-xxxx.json -rounds 5`. A subaccount needs margin transferred from the main account first, or orders are rejected with `InsufficientMargin`.
 
 ---
 
-## 连接参数
+## Connection parameters
 
-链号、EIP-712 域、入金系统地址、token 表、命令编码版本都由 `/v1/exchange` 给:
+Chain ID, EIP-712 domain, deposit system address, token table and command encoding version all come from `/v1/exchange`:
 
 ```go
 ex, err := c.Exchange(ctx)
-fmt.Println("链", ex.ChainID, "入金地址", ex.Deposit.SystemGateway)
+fmt.Println("chain", ex.ChainID, "deposit address", ex.Deposit.SystemGateway)
 if ex.Version.CodecVer != dexos.CodecVersion {
-    log.Fatal("网关的命令编码与本 SDK 不同,签出来的命令它不认 —— 先升级 SDK")
+    log.Fatal("the gateway's command encoding differs from this SDK; commands it signs will not be accepted. Upgrade the SDK first")
 }
 ```
 
-为什么不建议把这些值写死在自己的配置里 —— **填错的后果都很隐蔽**:
+Why you should not hard-code these in your own config: **the consequences of getting them wrong are all subtle**.
 
-| 填错什么 | 你会看到什么 |
+| What is wrong | What you see |
 |---|---|
-| 链号 | 每一笔签名被拒,而盘口、K 线、持仓(只读)**全部正常** |
-| 入金地址(运营方重新部署过合约) | 钱打到没人监听的合约:链上扣了,账户里没有 |
-| 命令编码版本 | 规范编码变了,API 钱包代签的哈希对不上,同样是一片拒签 |
+| Chain ID | Every signature is rejected, while the order book, candles and positions (read-only) are **all fine** |
+| Deposit address (the operator redeployed the contract) | Funds go to a contract nobody is listening to: debited on chain, absent from your account |
+| Command encoding version | The canonical encoding changed, the hash signed by the API wallet no longer matches, and again everything is rejected |
 
-不同部署的链不同(本地 anvil 是 31337,test 档接 Sepolia 是 11155111);运营方每次重建环境
-都会重新部署合约,地址随之改变。**别把地址抄进代码**,往过期的系统地址打钱是收不回来的。
+Deployments use different chains (local anvil is 31337, the test tier on Sepolia is 11155111); the operator redeploys contracts every time the environment is rebuilt, so the address changes. **Do not copy the address into code**: funds sent to a stale system address cannot be recovered.
 
 ---
 
-## 从零接入
+## Onboarding from scratch
 
 ```bash
-go run ./examples/onboard -url http://<部署机 IP>:17807
+go run ./examples/onboard -url http://<host IP>:17807
 ```
 
-**1. 地址** —— 用你已有的钱包,或让 SDK 生成一个:
+**1. Address**: use a wallet you already have, or let the SDK generate one:
 
 ```go
-me, _ := dexos.GenerateSigner()          // 本地生成,私钥不出本进程
+me, _ := dexos.GenerateSigner()          // generated locally; the private key never leaves this process
 ```
 
-**2. 入金** —— 往 `ex.Deposit.SystemGateway` 发一笔 USDC 的**裸 `transfer`**。没有桥合约、没有
-`deposit()` 方法。中继观察到之后,执行层**自动开户**并绑定你的 EVM 地址 —— 没有注册接口,也没有
-审批,付钱即开户。
+**2. Deposit**: send a bare USDC `transfer` to `ex.Deposit.SystemGateway`. There is no bridge contract and no `deposit()` method. Once the relayer observes it, the execution layer **opens the account automatically** and binds your EVM address. There is no registration endpoint and no approval: paying opens the account.
 
-> **这一步 SDK 做不了。** 本 SDK 只管交易所 API,不含 EVM 能力(不签链上交易、不发 ERC20 transfer)。
-> 用前端页面、钱包,或 `go-ethereum` 自己发。
+> **The SDK cannot do this step.** It only covers the exchange API and has no EVM capability (it does not sign chain transactions or send ERC20 transfers). Use the frontend, a wallet, or `go-ethereum` yourself.
 
-**3. 确认开户** —— 入金之前账户表是空的(账户类读取答 404),那是正常起点,不是错误:
+**3. Confirm the account is open**: before depositing, the account table is empty (account reads answer 404). That is the normal starting point, not an error:
 
 ```go
 subs, _ := c.Subaccounts(ctx, me.Address())
 if len(subs) == 0 {
-    // 还没入金
+    // not deposited yet
 }
 acct, _ := c.Account(ctx, dexosv1.AccountRef{Address: me.Address()})
-fmt.Println("抵押", acct.Collateral, "USDC")
+fmt.Println("collateral", acct.Collateral, "USDC")
 ```
 
-**4. 授权 API 钱包,然后交易。** 三条路都行:
+**4. Authorize an API wallet, then trade.** Any of three routes works:
 
-- **浏览器**(推荐给人用):`http://<部署机 IP>:17807/app` →「API 钱包」→ 生成 → 命名 → 选有效期 →
-  主钱包签一次。私钥只显示一次。
-- **代码**(推荐给自动化):
+- **Browser** (recommended for humans): `http://<host IP>:17807/app` → "API wallet" → generate → name it → pick a validity period → the master wallet signs once. The private key is shown only once.
+- **Code** (recommended for automation):
 
   ```go
   owner, _ := dexos.NewSigner(masterPrivHex)
-  w, _ := dexosv1.NewWallet(ctx, c, owner, 0)          // 0 = 主账户
-  api, _ := dexos.GenerateSigner()                     // 私钥不出本进程,交易所只拿到地址
+  w, _ := dexosv1.NewWallet(ctx, c, owner, 0)          // 0 = main account
+  api, _ := dexos.GenerateSigner()                     // the private key never leaves this process; the exchange only gets the address
   w.ApproveAgent(ctx, api.Address(), time.Now().AddDate(0, 6, 0), "my-bot")
-  s, _ := dexosv1.NewSession(ctx, c, api, w.Account)   // 主钱包私钥到这里就可以收起来了
+  s, _ := dexosv1.NewSession(ctx, c, api, w.Account)   // from here on the master wallet key can be put away
   ```
 
-- **主钱包密钥不在服务端**(如后台生成 API 钱包、用户用浏览器钱包签):`Domain.ApproveAgentTypedData(...)`
-  给出 `eth_signTypedData_v4` 可签的结构(签名所需的 `signingAccountId` 与 nonce 从 `c.Nonce(ctx, ref, nil)` 读),
-  拿回签名后用 `c.SubmitApproval(...)` 提交,参数须与签名时逐字一致。
+- **The master wallet key is not on the server** (for example the backend generates the API wallet and the user signs in a browser wallet): `Domain.ApproveAgentTypedData(...)` gives a structure signable with `eth_signTypedData_v4` (the `signingAccountId` and nonce needed for signing are read from `c.Nonce(ctx, ref, nil)`); after getting the signature back, submit it with `c.SubmitApproval(...)`, with parameters identical to those used for signing.
 
-完整生命周期(授权 → 下单 → 换单 → 撤单 → 撤销 → 反证)见 [`examples/quickstart`](examples/quickstart/main.go):
+For the full lifecycle (authorize → place → replace → cancel → revoke → negative proof) see [`examples/quickstart`](examples/quickstart/main.go):
 
 ```bash
 go run ./examples/quickstart -url http://127.0.0.1:17807 -master-key 0x…
 ```
 
-### 三个容易踩的
+### Three common pitfalls
 
-- **没入金就下单** → 没有账户就没有可授权、可交易的对象:`Subaccounts` 答空表,账户类读取答 404。
-- **入金到账时间随终局性配置变化**:`head` 是秒级,`finalized` 要等两个 epoch(Sepolia 约 13 分钟)。
-  别把「还没到账」当成「入金失败」。
-- **偶发的 412 不是故障。** 生产是读写分层的(写打 Raft voter,读打只读副本),412 表示副本还没追上
-  你刚写的那条日志 —— 它宁可明说落后,也不返回旧值。账户类读取 SDK 自动带上位号头(`x-dexos-min-seq`)
-  把这条链挂住;真拿到 412 就是所有副本都落后了,重试即可。
+- **Trading before depositing**: with no account there is nothing to authorize or trade on; `Subaccounts` answers an empty table and account reads answer 404.
+- **Deposit arrival time varies with the finality setting**: `head` takes seconds, `finalized` waits two epochs (about 13 minutes on Sepolia). Do not mistake "not arrived yet" for "deposit failed".
+- **An occasional 412 is not a fault.** Production separates reads from writes (writes hit the Raft voters, reads hit read-only replicas); a 412 means the replica has not yet caught up with the log entry you just wrote. It would rather say it is behind than return a stale value. For account reads the SDK automatically attaches the sequence header (`x-dexos-min-seq`) to pin this; if you do get a 412, all replicas are behind, so just retry.
 
 ---
 
-## 原子换单
+## Atomic replace
 
-做市商刷新报价的基本原语。**先撤后挂,一次状态机转移完成。**
+The basic primitive for a market maker refreshing quotes. **Cancel first, then place, in one state-machine transition.**
 
 ```go
 res, err := s.Replace(ctx, btc, oldOrderIDs, newQuotes)
 ```
 
-与「先 `Cancel` 再 `Place`」的区别不是省一次往返:
+The difference from "`Cancel`, then `Place`" is not saving one round trip:
 
-- 两次独立提交是**两条共识条目**,中间存在一个没有报价的窗口
-- 第二条若被拒(保证金不足、市场停牌),第一条**已经生效** —— 你的单被撤光却没挂上新的,单边裸露
+- Two separate submissions are **two consensus entries**, and there is a window in between with no quotes
+- If the second is rejected (insufficient margin, market halted), the first **has already taken effect**: your orders are all cancelled and no new ones placed, leaving one side exposed
 
-合成一条后,撤与挂落在同一个转移里,不存在中间态可被观测。
+Combined into one entry, the cancel and the place land in the same transition, so no intermediate state can be observed.
 
-「原子」的准确含义是**没有中间窗口**,不是「全成功或全回滚」:逐项仍尽力而为(撤不掉的跳过、挂不上的
-跳过),否则一张单的保证金不足会废掉整轮报价刷新 —— 那对做市商比部分成功更糟。
+"Atomic" precisely means **no intermediate window**, not "all succeed or all roll back": each item is still best effort (a cancel that fails is skipped, a place that fails is skipped), because otherwise one order's margin shortfall would ruin the whole quote refresh, which is worse for a market maker than partial success.
 
-**改单项**(dex-os#256):同一条命令里还可以带改单项,每项就是一次单笔改单 —— 旧单已成交就不挂新单、
-新单被拒旧单一并撤,所以每个改单项的旧单和新单最多只有一边能成交,顶格守仓位上限时不必先撤再挂:
+**Modify items** (dex-os#256): the same command can also carry modify items, each being one single-order modify. If the old order has already filled, no new order is placed; if the new order is rejected, the old one is cancelled with it. So for each modify item at most one of the old and new orders can fill, and an account sitting at its position limit need not cancel before placing:
 
 ```go
 res, err := s.ReplaceModify(ctx, btc, cancelIDs,
@@ -317,88 +283,78 @@ res, err := s.ReplaceModify(ctx, btc, cancelIDs,
 	newQuotes)
 ```
 
-回执里改单项是 `Kind == "modify"`,`ReplacedOrderID` 是旧单、`OrderID` 是新单,旧单真的被撤掉时 `CanceledLots` 有值。
-不带改单项时与 `Replace` 完全相同;写前日志版是 `ReplaceModifyJournaled`。
+In the receipt a modify item has `Kind == "modify"`, `ReplacedOrderID` is the old order and `OrderID` the new one; `CanceledLots` is set when the old order was actually cancelled. Without modify items it behaves exactly like `Replace`; the write-ahead-journal variant is `ReplaceModifyJournaled`.
 
-断线保护:`s.ScheduleCancel(ctx, time.Now().Add(30*time.Second))` 到点撤掉账户全部挂单,每轮报价顺手往后续
-一次;零值时间 = 清除。`s.CancelAll` 在下一个块边界生效,其间新挂的单同样会被撤。
+Disconnect protection: `s.ScheduleCancel(ctx, time.Now().Add(30*time.Second))` cancels all of the account's open orders at the deadline; extend it with every quote round; a zero time clears it. `s.CancelAll` takes effect at the next block boundary, and orders placed in the meantime are cancelled too.
 
 ---
 
-## 推送(WebSocket)
+## Push (WebSocket)
 
-一条连接承载全部订阅,断线按指数退避重连并重订:
+One connection carries all subscriptions; on disconnect it reconnects with exponential backoff and resubscribes:
 
 ```go
 st, _ := dexosv1.NewStream(c, cat, dexosv1.StreamOptions{OnState: func(e dexosv1.StateEvent) { /* … */ }})
-st.SubscribeOrders(ref, func(u dexosv1.OrdersUpdate) { /* u.Open = 应用之后的全部在挂单 */ })
-st.SubscribeOrderChanges(ref, func(c dexosv1.OrderChange) { /* 快照给 c.Open;增量只给 c.Order(移除为 nil),每帧开销与挂单总数无关 */ })
-st.SubscribeFills(ref, cursor, func(f dexosv1.Fill) { /* 从游标起不缺不重 */ })
+st.SubscribeOrders(ref, func(u dexosv1.OrdersUpdate) { /* u.Open = all open orders after applying */ })
+st.SubscribeOrderChanges(ref, func(c dexosv1.OrderChange) { /* snapshots arrive in c.Open; deltas give only c.Order (nil for a removal), so per-frame cost is independent of the total open-order count */ })
+st.SubscribeFills(ref, cursor, func(f dexosv1.Fill) { /* from the cursor on, no gaps and no duplicates */ })
 go st.Run(ctx)
 ```
 
-每个订阅有就绪信号:`Syncing` 期间本地状态不可信,做市应暂停对应币对;`Live` 之后按序应用即与服务端
-一致;`Failed` 是终态(订阅被拒、账本纪元变了)。失效时不悄悄改用轮询,原因都经 `OnState` 报出。
-成交与资金流水的断线缺口由 SDK 用 REST 按游标补拉拼接。
+Each subscription has a readiness signal: while `Syncing`, local state cannot be trusted and market making should pause the affected market; after `Live`, applying updates in order keeps you consistent with the server; `Failed` is terminal (subscription rejected, ledger epoch changed). On failure it never silently falls back to polling; every cause is reported through `OnState`. Gaps in fills and fund flows caused by a disconnect are backfilled by the SDK through REST using the cursor.
 
 ---
 
-## 单位
+## Units
 
-| 概念 | SDK 里 | 线上 |
+| Concept | In the SDK | On the wire |
 |---|---|---|
-| 价格 | tick(`uint32`) | 十进制字符串,`price = tick / 10^priceDecimals` |
-| 数量 | lot(`uint64`) | 十进制字符串,`size = lot / 10^sizeDecimals` |
-| 金额、费用、盈亏 | 十进制字符串 | 同左;要原子单位用 `dexosv1.ParseFixed(amount, decimals)` |
+| Price | tick (`uint32`) | decimal string, `price = tick / 10^priceDecimals` |
+| Quantity | lot (`uint64`) | decimal string, `size = lot / 10^sizeDecimals` |
+| Amounts, fees, PnL | decimal string | same; for atomic units use `dexosv1.ParseFixed(amount, decimals)` |
 
-委托价与数量在 SDK 里保持整数,与 EIP-712 结构体同一个数量空间:进出时按市场的 `Scale` 精确换算,
-不整除就报错,**从不四舍五入** —— 一个被悄悄舍入的价格签出来就是另一张单。
+Order price and quantity stay integers in the SDK, in the same quantity space as the EIP-712 struct: they are converted exactly using the market's `Scale` on the way in and out, and an inexact conversion is an error, **never rounded**. A silently rounded price, once signed, is a different order.
 
 ---
 
-## 规范编码与金样对拍
+## Canonical encoding and golden-sample cross-checks
 
-API 钱包代签的签名承诺的是
+The signature of an API-wallet-signed command commits to
 
 ```
-commandHash = keccak256(内核规范编码字节)
+commandHash = keccak256(kernel canonical encoding bytes)
 ```
 
-服务端会用**自己的**编码器重编内层命令再比对。差一个字节 → 签名对不上 → 拒签,
-**不会静默出错,但也没有任何线索**。所以 `dexos/codec.go` 必须与 dex-os 的规范编码逐字节一致。
+The server re-encodes the inner command with **its own** encoder and compares. One byte off → the signature does not match → rejected. **It never fails silently, but it gives no clue either.** So `dexos/codec.go` must be byte-for-byte identical to dex-os's canonical encoding.
 
-这件事不能靠 review 保证,靠对拍:
+Review cannot guarantee this; cross-checking does:
 
 ```bash
-# 在 dex-os 仓库
+# in the dex-os repository
 cargo run -q --example sdk_golden > ../dex-sdk-go/dexos/testdata/golden.json
-# 在本仓库
+# in this repository
 go test ./dexos/
 ```
 
-金样覆盖空集合、极值、只撤不挂、只挂不撤等边界。成对成交与 v2 签名(`PairedTradeLeg` 编码、`Action` /
-`ApproveAgentScope` 摘要、签名、请求身份)另有 `dexosv1/testdata/paired_golden.json`,由 dex-os 的 Rust 实现导出,
-做法见 [`dexosv1/testdata/README.md`](dexosv1/testdata/README.md)。两种字节序在同一个 SDK 里并存,是最容易混的地方:
+The golden samples cover edge cases: empty sets, extreme values, cancel-only, place-only. Paired trades and v2 signatures (the `PairedTradeLeg` encoding, the `Action` / `ApproveAgentScope` digests, signatures, request identity) have their own `dexosv1/testdata/paired_golden.json`, exported from dex-os's Rust implementation; see [`dexosv1/testdata/README.md`](dexosv1/testdata/README.md) for how. Two byte orders coexist in this SDK, which is the easiest thing to mix up:
 
-- **规范命令编码** → 小端(内核的紧凑编码)
-- **EIP-712 word** → 大端 32 字节右对齐(以太坊 ABI 约定)
+- **Canonical command encoding** → little-endian (the kernel's compact encoding)
+- **EIP-712 words** → big-endian, 32 bytes right-aligned (the Ethereum ABI convention)
 
 ---
 
-## 验证
+## Verification
 
 ```bash
-go test ./...      # 金样对拍、v1 线上形状与规格、会话 / 推送状态机、示例只用 v1
+go test ./...      # golden cross-check, v1 wire shapes and spec, session / push state machines, examples use only v1
 go vet ./...
-go run ./examples/quickstart -url … -master-key 0x…   # 对着真节点的集成自检
+go run ./examples/quickstart -url … -master-key 0x…   # integration self-check against a real node
 ```
 
-金样只能证明编码正确;签名路径(secp256k1 的 v 位序、地址派生、EIP-712 域分隔符)只有对着真节点才
-验得了 —— 那三处任何一处错了,表现都是服务端拒签,静态检查看不出来。所以 quickstart 最后一步是
-**反证**:撤销授权后同一把钥匙再下单必须被拒,否则前面全绿也不能说明授权真的起了作用。
+Golden samples only prove the encoding is right; the signing path (secp256k1 v-bit ordering, address derivation, EIP-712 domain separator) can only be validated against a real node. If any of those three is wrong, the symptom is the server rejecting signatures, which static checks cannot see. That is why quickstart ends with a **negative proof**: after the authorization is revoked, the same key must be rejected when placing an order. Otherwise an all-green run cannot show that the authorization actually took effect.
 
 ---
 
-## 许可
+## License
 
 Apache-2.0
