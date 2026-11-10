@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -127,6 +128,10 @@ func TestPairedSessionOutcomes(t *testing.T) {
 			var e *Error
 			return errors.As(err, &e) && e.Code == "InsufficientMargin"
 		}},
+		{name: "窗口 nonce 已被用掉", status: 422, raw: `{"error":{"code":"NonceMismatch","message":"window nonce already used"}}`, check: func(err error) bool {
+			var e *Error
+			return errors.As(err, &e) && e.Code == "NonceMismatch"
+		}},
 		{name: "名单外", status: 403, fixture: "err403_paired.json", check: func(err error) bool {
 			var e *Error
 			return errors.As(err, &e) && e.Status == 403 && detailString(e.Details, "reason") == "paired_trade_not_allowed" && detailString(e.Details, "leg") == "taker"
@@ -173,9 +178,13 @@ func TestPairedSessionOutcomes(t *testing.T) {
 				}
 				return
 			}
-			id := p.Pending()
+			ids := p.Pending()
 			sent := m(f.writes[0].body)
-			if id == nil || id.RequestID != gatewayRequestID(t, f.cat, "/v1/orders/paired", sent) || id.Nonce != num(t, m(sent["maker"])["nonce"]) {
+			if len(ids) != 1 {
+				t.Fatalf("锁定后应给出一笔结论未知的请求: %+v", ids)
+			}
+			id := &ids[0]
+			if id.RequestID != gatewayRequestID(t, f.cat, "/v1/orders/paired", sent) || id.Nonce != num(t, m(sent["maker"])["nonce"]) {
 				t.Fatalf("锁定后应给出挂单腿的请求身份: %+v", id)
 			}
 			if !errors.Is(again, ErrSessionBlocked) || f.count() != before {
@@ -366,8 +375,8 @@ func TestPairedTradeJournaled(t *testing.T) {
 	}
 	// AfterReceive 失败:结论只在内存里 → 锁定
 	j = &pairedJournal{afterErr: errors.New("disk full")}
-	if _, err := p.TradeJournaled(context.Background(), goldenTrade(eth), j); !errors.Is(err, ErrSessionBlocked) || p.Pending() == nil ||
-		p.Pending().RequestID != j.before[0].Request.RequestID {
+	if _, err := p.TradeJournaled(context.Background(), goldenTrade(eth), j); !errors.Is(err, ErrSessionBlocked) || len(p.Pending()) != 1 ||
+		p.Pending()[0].RequestID != j.before[0].Request.RequestID {
 		t.Fatalf("AfterReceive 失败应锁定并给出请求身份: %v", err)
 	}
 
@@ -380,5 +389,153 @@ func TestPairedTradeJournaled(t *testing.T) {
 	}
 	if _, err := p2.TradeJournaled(context.Background(), goldenTrade(eth), nil); err == nil {
 		t.Fatal("缺写前日志应报错")
+	}
+}
+
+func holdFirstPairedRequest(f *writeFake, arrived *atomic.Int32, hold chan struct{}, rest http.HandlerFunc) {
+	ok := f.routes["/v1/orders/paired"]
+	f.routes["/v1/orders/paired"] = func(w http.ResponseWriter, r *http.Request) {
+		if arrived.Add(1) == 1 {
+			<-hold
+			ok(w, r)
+			return
+		}
+		if rest != nil {
+			rest(w, r)
+			return
+		}
+		ok(w, r)
+	}
+}
+
+func waitForCount(t *testing.T, n *atomic.Int32, want int32) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for n.Load() < want {
+		if time.Now().After(deadline) {
+			t.Fatalf("等不到 %d 个请求,只有 %d", want, n.Load())
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+func TestPairedSessionTradesOverlapInFlight(t *testing.T) {
+	f, p, eth := newPairedSession(t)
+	f.answer(t, "/v1/orders/paired", 200, "w_paired.json")
+	ok := f.routes["/v1/orders/paired"]
+	var arrived atomic.Int32
+	release := make(chan struct{})
+	f.routes["/v1/orders/paired"] = func(w http.ResponseWriter, r *http.Request) {
+		arrived.Add(1)
+		<-release
+		ok(w, r)
+	}
+	var wg sync.WaitGroup
+	for range 4 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, err := p.Trade(context.Background(), goldenTrade(eth)); err != nil {
+				t.Error(err)
+			}
+		}()
+	}
+	waitForCount(t, &arrived, 4)
+	if got := p.InFlight(); got != 4 {
+		t.Fatalf("4 笔都在途: %d", got)
+	}
+	close(release)
+	wg.Wait()
+	seen := map[uint64]bool{}
+	for _, w := range f.writes {
+		for _, leg := range []string{"maker", "taker"} {
+			n := num(t, m(m(w.body)[leg])["nonce"])
+			if seen[n] {
+				t.Fatalf("nonce %d 重复", n)
+			}
+			seen[n] = true
+		}
+	}
+	if len(seen) != 8 || p.InFlight() != 0 {
+		t.Fatalf("4 笔应用 8 个不同的 nonce、收完结论后没有在途: %d 个 nonce,在途 %d", len(seen), p.InFlight())
+	}
+}
+
+func TestPairedSessionNonceSpanGate(t *testing.T) {
+	f, p, eth := newPairedSession(t)
+	f.answer(t, "/v1/orders/paired", 200, "w_paired.json")
+	p.MaxNonceSpan = 4
+	var arrived atomic.Int32
+	hold := make(chan struct{})
+	holdFirstPairedRequest(f, &arrived, hold, nil)
+	oldest := make(chan error, 1)
+	go func() {
+		_, err := p.Trade(context.Background(), goldenTrade(eth))
+		oldest <- err
+	}()
+	waitForCount(t, &arrived, 1)
+	if _, err := p.Trade(context.Background(), goldenTrade(eth)); err != nil {
+		t.Fatal(err)
+	}
+	gated := make(chan error, 1)
+	go func() {
+		_, err := p.Trade(context.Background(), goldenTrade(eth))
+		gated <- err
+	}()
+	cancelled, cancel := context.WithCancel(context.Background())
+	canceledErr := make(chan error, 1)
+	go func() {
+		_, err := p.Trade(cancelled, goldenTrade(eth))
+		canceledErr <- err
+	}()
+	time.Sleep(100 * time.Millisecond)
+	if got := arrived.Load(); got != 2 {
+		t.Fatalf("最老的一笔没收到结论时,跨度到上限的新请求不该发出: 已到 %d", got)
+	}
+	cancel()
+	if err := <-canceledErr; !errors.Is(err, context.Canceled) {
+		t.Fatalf("等待闸门时 ctx 取消应退出: %v", err)
+	}
+	close(hold)
+	if err := <-oldest; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-gated; err != nil {
+		t.Fatal(err)
+	}
+	if got := arrived.Load(); got != 3 {
+		t.Fatalf("放行后只该多发被闸住的那一笔,不含已取消的: 已到 %d", got)
+	}
+}
+
+func TestPairedSessionUnknownOutcomeBlocksNewTradesButNotInFlight(t *testing.T) {
+	f, p, eth := newPairedSession(t)
+	f.answer(t, "/v1/orders/paired", 200, "w_paired.json")
+	ok := f.routes["/v1/orders/paired"]
+	f.answer(t, "/v1/orders/paired", 500, "err404.json")
+	bad := f.routes["/v1/orders/paired"]
+	f.routes["/v1/orders/paired"] = ok
+	var arrived atomic.Int32
+	hold := make(chan struct{})
+	holdFirstPairedRequest(f, &arrived, hold, bad)
+	first := make(chan error, 1)
+	go func() {
+		_, err := p.Trade(context.Background(), goldenTrade(eth))
+		first <- err
+	}()
+	waitForCount(t, &arrived, 1)
+	if _, err := p.Trade(context.Background(), goldenTrade(eth)); !errors.Is(err, ErrSessionBlocked) {
+		t.Fatalf("5xx 应让会话锁定: %v", err)
+	}
+	before := f.count()
+	if _, err := p.Trade(context.Background(), goldenTrade(eth)); !errors.Is(err, ErrSessionBlocked) || f.count() != before {
+		t.Fatalf("锁定后新单应直接拒绝且不发请求: %v", err)
+	}
+	close(hold)
+	if err := <-first; err != nil {
+		t.Fatalf("锁定前已在途的一笔应照常收结论: %v", err)
+	}
+	if ids := p.Pending(); len(ids) != 1 {
+		t.Fatalf("待核对应只有结论未知的那一笔: %+v", ids)
 	}
 }
