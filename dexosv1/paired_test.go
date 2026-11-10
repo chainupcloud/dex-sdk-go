@@ -2,6 +2,7 @@ package dexosv1
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"strings"
@@ -79,6 +80,16 @@ func TestPairedSessionSignsTheGoldenLegs(t *testing.T) {
 	if len(res.Fills) != 1 || res.Fills[0] != (ReceiptFill{FillID: "510-0-3", Price: 827155, Lots: 12, Fee: "4.96293", FeeToken: "USDC"}) {
 		t.Fatalf("吃单腿成交: %+v", res.Fills)
 	}
+	if len(res.MakerFills) != 1 || res.MakerFills[0] != (ReceiptFill{FillID: "510-0-3", Price: 827155, Lots: 12, Fee: "-0.992586", FeeToken: "USDC"}) {
+		t.Fatalf("挂单腿成交: %+v", res.MakerFills)
+	}
+	wantFees := PairedLegFees{
+		Maker: PairedLegFee{Fee: "-0.992586", FeeToken: "USDC", Protocol: "-0.992586", Deployer: "0"},
+		Taker: PairedLegFee{Fee: "6.451809", FeeToken: "USDC", Protocol: "4.96293", Deployer: "1.488879"},
+	}
+	if res.LegFees == nil || *res.LegFees != wantFees {
+		t.Fatalf("两腿手续费: %+v", res.LegFees)
+	}
 	id := res.Request
 	if res.Seq != 510 || res.Sub != 0 || id.RequestID != g.RequestID || id.Scope != "signer:"+agentAddr || id.Nonce != g.Maker.Nonce ||
 		id.Signer != mustAddr(t, agentAddr) || id.SigningHash != g.Maker.Digest || id.CommandHash != "" {
@@ -134,6 +145,8 @@ func TestPairedSessionOutcomes(t *testing.T) {
 		{name: "执行结果落库背压", status: 503, fixture: "err503_backpressure.json"},
 		{name: "回执不是 filled", status: 200, raw: `{"status":"ok","symbol":"ETH-USD","seq":9,"sub":0,"requestId":"` + testReqID + `"}`, blocked: true},
 		{name: "requestId 对不上", status: 200, raw: `{"status":"filled","symbol":"ETH-USD","seq":9,"sub":0,"requestId":"0x` + strings.Repeat("cd", 32) + `"}`, blocked: true},
+		{name: "legFees 缺一条腿", status: 200, raw: pairedReceiptWith(t, `{"taker":{"fee":"1","feeToken":"USDC","protocol":"1","deployer":"0"}}`), blocked: true},
+		{name: "legFees 缺 feeToken", status: 200, raw: pairedReceiptWith(t, `{"maker":{"fee":"0","protocol":"0","deployer":"0"},"taker":{"fee":"1","feeToken":"USDC","protocol":"1","deployer":"0"}}`), blocked: true},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			f, p, eth := newPairedSession(t)
@@ -169,6 +182,39 @@ func TestPairedSessionOutcomes(t *testing.T) {
 				t.Fatalf("锁定后应直接拒绝且不发请求: %v", again)
 			}
 		})
+	}
+}
+
+// pairedReceiptWith w_paired.json 换掉 legFees;legFees 为空串 = 加这两个字段之前的网关(没有 legFees 与 makerFills)。
+func pairedReceiptWith(t *testing.T, legFees string) string {
+	t.Helper()
+	var r map[string]json.RawMessage
+	if err := json.Unmarshal(fixture(t, "w_paired.json"), &r); err != nil {
+		t.Fatal(err)
+	}
+	if legFees == "" {
+		delete(r, "legFees")
+		delete(r, "makerFills")
+	} else {
+		r["legFees"] = json.RawMessage(legFees)
+	}
+	out, err := json.Marshal(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(out)
+}
+
+// dex-os 加 makerFills / legFees 之前的网关:两项为空,不算回执对不上。
+func TestPairedResultFromGatewayWithoutLegFees(t *testing.T) {
+	f, p, eth := newPairedSession(t)
+	f.answerRaw(t, "/v1/orders/paired", 200, []byte(pairedReceiptWith(t, "")))
+	res, err := p.Trade(context.Background(), goldenTrade(eth))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.LegFees != nil || res.MakerFills != nil || len(res.Fills) != 1 {
+		t.Fatalf("老网关的回执: %+v", res)
 	}
 }
 

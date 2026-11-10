@@ -58,7 +58,8 @@
   形状照 dex-os `crates/gateway/src/api/v1.rs::agents`)、`w_approve_scope.json`(`sigVersion: 2` 授权的回执,
   照 `v1_write.rs::agent_approve` 的 v2 分支)、`subaccounts.json` 的 `name`(网关标签,没起过名为空串)。
 - 成对成交的样例:`w_paired.json`(200 回执,ETH-USD 子账户 1 挂买、2 吃卖,形状照 dex-os `v1_write.rs::paired_result`
-  加 `conclude_try` 的公共字段)、`err422_paired_spread.json`(`PairedTradeOutsideSpread`,num 20127)、
+  加 `conclude_try` 的公共字段;`makerFills` / `legFees` 照 dex-os feat/paired-maker-fee 的 `paired_result`,挂单腿取
+  −100ppm 返佣、吃单腿另带一笔 150ppm 的 deployer 费,让 `legFees` 的四个字段各不相同)、`err422_paired_spread.json`(`PairedTradeOutsideSpread`,num 20127)、
   `err403_paired.json`(名单外,`details = {reason: paired_trade_not_allowed, leg}`)、`err404_route.json`(接口未开)。
   规格里 200 响应只是 `{type: object}`,所以本包读的字段登记在 `write_test.go` 的 `specDeviations`。
 - `v2_quote_golden.json`:sigVersion 2 交易类写入([ActionWriter])的金样 —— 内层命令(行为人 `0xFFFFFFFF`)`BatchReplace`、
