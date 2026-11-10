@@ -211,6 +211,13 @@ func (p *PairedSession) Pending() []RequestIdentity {
 	return append([]RequestIdentity(nil), p.pending...)
 }
 
+// InFlight 已签名、还没收到结论的成交笔数。
+func (p *PairedSession) InFlight() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return len(p.flight)
+}
+
 func (p *PairedSession) nonceSpan() uint64 {
 	if p.MaxNonceSpan > 0 {
 		return uint64(p.MaxNonceSpan)

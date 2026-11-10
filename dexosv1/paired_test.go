@@ -441,6 +441,9 @@ func TestPairedSessionTradesOverlapInFlight(t *testing.T) {
 		}()
 	}
 	waitForCount(t, &arrived, 4)
+	if got := p.InFlight(); got != 4 {
+		t.Fatalf("4 笔都在途: %d", got)
+	}
 	close(release)
 	wg.Wait()
 	seen := map[uint64]bool{}
@@ -453,8 +456,8 @@ func TestPairedSessionTradesOverlapInFlight(t *testing.T) {
 			seen[n] = true
 		}
 	}
-	if len(seen) != 8 {
-		t.Fatalf("4 笔应用 8 个不同的 nonce,得到 %d", len(seen))
+	if len(seen) != 8 || p.InFlight() != 0 {
+		t.Fatalf("4 笔应用 8 个不同的 nonce、收完结论后没有在途: %d 个 nonce,在途 %d", len(seen), p.InFlight())
 	}
 }
 
