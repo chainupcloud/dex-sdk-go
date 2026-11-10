@@ -21,13 +21,18 @@ import (
 // 每条腿是一个 `sigVersion: 2` 信封:签 Action(账户, 编号, keccak(PairedTradeLeg), nonce, expiry),内层写明角色、
 // 市场、价量、挂单方向、对手账户与 nowMs。nonce 是签名者的窗口 nonce(见 [WindowNonce]),两条腿各取一个。
 
-// PairedSession 一把 API 钱包代两个账户(挂单方 Maker、吃单方 Taker)做成对成交的会话。并发安全(成交串行)。
+// PairedSession 一把 API 钱包代两个账户(挂单方 Maker、吃单方 Taker)做成对成交的会话。并发安全:同一会话可以同时有多笔成交在途,
+// 锁只包住检查、取 nonce、签名与写前日志,发送和等结论不持锁。
+//
+// 窗口 nonce 的窗口只记最近 100 个:在途的一笔到达时,若后签的请求已让窗口里堆满更大的 nonce,它会被拒成 NonceMismatch
+// (验签阶段拒绝,没执行,nonce 没消耗,可以换新 nonce 重发)。[PairedSession.MaxNonceSpan] 限制这种乱序的幅度:最老的在途请求
+// 与新请求相隔达到该个数的 nonce 时,新请求等最老的收到结论再签。
 //
 // 结局分两类:执行层拒绝(422,如 PairedTradeOutsideSpread、被拒那条腿的 InsufficientMargin,两腿都没生效)
 // 与定序前的拒绝(400 / 401 / 403 / 404 / 429 …)是终局结论,原样返回 [*Error],会话照常可用 —— 窗口 nonce
 // 没有计数器,一次被拒不会让后面错位。202([ErrPending])、连上之后的传输失败、5xx、回执对不上是结论未知:
-// 会话锁定([ErrSessionBlocked]),[PairedSession.Pending] 给出挂单腿的请求身份,用它查 [Client.Request]
-// 核对之后再新建会话。**不要重发**:每次成交都签新的 nonce,重发就是另一笔成交。
+// 会话锁定([ErrSessionBlocked]),此后不再签新单,已在途的各自收结论;[PairedSession.Pending] 给出所有结论未知的请求
+// (挂单腿的请求身份),用它们查 [Client.Request] 核对之后再新建会话。**不要重发**:每次成交都签新的 nonce,重发就是另一笔成交。
 type PairedSession struct {
 	Client *Client
 	Agent  *dexos.Signer
@@ -35,14 +40,22 @@ type PairedSession struct {
 	Taker  AccountRef
 	// ValidUntil 两条腿授权里较早的到期时刻;零值 = 不过期(或 owner 本人签)。
 	ValidUntil time.Time
+	// MaxNonceSpan 最老的在途请求与新请求之间最多相隔的 nonce 个数(每笔成交两个);0 = [DefaultPairedNonceSpan]。
+	MaxNonceSpan int
 
 	domain  dexos.Domain
 	now     func() time.Time
 	nonces  *windowNonces
 	mu      sync.Mutex
+	changed chan struct{}
+	seq     uint64
+	flight  map[uint64]struct{}
 	blocked error
-	pending *RequestIdentity
+	pending []RequestIdentity
 }
+
+// DefaultPairedNonceSpan 窗口 100 减去留给时钟取整与同一签名者其他写的余量。
+const DefaultPairedNonceSpan = 60
 
 // NewPairedSession 读连接参数与两条腿账户的授权列表,建会话。maker / taker 是钱包寻址(sigVersion 2 不支持金库身份),
 // 不能是同一个账户。agent 就是某条腿的 owner 时那条腿由 owner 本人签,不查授权;否则要有按账户授权或位图覆盖该编号的
@@ -67,7 +80,7 @@ func NewPairedSession(ctx context.Context, c *Client, agent *dexos.Signer, maker
 	if err != nil {
 		return nil, err
 	}
-	p := &PairedSession{Client: c, Agent: agent, Maker: maker, Taker: taker, domain: d, now: time.Now, nonces: &processNonces}
+	p := &PairedSession{Client: c, Agent: agent, Maker: maker, Taker: taker, domain: d, now: time.Now, nonces: &processNonces, changed: make(chan struct{}), flight: map[uint64]struct{}{}}
 	for _, r := range []AccountRef{maker, taker} {
 		if agent.Address() == r.Address {
 			continue
@@ -167,7 +180,7 @@ type PairedTradeIntent struct {
 	TakerNonce uint64
 }
 
-// PairedTradeJournal 成对成交的写前日志,规则同 [ReplaceJournal]:两个回调都在会话的锁里调用。BeforeSend 先把 intent
+// PairedTradeJournal 成对成交的写前日志,规则同 [ReplaceJournal],但回调可能并发调用,实现须并发安全:BeforeSend 在会话锁里调用,AfterReceive 在锁外调用。BeforeSend 先把 intent
 // 提交到本地存储再返回 nil;返回包着 [ErrRequestDeclined] 的错误 = 不发、不锁,其余错误即锁定会话。AfterReceive 记下结论
 // (result 非 nil 时 err 为 nil),返回错误即锁定会话。
 type PairedTradeJournal interface {
@@ -188,11 +201,65 @@ func (p *PairedSession) TradeJournaled(ctx context.Context, t PairedTrade, journ
 	return p.trade(ctx, t, journal)
 }
 
-// Pending 锁定时结论未知的那次成交(挂单腿的请求身份);没锁定为 nil。
-func (p *PairedSession) Pending() *RequestIdentity {
+// Pending 锁定时结论未知的所有成交(挂单腿的请求身份,按发生先后);没有为 nil。
+func (p *PairedSession) Pending() []RequestIdentity {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return p.pending
+	if len(p.pending) == 0 {
+		return nil
+	}
+	return append([]RequestIdentity(nil), p.pending...)
+}
+
+func (p *PairedSession) nonceSpan() uint64 {
+	if p.MaxNonceSpan > 0 {
+		return uint64(p.MaxNonceSpan)
+	}
+	return DefaultPairedNonceSpan
+}
+
+func (p *PairedSession) spanFull() bool {
+	if len(p.flight) == 0 {
+		return false
+	}
+	oldest := p.seq
+	for s := range p.flight {
+		oldest = min(oldest, s)
+	}
+	return p.seq+2-oldest > p.nonceSpan()
+}
+
+func (p *PairedSession) notifyLocked() {
+	close(p.changed)
+	p.changed = make(chan struct{})
+}
+
+func (p *PairedSession) admit(ctx context.Context) (uint64, uint64, error) {
+	for {
+		if p.blocked != nil {
+			return 0, 0, p.blocked
+		}
+		if err := ctx.Err(); err != nil {
+			return 0, 0, err
+		}
+		now := p.now()
+		if !p.ValidUntil.IsZero() && !now.Before(p.ValidUntil) {
+			return 0, 0, ErrAgentExpired
+		}
+		if !p.spanFull() {
+			start := p.seq
+			p.seq += 2
+			p.flight[start] = struct{}{}
+			return start, uint64(now.UnixMilli()), nil
+		}
+		changed := p.changed
+		p.mu.Unlock()
+		select {
+		case <-ctx.Done():
+		case <-changed:
+		}
+		p.mu.Lock()
+	}
 }
 
 func (p *PairedSession) trade(ctx context.Context, t PairedTrade, journal PairedTradeJournal) (*PairedTradeResult, error) {
@@ -200,23 +267,39 @@ func (p *PairedSession) trade(ctx context.Context, t PairedTrade, journal Paired
 		return nil, err
 	}
 	p.mu.Lock()
-	defer p.mu.Unlock()
-	if p.blocked != nil {
-		return nil, p.blocked
-	}
-	if err := ctx.Err(); err != nil {
+	start, now, err := p.admit(ctx)
+	if err != nil {
+		p.mu.Unlock()
 		return nil, err
 	}
-	now := p.now()
-	if !p.ValidUntil.IsZero() && !now.Before(p.ValidUntil) {
-		return nil, ErrAgentExpired
+	in, body, err := p.prepare(ctx, t, now, journal)
+	p.mu.Unlock()
+	var out *PairedTradeResult
+	if err == nil {
+		out, err = p.post(ctx, t.Market, body, in.Request)
+		if journal != nil {
+			if jerr := journal.AfterReceive(ctx, in, out, err); jerr != nil {
+				if err != nil {
+					jerr = fmt.Errorf("%w(发送结论: %v)", jerr, err)
+				}
+				out, err = nil, &journalError{err: jerr}
+			}
+		}
 	}
-	out, id, err := p.send(ctx, t, uint64(now.UnixMilli()), journal)
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	delete(p.flight, start)
+	p.notifyLocked()
 	if err == nil || pairedDefinite(err) {
 		return out, err
 	}
-	p.blocked = fmt.Errorf("%w(requestId %s): %w", ErrSessionBlocked, id.RequestID, err)
-	p.pending = id
+	if in.Request == nil {
+		return nil, err
+	}
+	if p.blocked == nil {
+		p.blocked = fmt.Errorf("%w(requestId %s): %w", ErrSessionBlocked, in.Request.RequestID, err)
+	}
+	p.pending = append(p.pending, *in.Request)
 	return nil, p.blocked
 }
 
@@ -254,8 +337,8 @@ type wirePairedReq struct {
 	Taker     wirePairedLeg `json:"taker"`
 }
 
-// send 签两条腿、记写前日志、发送、解析回执。返回的请求身份在签名之后恒非 nil。
-func (p *PairedSession) send(ctx context.Context, t PairedTrade, now uint64, journal PairedTradeJournal) (*PairedTradeResult, *RequestIdentity, error) {
+// prepare 取两个 nonce、签两条腿、记写前日志;持会话锁调用。返回的意图在签名之后带请求身份。
+func (p *PairedSession) prepare(ctx context.Context, t PairedTrade, now uint64, journal PairedTradeJournal) (PairedTradeIntent, wirePairedReq, error) {
 	agent := p.Agent.Address()
 	in := PairedTradeIntent{Domain: p.domain, Maker: p.Maker, Taker: p.Taker, Trade: t, NowMs: now,
 		MakerNonce: p.nonces.next(agent, now), TakerNonce: p.nonces.next(agent, now)}
@@ -277,7 +360,7 @@ func (p *PairedSession) send(ctx context.Context, t PairedTrade, now uint64, jou
 		digest := p.domain.ActionHash(leg.me.Address, uint16(leg.me.Subaccount), inner, leg.nonce, expiry)
 		sig, err := p.Agent.SignHashHex(digest)
 		if err != nil {
-			return nil, nil, fmt.Errorf("%w: %w", ErrNotSent, err)
+			return in, body, fmt.Errorf("%w: %w", ErrNotSent, err)
 		}
 		*leg.out = wirePairedLeg{SigVersion: 2, Account: leg.me.Address.Hex(), Subaccount: leg.me.Subaccount, Signer: agent.Hex(),
 			Nonce: leg.nonce, ExpiresAt: expiry, Signature: sig}
@@ -290,21 +373,12 @@ func (p *PairedSession) send(ctx context.Context, t PairedTrade, now uint64, jou
 	if journal != nil {
 		if err := journal.BeforeSend(ctx, in); err != nil {
 			if errors.Is(err, ErrRequestDeclined) {
-				return nil, id, fmt.Errorf("%w: %w", ErrNotSent, err)
+				return in, body, fmt.Errorf("%w: %w", ErrNotSent, err)
 			}
-			return nil, id, &journalError{err: err}
+			return in, body, &journalError{err: err}
 		}
 	}
-	out, err := p.post(ctx, t.Market, body, id)
-	if journal != nil {
-		if jerr := journal.AfterReceive(ctx, in, out, err); jerr != nil {
-			if err != nil {
-				return nil, id, &journalError{err: fmt.Errorf("%w(发送结论: %v)", jerr, err)}
-			}
-			return nil, id, &journalError{err: jerr}
-		}
-	}
-	return out, id, err
+	return in, body, nil
 }
 
 func (p *PairedSession) post(ctx context.Context, m *Market, body wirePairedReq, id *RequestIdentity) (*PairedTradeResult, error) {

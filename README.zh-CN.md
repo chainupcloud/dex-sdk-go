@@ -135,7 +135,7 @@ m, err  = cat.MarketByID(7)                              // 市场号(signingMar
 | `*dexosv1.Error` | 业务拒绝或网关拒绝(`Code` 是拒因,如 `InsufficientMargin`) | 终局结论,会话不锁,改参数再发 |
 | `*dexosv1.RateLimitedError` | 429:扣光的是 IP 桶还是账户桶、`RetryAfter` | SDK 不重试;怎么退让(例如只暂停一个币对)由你定 |
 | `dexosv1.ErrNotSent` | 请求没发出(本地校验失败、连接没建起来) | 确定没发出,会话不锁、nonce 不动,可以原样重发 |
-| `dexosv1.ErrPending` | 已定序,结论未知(202 / 连上之后的传输失败 / 5xx) | **不要重发**。会话已锁,用 `s.Pending()` 的请求身份查 `c.Request`,核对后新建会话 |
+| `dexosv1.ErrPending` | 已定序,结论未知(202 / 连上之后的传输失败 / 5xx) | **不要重发**。会话已锁,用 `s.Pending()` 的请求身份(成对成交可能有多笔)查 `c.Request`,核对后新建会话 |
 | `dexosv1.ErrIncompleteBatch` | 批量回执的逐项结局对不上请求 | 批次已执行但说不清哪些成了:先按账户读取核对 |
 | `dexosv1.ErrSessionBlocked` | 上一次写入结论未知,会话禁止继续消耗 nonce | 同 `ErrPending` |
 
@@ -176,7 +176,7 @@ res, err := p.Trade(ctx, dexosv1.PairedTrade{Market: btc, MakerSide: dexos.Sell,
 ```
 
 422(`PairedTradeOutsideSpread`、被拒那条腿的 `InsufficientMargin` …)与定序前的 4xx 是终局结论,会话照常可用;
-202 / 传输失败 / 5xx 是结论未知,会话锁定,`p.Pending()` 给出挂单腿的请求身份(成对成交的 requestId 就是它)。
+202 / 传输失败 / 5xx 是结论未知,会话锁定,`p.Pending()` 给出所有结论未知的成交的挂单腿请求身份(成对成交的 requestId 就是它);会话允许并发 `Trade`(只有签名串行),锁定后不再签新单。
 要在发出之前落账,用 `PairedSession.TradeJournaled`。撤销 owner 级授权:主钱包签 `domain.RevokeAgentScopeTypedData`
 (位图与有效期都为 0 的 `ApproveAgentScope`),交给 `c.SubmitAgentScopeRevoke`(走 `/v1/account/agents/revoke`;授权端点不收位图 0)。`Agents` 的结果里 owner 级授权是 `Scope == "owner"`:
 它出现在 owner 名下每个编号的列表里,能不能交易某个编号看 `SubaccountMask`。
