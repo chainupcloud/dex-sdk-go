@@ -787,7 +787,8 @@ var specDeviations = map[string][]string{
 	// `POST /v1/orders/paired` 的 200 响应在规格里只是 `{type: object}`,字段只写在 description 里
 	// (`{status: "filled", symbol, price, size, makerOrderId, takerOrderId, fills, avgPrice, seq, sub, requestId}`);
 	// 本包照 dex-os v1_write.rs paired_result + conclude_try 读(`kind` 是 dex-os#321 加的,description 里也还没写)。
-	"PairedResult":      {"status", "symbol", "kind", "price", "size", "makerOrderId", "takerOrderId", "avgPrice", "fills"},
+	// `makerFills` / `legFees` 由 dex-os feat/paired-maker-fee 加进实现与规格,钉住的副本同步之后删掉这两项。
+	"PairedResult":      {"status", "symbol", "kind", "price", "size", "makerOrderId", "takerOrderId", "avgPrice", "fills", "makerFills", "legFees"},
 	"PairedResult(ack)": {"status", "seq", "sub", "duplicate", "requestId"},
 	// `GET /v1/builder` 的目录行:dex-os#321 的实现带 `signingMarketId`(api_e2e test_v1_builder 断言了它),
 	// 规格的 BuilderView.catalog.markets[] 只加了 `kind`(TestDecodedFieldsExistInPinnedSpec 按这张表放行)。

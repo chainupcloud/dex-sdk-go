@@ -129,6 +129,28 @@ type PairedTradeResult struct {
 	// AvgPrice / Fills 吃单腿的成交均价与逐笔成交;AvgPrice nil = 回执没给。
 	AvgPrice *uint32
 	Fills    []ReceiptFill
+	// MakerFills 挂单腿的逐笔成交,与 Fills 同一 FillID;Fee 是挂单腿的协议费(负 = 返佣),
+	// 与挂单方 `/v1/account/fills` 里同一笔相同。
+	MakerFills []ReceiptFill
+	// LegFees 两条腿在这次成交上实付的手续费;nil = 网关没给(dex-os 加 legFees 之前的版本)。
+	LegFees *PairedLegFees
+}
+
+// PairedLegFees 成对成交两条腿各自实付的手续费(dex-os docs/specs/paired-trade.md §4.5)。
+type PairedLegFees struct {
+	Maker PairedLegFee
+	Taker PairedLegFee
+}
+
+// PairedLegFee 一条腿实付的手续费,都是按 FeeToken 小数位的十进制串,正 = 付出、负 = 返佣。
+// Fee = 该腿账户在同一 seq 的流水里 taker_fee / maker_fee / maker_rebate / deployer_fee / builder_fee 之和取负
+// = Protocol + Deployer;Protocol = 这条腿逐笔成交的 Fee 之和;Deployer 只有吃单腿会有。
+// FeeToken:合约 = 结算 token;现货 = 这条腿收到的币(买腿 base、卖腿 quote)。
+type PairedLegFee struct {
+	Fee      string
+	FeeToken string
+	Protocol string
+	Deployer string
 }
 
 // PairedTradeIntent 一次成对成交在发出之前就确定的全部内容。两条腿的签名由 Domain、Maker / Taker、Trade、NowMs
@@ -307,6 +329,25 @@ type wirePairedResult struct {
 	TakerOrderID string            `json:"takerOrderId"`
 	AvgPrice     *string           `json:"avgPrice"`
 	Fills        []wireReceiptFill `json:"fills"`
+	MakerFills   []wireReceiptFill `json:"makerFills"`
+	LegFees      *struct {
+		Maker *wirePairedLegFee `json:"maker"`
+		Taker *wirePairedLegFee `json:"taker"`
+	} `json:"legFees"`
+}
+
+type wirePairedLegFee struct {
+	Fee      string `json:"fee"`
+	FeeToken string `json:"feeToken"`
+	Protocol string `json:"protocol"`
+	Deployer string `json:"deployer"`
+}
+
+func pairedLegFee(role string, w *wirePairedLegFee) (PairedLegFee, error) {
+	if w == nil || w.Fee == "" || w.FeeToken == "" || w.Protocol == "" || w.Deployer == "" {
+		return PairedLegFee{}, fmt.Errorf("dexosv1: 成对成交回执 legFees.%s 不完整: %+v", role, w)
+	}
+	return PairedLegFee(*w), nil
 }
 
 // pairedResult 解析 200 回执(dex-os v1_write.rs paired_result):状态必须是 filled、符号是本市场。
@@ -341,6 +382,19 @@ func pairedResult(m *Market, r Receipt, raw []byte) (*PairedTradeResult, error) 
 	}
 	if out.Fills, err = receiptFills(m, w.Fills); err != nil {
 		return nil, err
+	}
+	if out.MakerFills, err = receiptFills(m, w.MakerFills); err != nil {
+		return nil, err
+	}
+	if w.LegFees != nil {
+		var fees PairedLegFees
+		if fees.Maker, err = pairedLegFee("maker", w.LegFees.Maker); err != nil {
+			return nil, err
+		}
+		if fees.Taker, err = pairedLegFee("taker", w.LegFees.Taker); err != nil {
+			return nil, err
+		}
+		out.LegFees = &fees
 	}
 	return out, nil
 }
