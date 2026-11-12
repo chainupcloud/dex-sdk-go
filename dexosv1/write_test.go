@@ -153,7 +153,7 @@ func gatewayRequestID(t *testing.T, cat *Catalog, path string, body any) string 
 		return dexos.NewOrderID(gatewayMarket(t, cat, item).SigningMarketID, seq)
 	}
 	nonce := num(t, env["nonce"])
-	if (path == "/v1/orders/replace" || path == "/v1/orders/cancel") && env["sigVersion"] != nil && num(t, env["sigVersion"]) == 2 {
+	if (path == "/v1/orders/replace" || path == "/v1/orders/cancel" || path == "/v1/orders" || path == "/v1/orders/cancel-all") && env["sigVersion"] != nil && num(t, env["sigVersion"]) == 2 {
 		digest, signer := gatewayAction(t, cat, path, body)
 		return "0x" + hex.EncodeToString(dexos.Keccak256(signer[:], digest))
 	}

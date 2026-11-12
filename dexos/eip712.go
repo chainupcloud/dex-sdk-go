@@ -20,6 +20,7 @@ const (
 	// 子账户模型 v2(sigVersion 2):账户 = (owner 地址, uint16 子账户编号),不含内部账户号
 	actionType            = "Action(address account,uint16 subaccount,bytes32 action,uint64 nonce,uint64 expiry)"
 	approveAgentScopeType = "ApproveAgentScope(address owner,address agent,uint64 subaccountMask,uint64 validUntilMs,uint64 nonce)"
+	vaultActionType       = "VaultAction(address account,uint16 vault,bytes32 action,uint64 nonce,uint64 expiry)"
 )
 
 // Keccak256 以太坊口径的 keccak(不是 SHA3-256)。
@@ -141,6 +142,21 @@ func (d Domain) ActionHash(account Address, subaccount uint16, commandBytes []by
 		wordU64(expiry),
 	)
 	return d.signingHash(sh)
+}
+
+func (d Domain) VaultActionHash(account Address, vault uint16, commandBytes []byte, nonce, expiry uint64) []byte {
+	return d.vaultActionHash(account, vault, Keccak256(commandBytes), nonce, expiry)
+}
+
+func (d Domain) vaultActionHash(account Address, vault uint16, action []byte, nonce, expiry uint64) []byte {
+	return d.signingHash(Keccak256(
+		Keccak256([]byte(vaultActionType)),
+		wordAddr(account),
+		wordU64(uint64(vault)),
+		action,
+		wordU64(nonce),
+		wordU64(expiry),
+	))
 }
 
 // ApproveAgentScopeHash 「owner 级授权 API 钱包」的待签哈希(dex-os 子账户模型 v2 §3.4)。一份授权覆盖 owner 名下
