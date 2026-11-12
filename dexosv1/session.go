@@ -147,20 +147,9 @@ func NewSession(ctx context.Context, c *Client, agent *dexos.Signer, ref Account
 	if err != nil {
 		return nil, err
 	}
-	grant := ref
-	if ref.Vault != nil {
-		v, err := c.Vault(ctx, *ref.Vault)
-		if err != nil {
-			return nil, err
-		}
-		if v.Manager == nil {
-			return nil, fmt.Errorf("dexosv1: 金库 %d 待认领,没有 manager,不能交易", *ref.Vault)
-		}
-		manager, err := dexos.ParseAddress(*v.Manager)
-		if err != nil {
-			return nil, fmt.Errorf("dexosv1: 金库 %d 的 manager: %w", *ref.Vault, err)
-		}
-		grant = AccountRef{Address: manager, Subaccount: *v.ManagerSubaccount}
+	grant, err := grantAccount(ctx, c, ref)
+	if err != nil {
+		return nil, err
 	}
 	agents, err := c.Agents(ctx, grant)
 	if err != nil {
@@ -179,6 +168,24 @@ func NewSession(ctx context.Context, c *Client, agent *dexos.Signer, ref Account
 	}
 	s.signingID, s.guard.nonce = n.SigningAccountID, n.Nonce
 	return s, nil
+}
+
+func grantAccount(ctx context.Context, c *Client, ref AccountRef) (AccountRef, error) {
+	if ref.Vault == nil {
+		return ref, nil
+	}
+	v, err := c.Vault(ctx, *ref.Vault)
+	if err != nil {
+		return AccountRef{}, err
+	}
+	if v.Manager == nil {
+		return AccountRef{}, fmt.Errorf("dexosv1: 金库 %d 待认领,没有 manager,不能交易", *ref.Vault)
+	}
+	manager, err := dexos.ParseAddress(*v.Manager)
+	if err != nil {
+		return AccountRef{}, fmt.Errorf("dexosv1: 金库 %d 的 manager: %w", *ref.Vault, err)
+	}
+	return AccountRef{Address: manager, Subaccount: *v.ManagerSubaccount}, nil
 }
 
 // grantOf 这把钥匙代 sub 号账户签名的授权,与执行层 agent_authorized 同口径:按账户授权,或位图覆盖这个编号的

@@ -396,10 +396,6 @@ func TestNonceSource(t *testing.T) {
 
 func TestNewActionWriterChecks(t *testing.T) {
 	f, c := newWriteFake(t)
-	vault := uint16(3)
-	if _, err := NewActionWriter(context.Background(), c, signer(t, agentKey), AccountRef{Vault: &vault}, NewNonceSource(0)); !errors.Is(err, ErrVaultAction) {
-		t.Fatalf("金库寻址: %v", err)
-	}
 	f.routes["/v1/account/agents"] = func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("content-type", "application/json")
 		_, _ = w.Write([]byte(`{"address":"` + ownerAddr + `","agents":[],"subaccount":5}`))
@@ -427,7 +423,10 @@ func gatewayAction(t *testing.T, cat *Catalog, path string, body any) ([]byte, d
 	if isBatch {
 		env = m(items[0])
 	}
-	mk := gatewayMarket(t, cat, env)
+	var mk *Market
+	if path != "/v1/orders/cancel-all" {
+		mk = gatewayMarket(t, cat, env)
+	}
 	seq := func(v any) uint64 {
 		n, err := strconv.ParseUint(v.(string), 10, 64)
 		if err != nil {
@@ -465,6 +464,14 @@ func gatewayAction(t *testing.T, cat *Catalog, path string, body any) ([]byte, d
 			}
 			inner = dexos.EncodeBatchCancel(dexos.ActorPlaceholder, ids)
 		}
+	case "/v1/orders":
+		orders := make([]dexos.BatchOrder, len(items))
+		for i, it := range items {
+			orders[i] = gatewayOrder(t, cat, m(it))
+		}
+		inner = dexos.EncodeBatchPlace(dexos.ActorPlaceholder, num(t, env["nowMs"]), orders)
+	case "/v1/orders/cancel-all":
+		inner = dexos.EncodeScheduleCancel(dexos.ActorPlaceholder, num(t, env["nowMs"]), num(t, env["nowMs"]))
 	default:
 		t.Fatalf("假网关不会算 %s 的 sigVersion 2 请求身份", path)
 	}
@@ -476,6 +483,13 @@ func gatewayAction(t *testing.T, cat *Catalog, path string, body any) ([]byte, d
 	if s, ok := env["signer"].(string); ok {
 		who = s
 	}
-	digest := testDomain.ActionHash(mustAddr(t, env["account"].(string)), uint16(num(t, env["subaccount"])), inner, num(t, env["nonce"]), expiry)
+	account := mustAddr(t, env["account"].(string))
+	if env["vault"] != nil {
+		if _, ok := env["subaccount"]; ok {
+			t.Fatalf("vault 与 subaccount 互斥(网关 400): %v", env)
+		}
+		return testDomain.VaultActionHash(account, uint16(num(t, env["vault"])), inner, num(t, env["nonce"]), expiry), mustAddr(t, who)
+	}
+	digest := testDomain.ActionHash(account, uint16(num(t, env["subaccount"])), inner, num(t, env["nonce"]), expiry)
 	return digest, mustAddr(t, who)
 }
