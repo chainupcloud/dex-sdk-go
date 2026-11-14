@@ -771,6 +771,22 @@ func TestLedgerFilters(t *testing.T) {
 	}
 }
 
+func TestLedgerEntryCarriesBlockTime(t *testing.T) {
+	f, c := newFake(t)
+	f.routes["/v1/account/ledger"] = func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"address":"0x1111111111111111111111111111111111111111","subaccount":0,"epoch":"k1-1","upper":"9-0-0","hasMore":false,"next":"8-0-1",
+			"entries":[{"id":"7-0-0","seq":7,"sub":0,"idx":0,"kind":"funding","token":"USDC","amount":"-0.125","symbol":"BTC-USD","signingMarketId":3,"ts":1763100000123},
+			{"id":"8-0-1","seq":8,"sub":0,"idx":1,"kind":"funding","token":"USDC","amount":"0.5","symbol":"ETH-USD","signingMarketId":4,"ts":null}]}`))
+	}
+	h, err := c.Ledger(context.Background(), AccountRef{Address: mustAddr(t, testAddr)}, LedgerQuery{Kind: "funding"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(h.Entries) != 2 || h.Entries[0].TS == nil || *h.Entries[0].TS != 1763100000123 || h.Entries[1].TS != nil {
+		t.Fatalf("流水区块时间不对: %+v", h.Entries)
+	}
+}
+
 // 持仓 size 带符号(多为正、空为负),换成带符号的 lot;side 与符号对不上就报错。
 func TestPositionsSignedSize(t *testing.T) {
 	f, c := newFake(t)

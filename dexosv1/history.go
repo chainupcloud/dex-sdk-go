@@ -234,6 +234,8 @@ type LedgerEntry struct {
 	// Vault 只在 `vault_*` 条目上有(v1.1 §4.3):以金库身份查 = 该金库;否则 = 对手账户所属的金库,
 	// 对手不是金库(creator 一侧的 vault_fee)为 nil。WS `ledger` 帧的条目与 REST 相同。
 	Vault *uint16 `json:"vault"`
+	// TS 这条流水所在执行的区块时间(unix 毫秒);nil = 节点没给。资金费按它定结算时刻。
+	TS *int64 `json:"ts"`
 }
 
 // LedgerQuery 流水查询:Kind / Token / External 是可选过滤,其余同 [HistoryQuery]。
