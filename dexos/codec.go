@@ -245,10 +245,10 @@ func EncodeBatchReplace2(account uint32, nowMs uint64, cancels []OrderID, modifi
 // CommandRef 引用此前一条 BatchReplace3 挂出的第 Item 张新单:Seq / Sub 是那条命令定序回执里的位号,
 // Item 是那条命令里第几个输入(改单项在前、新单在后,从 0 起;撤单项不编号)。
 type CommandRef struct {
-	Market uint16
-	Seq    uint64
-	Sub    uint16
-	Item   uint16
+	Market uint16 `json:"market"`
+	Seq    uint64 `json:"seq"`
+	Sub    uint16 `json:"sub"`
+	Item   uint16 `json:"item"`
 }
 
 // OrderTarget BatchReplace3 的撤单、改单目标:OrderID 与 Ref 恰好给一个。

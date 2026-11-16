@@ -195,6 +195,9 @@ func (r *RequestReceipt) CheckReplace(req ReplaceRequest) error {
 	if (r.Status != ReceiptExecuted && !whole) || r.NonceConsumed == nil || !*r.NonceConsumed {
 		return fmt.Errorf("dexos: 回执结论 %q 不是已执行的批次结局", r.Status)
 	}
+	if len(req.CancelRefs) != 0 && len(req.CancelRefs) != len(req.Cancels) {
+		return fmt.Errorf("dexos: CancelRefs 有 %d 项,撤单项有 %d 个", len(req.CancelRefs), len(req.Cancels))
+	}
 	cancels := make([]OrderID, len(req.Cancels))
 	for i, seq := range req.Cancels {
 		cancels[i] = NewOrderID(req.Market, seq)
@@ -215,9 +218,9 @@ func (r *RequestReceipt) CheckReplace(req ReplaceRequest) error {
 		if r.Sub != nil {
 			re.Sub = *r.Sub
 		}
-		return checkWholeRejected(receipt, re, req.Identity.Account, req.Orders, cancels)
+		return checkWholeRejected(receipt, re, req.Identity.Account, req.Orders, cancels, req.CancelRefs)
 	}
-	return checkBatchOutcome(receipt, req.Identity.Account, req.Orders, cancels)
+	return checkBatchOutcomeRefs(receipt, req.Identity.Account, req.Orders, cancels, req.CancelRefs)
 }
 
 // RequestID 服务端对这次请求的身份:keccak256(代理地址 ‖ SigningHash)。
