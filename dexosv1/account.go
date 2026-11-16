@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -384,26 +385,42 @@ func (c *Client) Nonce(ctx context.Context, ref AccountRef, signer *dexos.Addres
 
 // Agent 一把已授权的 API 钱包。ValidUntil nil = 不过期。
 //
-// 列表里有两种授权(dex-os 子账户模型 v2 §3.4):Scope "account" 授权在被问的这个账户上;"owner" 是 owner 级授权,
-// 覆盖 SubaccountMask 里的编号。服务端在 owner 名下**每个**编号的列表里都列出该 owner 的全部 owner 级授权,
-// 包括不覆盖这个编号的 —— 能不能交易某个编号要看位图。
+// 旧账本上有两种授权(dex-os 子账户模型 v2 §3.4):Scope "account" 授权在被问的这个账户上;"owner" 是 owner 级授权,
+// 覆盖 SubaccountMask 里的编号。安全账本上一律是 Scope "grant":一份 141 grant,Subaccounts 是它账户集里属于这个
+// 钱包的编号,能不能用看 Executable。
 type Agent struct {
 	Address    string `json:"address"`
 	Label      string `json:"label"`
 	ValidUntil *int64 `json:"validUntil"`
 	Expired    bool   `json:"expired"`
-	// Scope "account" | "owner"。
+	// Scope "account" | "owner" | "grant"。
 	Scope string `json:"scope"`
 	// SubaccountMask owner 级授权的位图,第 i 位 = 编号 i(可以覆盖还没建的编号);按账户授权为 0。
 	SubaccountMask uint64 `json:"subaccountMask,string"`
-	// Subaccounts owner 级授权覆盖的编号(位图里置位的那些);按账户授权为 nil。
+	// Subaccounts owner 级授权或 grant 覆盖的编号;按账户授权为 nil。
 	Subaccounts []uint32 `json:"subaccounts"`
+	AgentGrantTerms
 }
 
-// covers 这条授权能不能代编号 sub 的账户签名(授权取自 sub 号账户的列表):按账户授权就是这个账户的;owner 级授权看位图。
+// AgentGrantTerms 安全账本上 grant 的条款;旧账本上全为零值。
+type AgentGrantTerms struct {
+	GrantID    string   `json:"grantId"`
+	GrantEpoch uint64   `json:"grantEpoch,string"`
+	Status     string   `json:"status"`
+	Actions    []uint16 `json:"actions"`
+	ValidFrom  *int64   `json:"validFrom"`
+	Executable bool     `json:"executable"`
+	Dex        *uint16  `json:"dex"`
+}
+
+// covers 这条授权能不能代编号 sub 的账户签名(授权取自 sub 号账户的列表):按账户授权就是这个账户的;owner 级授权看位图;
+// grant 要覆盖这个编号且当前可执行。
 func (a Agent) covers(sub uint32) bool {
-	if a.Scope == "owner" {
+	switch a.Scope {
+	case "owner":
 		return sub < 64 && a.SubaccountMask>>sub&1 == 1
+	case "grant":
+		return a.Executable && slices.Contains(a.Subaccounts, sub)
 	}
 	return true
 }
@@ -426,6 +443,7 @@ func (c *Client) Agents(ctx context.Context, ref AccountRef) ([]Agent, error) {
 
 // AgentGrant 一把 API 钱包被授权代表的一个账户(`GET /v1/agents/{address}`)。
 // Address 是被代表账户的主钱包地址;金库授权时是 manager 的主钱包,Vault 给出金库号、Subaccount 为 nil。
+// 安全账本上每份 grant 按它覆盖的每个编号各列一行,条款在 AgentGrantTerms;金库账户上的 grant 不在这里列。
 type AgentGrant struct {
 	Address    string  `json:"address"`
 	Subaccount *uint32 `json:"subaccount"`
@@ -434,6 +452,7 @@ type AgentGrant struct {
 	ValidUntil *int64  `json:"validUntil"`
 	// Expired 过期的授权也列出(需要续期,不是被撤销)。
 	Expired bool `json:"expired"`
+	AgentGrantTerms
 }
 
 // AgentGrants 按 API 钱包地址反查它被授权的账户。只凭 API 钱包私钥起步的进程用它找到要交易的账户。

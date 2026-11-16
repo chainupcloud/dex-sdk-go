@@ -368,3 +368,24 @@ func TestDecodeCommandRecoversSignersAndRejectsTampering(t *testing.T) {
 		t.Fatalf("179 解码不对: %+v", p)
 	}
 }
+
+func TestAnalyticsEpochMatchesDexOSNamespace(t *testing.T) {
+	fill := func(b byte) Hash {
+		var h Hash
+		for i := range h {
+			h[i] = b
+		}
+		return h
+	}
+	for _, c := range []struct {
+		net  Network
+		want string
+	}{
+		{Network{NetworkID: fill(0x11), GenesisHash: fill(0x22), LedgerEpoch: 1}, "sec1:5f436038314c7044dab7c093e2dab4b5bd492baac3eeec3a44f895c754395b10"},
+		{Network{NetworkID: fill(0x11), GenesisHash: fill(0x22), LedgerEpoch: 256}, "sec1:f8f02546e0fab624db26b7b0a1529677f4257a2d2c9c1b46b219db080d853893"},
+	} {
+		if got := c.net.AnalyticsEpoch(); got != c.want {
+			t.Fatalf("纪元 %d: got %s want %s", c.net.LedgerEpoch, got, c.want)
+		}
+	}
+}

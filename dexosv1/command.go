@@ -327,3 +327,8 @@ func pubAddress(pub *secp256k1.PublicKey) dexos.Address {
 	copy(a[:], dexos.Keccak256(pub.SerializeUncompressed()[1:])[12:])
 	return a
 }
+
+// AnalyticsEpoch 安全账本上账户读口与历史查询用的执行纪元字符串(`sec1:` + 网络身份的哈希)。
+func (n Network) AnalyticsEpoch() string {
+	return "sec1:" + hex.EncodeToString(dexos.Keccak256([]byte("DEXOS/AnalyticsNamespace/v1"), n.NetworkID[:], n.GenesisHash[:], le64(nil, n.LedgerEpoch)))
+}

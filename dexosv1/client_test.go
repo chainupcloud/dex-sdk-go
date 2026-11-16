@@ -957,3 +957,22 @@ func TestRequestReceipt(t *testing.T) {
 		t.Fatal("本地能判的错不该发请求")
 	}
 }
+
+func TestSecureLedgerAgentsAreGrantsCoveringListedSubaccounts(t *testing.T) {
+	f, c := newFake(t)
+	f.routes["/v1/account/agents"] = func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"agents":[
+			{"address":"0x5ae58d2bc5145bff0c1bec0f32bfc2d079bc66ed","scope":"grant","label":"","subaccounts":[1],"grantId":"0x55","grantEpoch":"1","status":"active","actions":[6,15,49],"validFrom":null,"validUntil":1702592000000,"expired":false,"executable":true,"dex":null},
+			{"address":"0x2b29bea668b044b2b355c370f85b729bcb43ec40","scope":"grant","label":"","subaccounts":[1],"grantId":"0x66","grantEpoch":"2","status":"paused","actions":[6],"validFrom":null,"validUntil":null,"expired":false,"executable":false,"dex":null}]}`))
+	}
+	agents, err := c.Agents(context.Background(), AccountRef{Address: mustAddr(t, testAddr), Subaccount: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(agents) != 2 || agents[0].GrantEpoch != 1 || agents[0].Status != "active" || !agents[0].Executable || len(agents[0].Actions) != 3 {
+		t.Fatalf("grant 条款没解出来: %+v", agents)
+	}
+	if !agents[0].covers(1) || agents[0].covers(2) || agents[1].covers(1) {
+		t.Fatal("grant 只覆盖列出的编号,且要可执行")
+	}
+}
