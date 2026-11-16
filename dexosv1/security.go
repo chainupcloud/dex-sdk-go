@@ -575,3 +575,49 @@ func (c *Client) CommandReceipt(ctx context.Context, actionID, digest Hash, minS
 	}
 	return CommandReceipt{}, &Error{Status: resp.StatusCode, Code: securityErrorCode(raw), Body: string(raw)}
 }
+
+// ErrNotFinal 还下不了结论:命令还没过期,或已受理但结果未落定、读视图落后。稍后再查。
+var ErrNotFinal = errors.New("dexosv1: 命令结论还没落定")
+
+// FinalReceipt 一份命令的终局结论。Executed = false 时这份原件没有、也永远不会被执行(nonce 没消耗);
+// Executed = true 时业务结果在 Receipt(含 BusinessRejected)。
+type FinalReceipt struct {
+	Executed bool
+	Receipt  CommandReceipt
+}
+
+// Finalize 给出命令的终局结论,结果未知(超时、503)之后用它收口。账本认证时间超过 ValidUntilMs 之后,以那一刻的
+// 位号作 minSeq 查回执:查到 Executed 按回执收口;授权被拒或查不到,说明这份原件没执行、以后也不会再被受理。
+// 还没过期、结果未落定或读视图落后时返回 [ErrNotFinal]。
+func (c *Client) Finalize(ctx context.Context, cmd Command) (FinalReceipt, error) {
+	t, err := c.SecurityTime(ctx)
+	if err != nil {
+		return FinalReceipt{}, err
+	}
+	if t.ManifestHash != cmd.ManifestHash {
+		return FinalReceipt{}, fmt.Errorf("%w: 命令签在 %s,账本已是 %s", ErrNetworkChanged, cmd.ManifestHash.Hex(), t.ManifestHash.Hex())
+	}
+	if t.TimestampMs <= cmd.ValidUntilMs {
+		return FinalReceipt{}, fmt.Errorf("%w: 认证时间 %d 还没过有效期 %d", ErrNotFinal, t.TimestampMs, cmd.ValidUntilMs)
+	}
+	r, err := c.CommandReceipt(ctx, cmd.ActionID, cmd.Digest, t.HostLogIndex)
+	var behind *ReadViewBehindError
+	if errors.As(err, &behind) {
+		return FinalReceipt{}, fmt.Errorf("%w: %w", ErrNotFinal, err)
+	}
+	if err != nil {
+		return FinalReceipt{}, err
+	}
+	switch r.Status {
+	case CommandUnknown, CommandAuthorizationRejected:
+		return FinalReceipt{Executed: false, Receipt: r}, nil
+	case CommandExecuted:
+		if r.ResultsPending {
+			return FinalReceipt{}, fmt.Errorf("%w: 已执行,业务结果还没落定", ErrNotFinal)
+		}
+		return FinalReceipt{Executed: true, Receipt: r}, nil
+	case CommandAccepted:
+		return FinalReceipt{}, fmt.Errorf("%w: 已受理,还没执行完", ErrNotFinal)
+	}
+	return FinalReceipt{}, fmt.Errorf("dexosv1: 账本受理的是同一 actionId 的另一份原件(digest %s)", r.Digest.Hex())
+}

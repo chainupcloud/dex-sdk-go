@@ -1,9 +1,12 @@
 package dexosv1
 
 import (
+	"context"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"strings"
 	"testing"
@@ -387,5 +390,45 @@ func TestAnalyticsEpochMatchesDexOSNamespace(t *testing.T) {
 		if got := c.net.AnalyticsEpoch(); got != c.want {
 			t.Fatalf("纪元 %d: got %s want %s", c.net.LedgerEpoch, got, c.want)
 		}
+	}
+}
+
+func TestFinalizeDecidesOnlyAfterExpiryOnACoveringReadView(t *testing.T) {
+	net := vectorNetwork(t)
+	net.ManifestHash = mustHash(t, "0x"+strings.Repeat("0a", 32))
+	act, err := net.Action(Authorization{Principal: AccountRoot(1, 1), Lane: LaneTrade, Nonce: 3, ValidUntilMs: 5000}, dexos.EncodeBatchCancel(2, nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd, err := act.Sign(scalarSigner(t, 40))
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, c := newFake(t)
+	now, status, minSeq := uint64(4000), 404, ""
+	f.routes["/v1/security/time"] = func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, `{"hostLogIndex":"900","manifestHash":"%s","time":{"timestampMs":"%d"}}`, net.ManifestHash.Hex(), now)
+	}
+	f.routes["/v1/requests/"+cmd.ActionID.Hex()] = func(w http.ResponseWriter, r *http.Request) {
+		minSeq = r.Header.Get("x-dexos-min-seq")
+		w.WriteHeader(status)
+		if status == 404 {
+			fmt.Fprintf(w, `{"status":"Unknown","hostLogIndex":"901","digest":null}`)
+			return
+		}
+		fmt.Fprintf(w, `{"status":"Executed","hostLogIndex":"901","digest":"%s","position":{"hostLogIndex":"880","commandOrdinal":2},"outcome":"Succeeded","events":[],"items":[]}`, cmd.Digest.Hex())
+	}
+	if _, err := c.Finalize(context.Background(), cmd); !errors.Is(err, ErrNotFinal) {
+		t.Fatalf("没过期不能下结论: %v", err)
+	}
+	now = 5001
+	got, err := c.Finalize(context.Background(), cmd)
+	if err != nil || got.Executed || minSeq != "900" {
+		t.Fatalf("过期后在覆盖到那一刻的读视图上查不到 = 没执行: %+v %v min-seq %q", got, err, minSeq)
+	}
+	status = 200
+	got, err = c.Finalize(context.Background(), cmd)
+	if err != nil || !got.Executed || got.Receipt.Seq != 880 || got.Receipt.Sub != 2 {
+		t.Fatalf("查到执行就按回执收口: %+v %v", got, err)
 	}
 }
