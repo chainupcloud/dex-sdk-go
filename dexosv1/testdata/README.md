@@ -69,3 +69,6 @@
   的四个变体加 `codec::encode_command` 编码,摘要取 `auth::Action::signing_hash`,签名用 k256 `sign_prehash_recoverable`
   (v = 27 + recid,再经 `auth::recover` 回验),请求身份取 `engine::request_digest(&Command::SignedAction{..}).request_id()`。
   owner 私钥 `0x42…42`、API 钱包 `0x43…43`,子账户 1;两个域(11155111 + 零地址,421614 + `0xcc…cc`)。
+- `security/`：dex-os 安全账本的签名金样，取自 chainupcloud/dex-os `conformance/security-fixtures/security-v2/` @ `c458ab74a45b`（dev）的逐字节副本：
+  `business-auth-vectors.json`（139 账户根 / 代理下单）、`account-actions-vectors.json`（141 授权、142 撤销）、`paired-trade-vectors.json`（179 成对成交）。
+  `command_test.go` 逐条对拍 actionId、EIP-712 摘要和完整编码。dex-os 改了这几份金样就整份同步，再跑 `go test ./dexosv1/`。
