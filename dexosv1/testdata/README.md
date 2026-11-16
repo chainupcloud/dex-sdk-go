@@ -1,4 +1,6 @@
-- `openapi-v1.json`：dex-os 开放 API v1 规格的逐字节副本，取自 chainupcloud/dex-os `web/openapi-v1.json` @ `d4fe0a4e636f9592b80071ad01a23de70f5c97b2`（#346 实施分支，尚未合入 main）。
+- `openapi-v1.json`：dex-os 开放 API v1 规格的逐字节副本，取自 chainupcloud/dex-os `web/openapi-v1.json` @ `b9d88880d3f68de24a3c6eeafcd3be04108e0895`（#625 BatchReplace3 main 版实施分支，尚未合入 main）。
+  本次同步带来 `/v1/orders/replace` 的 `replaceVersion`、按命令位置引用的 `CommandRef` 与回执逐项 `ref`；样例按新增必填字段补齐：`account.json` / `account_vault.json` 的 `token`（USDC），金库市场项的 `kind`（perp）。
+- 再前一次取自 `d4fe0a4e636f9592b80071ad01a23de70f5c97b2`（#346 实施分支）。
   本次同步包含 `subticksPerTick`、`tradingRulesVersion`、`tickChangePending` 必填字段；版本按规则状态转换递增。
   `tickSize` 为有效下单步长，签名整数和 `aggTicks` 继续以 `10^-priceDecimals` 为基础价格单位。
   dex-os 改了 v1 接口面就整份同步这份副本，再跑 `go test ./dexosv1/`；`write_test.go` 的 `specDeviations`
