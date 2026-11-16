@@ -226,6 +226,11 @@ func validCID(s string) bool {
 // post 发一次写请求(恒 `ack=result`:会话要靠结论决定 nonce 前进与否)。
 // 2xx 返回原始响应;非 2xx 解析成类型化错误。
 func (c *Client) post(ctx context.Context, path string, body any) (int, []byte, error) {
+	return c.postAck(ctx, path, body, "result")
+}
+
+// postAck 同 post,ack 取 "result"(等结论)或 "sequenced"(定序即回,结论凭请求身份另查)。
+func (c *Client) postAck(ctx context.Context, path string, body any, ack string) (int, []byte, error) {
 	if c.AckWait < 0 || c.AckWait > maxAckWait {
 		return 0, nil, fmt.Errorf("%w: AckWait %s 超出 0..%s", ErrNotSent, c.AckWait, maxAckWait)
 	}
@@ -233,8 +238,8 @@ func (c *Client) post(ctx context.Context, path string, body any) (int, []byte, 
 	if err != nil {
 		return 0, nil, fmt.Errorf("%w: %w", ErrNotSent, err)
 	}
-	u := c.BaseURL + path + "?ack=result"
-	if c.AckWait > 0 {
+	u := c.BaseURL + path + "?ack=" + ack
+	if ack == "result" && c.AckWait > 0 {
 		u += "&waitMs=" + strconv.FormatInt(c.AckWait.Milliseconds(), 10)
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, bytes.NewReader(raw))
@@ -451,6 +456,8 @@ type BatchItem struct {
 	CanceledLots *uint64
 	// ClientOrderID 下单项带了 clientOrderId 时回显。
 	ClientOrderID *string
+	// Ref 撤单、改单项按命令位置引用([OrderTarget])时回显那个引用;解析成功时 OrderID / ReplacedOrderID 是解析出的单号。
+	Ref *CommandRef
 	// AvgPrice / Fills 下单 / 改单项的新单本命令里作为吃单方的成交;没有即时成交时为空。
 	AvgPrice *uint32
 	Fills    []ReceiptFill
@@ -477,6 +484,14 @@ type wireBatchItem struct {
 	ClientOrderID *string           `json:"clientOrderId"`
 	AvgPrice      *string           `json:"avgPrice"`
 	Fills         []wireReceiptFill `json:"fills"`
+	Ref           *wireRefEcho      `json:"ref"`
+}
+
+type wireRefEcho struct {
+	Market uint16 `json:"market"`
+	Seq    uint64 `json:"seq"`
+	Sub    uint16 `json:"sub"`
+	Item   uint16 `json:"item"`
 }
 
 // batchResult 解析并核对逐项结局:每个 (kind, index) 恰好一项,项数与请求相同,符号与市场号是本市场
@@ -546,6 +561,12 @@ func (w wireBatchItem) item(m *Market) (BatchItem, error) {
 	}
 	if it.ReplacedOrderID, err = orderID(w.Replaced); err != nil {
 		return it, fmt.Errorf("replacedOrderId %q: %w", *w.Replaced, err)
+	}
+	if w.Ref != nil {
+		if w.Ref.Market != m.SigningMarketID {
+			return it, fmt.Errorf("引用回显的市场 %d 不是本市场 %d", w.Ref.Market, m.SigningMarketID)
+		}
+		it.Ref = &CommandRef{Seq: w.Ref.Seq, Sub: w.Ref.Sub, Item: w.Ref.Item}
 	}
 	lots := func(s *string) (*uint64, error) {
 		if s == nil {

@@ -104,10 +104,14 @@ func (f *writeFake) answer(t *testing.T, path string, status int, name string) {
 }
 
 func (f *writeFake) answerRaw(t *testing.T, path string, status int, body []byte) {
+	f.answerAck(t, path, "result", status, body)
+}
+
+func (f *writeFake) answerAck(t *testing.T, path, ack string, status int, body []byte) {
 	f.routes[path] = func(w http.ResponseWriter, r *http.Request) {
 		raw, _ := io.ReadAll(r.Body)
-		if r.Method != http.MethodPost || r.URL.Query().Get("ack") != "result" {
-			t.Errorf("%s: 应为 POST ?ack=result,得到 %s %s", path, r.Method, r.URL)
+		if r.Method != http.MethodPost || r.URL.Query().Get("ack") != ack {
+			t.Errorf("%s: 应为 POST ?ack=%s,得到 %s %s", path, ack, r.Method, r.URL)
 		}
 		req := decodeJSON(t, raw)
 		f.mu.Lock()
