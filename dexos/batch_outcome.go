@@ -15,18 +15,20 @@ var ErrIncompleteBatch = errors.New("dexos: 批次逐项结果缺失或与输入
 //
 // 身份是 (Kind, InputIndex):撤单与下单**各自**从 0 编号,对应调用方传入的两个切片的下标。
 // OrderID 是订单序号的十进制串:下单项 = 进了簿的新单号(被拒的没有),撤单项 = 要撤的那张单。
+// 按引用撤单(BatchReplace3)的项回显 Ref;引用解析成功时 OrderID 是解析出的单号,解析失败的没有。
 type BatchItem struct {
-	InputIndex   uint32  `json:"inputIndex"`
-	Kind         string  `json:"kind"`
-	AccountID    uint32  `json:"accountId"`
-	Market       uint16  `json:"market"`
-	RecordSub    *uint16 `json:"recordSub"`
-	OrderID      *string `json:"orderId,omitempty"`
-	State        string  `json:"state"`
-	Reason       *string `json:"reason,omitempty"`
-	FilledLots   *uint64 `json:"filledLots,omitempty"`
-	Resting      *bool   `json:"resting,omitempty"`
-	CanceledLots *uint64 `json:"canceledLots,omitempty"`
+	InputIndex   uint32      `json:"inputIndex"`
+	Kind         string      `json:"kind"`
+	AccountID    uint32      `json:"accountId"`
+	Market       uint16      `json:"market"`
+	RecordSub    *uint16     `json:"recordSub"`
+	OrderID      *string     `json:"orderId,omitempty"`
+	State        string      `json:"state"`
+	Reason       *string     `json:"reason,omitempty"`
+	FilledLots   *uint64     `json:"filledLots,omitempty"`
+	Resting      *bool       `json:"resting,omitempty"`
+	CanceledLots *uint64     `json:"canceledLots,omitempty"`
+	Ref          *CommandRef `json:"ref,omitempty"`
 }
 
 // UnmarshalJSON 坐标、归属与结局缺一即解析失败:缺字段的项不能被零值冒充成「第 0 项 / 账户 0」。
@@ -94,6 +96,12 @@ func deref(s *string) string {
 //
 // 任何一条不成立 → ErrIncompleteBatch(证据不可信,锁会话);全部成立且有被拒项 → *BatchOutcomeError(终局)。
 func checkBatchOutcome(receipt WriteReceipt, account uint32, orders []BatchOrder, cancels []OrderID) error {
+	return checkBatchOutcomeRefs(receipt, account, orders, cancels, nil)
+}
+
+// checkBatchOutcomeRefs 同 checkBatchOutcome,refs 非空时与 cancels 等长,refs[i] 非 nil 的撤单项按引用撤:
+// 回执项必须回显同一个引用,cancels[i] 只提供市场,要撤的单号取回执项解析出的单号(被撤掉的必须有)。
+func checkBatchOutcomeRefs(receipt WriteReceipt, account uint32, orders []BatchOrder, cancels []OrderID, refs []*CommandRef) error {
 	bad := func(format string, args ...any) error {
 		return fmt.Errorf("%w: "+format, append([]any{ErrIncompleteBatch}, args...)...)
 	}
@@ -102,6 +110,7 @@ func checkBatchOutcome(receipt WriteReceipt, account uint32, orders []BatchOrder
 	}
 	places := make([]*BatchItem, len(orders))
 	cancelItems := make([]*BatchItem, len(cancels))
+	cancels = append([]OrderID(nil), cancels...)
 	canceledTargets := make(map[OrderID]bool)
 	var rejected []BatchItem
 	for i := range receipt.Items {
@@ -129,6 +138,11 @@ func checkBatchOutcome(receipt WriteReceipt, account uint32, orders []BatchOrder
 			return bad("%s#%d 的账户/市场与输入不符", it.Kind, it.InputIndex)
 		}
 		slot[it.InputIndex] = it
+		if it.Kind == "cancel" {
+			if err := resolveCancelTarget(it, cancels, refs); err != nil {
+				return err
+			}
+		}
 		switch {
 		case it.State == "rejected":
 			if it.Reason == nil || *it.Reason == "" {
@@ -147,9 +161,6 @@ func checkBatchOutcome(receipt WriteReceipt, account uint32, orders []BatchOrder
 			canceledTargets[cancels[it.InputIndex]] = true
 		default:
 			return bad("%s#%d 的结局 %q 与类型不符", it.Kind, it.InputIndex, it.State)
-		}
-		if it.Kind == "cancel" && (it.OrderID == nil || *it.OrderID != strconv.FormatUint(cancels[it.InputIndex].Seq(), 10)) {
-			return bad("cancel#%d 的目标单号与输入不符", it.InputIndex)
 		}
 	}
 	for i, it := range places {
@@ -174,6 +185,35 @@ func checkBatchOutcome(receipt WriteReceipt, account uint32, orders []BatchOrder
 	return nil
 }
 
+// resolveCancelTarget 核对撤单项的目标:按单号撤的回执单号必须与输入相同;按引用撤的回执必须回显同一引用,
+// 解析出的单号写回 cancels(供事件旁证核对)。
+func resolveCancelTarget(it *BatchItem, cancels []OrderID, refs []*CommandRef) error {
+	bad := func(format string, args ...any) error {
+		return fmt.Errorf("%w: "+format, append([]any{ErrIncompleteBatch, it.InputIndex}, args...)...)
+	}
+	var ref *CommandRef
+	if refs != nil {
+		ref = refs[it.InputIndex]
+	}
+	switch {
+	case ref == nil:
+		if it.Ref != nil || it.OrderID == nil || *it.OrderID != strconv.FormatUint(cancels[it.InputIndex].Seq(), 10) {
+			return bad("cancel#%d 的目标单号与输入不符")
+		}
+	case it.Ref == nil || *it.Ref != *ref:
+		return bad("cancel#%d 回显的引用与输入不符")
+	case it.OrderID != nil:
+		seq, err := strconv.ParseUint(*it.OrderID, 10, 64)
+		if err != nil || seq > 1<<48-1 {
+			return bad("cancel#%d 引用解析出的单号 %q 不合法", *it.OrderID)
+		}
+		cancels[it.InputIndex] = NewOrderID(cancels[it.InputIndex].Market(), seq)
+	case it.State == "canceled":
+		return bad("cancel#%d 按引用撤掉了却没有解析出的单号")
+	}
+	return nil
+}
+
 // wholeRejected 业务拒绝的回执带逐项结果时(整批被拒:命令已执行、每一项都被拒),按逐项判据核对:
 // 每一项都被拒才是终局的逐项结局(*BatchOutcomeError,Whole=原拒绝);有项生效或与事件/聚合矛盾
 // = ErrIncompleteBatch。没有逐项结果的拒绝(认证层、整条命令)原样返回。
@@ -182,11 +222,11 @@ func wholeRejected(err error, receipt *WriteReceipt, account uint32, orders []Ba
 	if !errors.As(err, &re) || receipt == nil || len(receipt.Items) == 0 {
 		return err
 	}
-	return checkWholeRejected(*receipt, re, account, orders, cancels)
+	return checkWholeRejected(*receipt, re, account, orders, cancels, nil)
 }
 
-func checkWholeRejected(receipt WriteReceipt, re *RejectedError, account uint32, orders []BatchOrder, cancels []OrderID) error {
-	err := checkBatchOutcome(receipt, account, orders, cancels)
+func checkWholeRejected(receipt WriteReceipt, re *RejectedError, account uint32, orders []BatchOrder, cancels []OrderID, refs []*CommandRef) error {
+	err := checkBatchOutcomeRefs(receipt, account, orders, cancels, refs)
 	var bo *BatchOutcomeError
 	if errors.As(err, &bo) && len(bo.Rejected) == len(orders)+len(cancels) {
 		bo.Whole = re

@@ -437,13 +437,44 @@ func gatewayAction(t *testing.T, cat *Catalog, path string, body any) ([]byte, d
 	var inner []byte
 	switch path {
 	case "/v1/orders/replace":
-		var ids []dexos.OrderID
-		for _, c := range env["cancels"].([]any) {
-			ids = append(ids, dexos.NewOrderID(mk.SigningMarketID, seq(c)))
-		}
 		var orders []dexos.BatchOrder
 		for _, o := range env["orders"].([]any) {
 			orders = append(orders, gatewayOrder(t, cat, m(o)))
+		}
+		if env["replaceVersion"] != nil {
+			if num(t, env["replaceVersion"]) != 3 {
+				t.Fatalf("replaceVersion 只能是 3: %v", env["replaceVersion"])
+			}
+			var cancels []dexos.OrderTarget
+			for _, c := range env["cancels"].([]any) {
+				cancels = append(cancels, gatewayTarget(t, mk, c))
+			}
+			var modifies []dexos.BatchModify3
+			mods, _ := env["modifies"].([]any)
+			for _, x := range mods {
+				item := m(x)
+				target := item["ref"]
+				if target == nil {
+					target = item["orderId"]
+				} else if item["orderId"] != nil {
+					t.Fatalf("改单项 orderId 与 ref 只能给一个: %v", item)
+				}
+				plain := map[string]any{}
+				for k, v := range item {
+					if k != "ref" {
+						plain[k] = v
+					}
+				}
+				plain["orderId"] = "0"
+				g := gatewayModify(t, mk, plain)
+				modifies = append(modifies, dexos.BatchModify3{Target: gatewayTarget(t, mk, target), Price: g.Price, Lots: g.Lots, TIF: g.TIF, ReduceOnly: g.ReduceOnly})
+			}
+			inner = dexos.EncodeBatchReplace3(dexos.ActorPlaceholder, num(t, env["nowMs"]), cancels, modifies, orders)
+			break
+		}
+		var ids []dexos.OrderID
+		for _, c := range env["cancels"].([]any) {
+			ids = append(ids, dexos.NewOrderID(mk.SigningMarketID, seq(c)))
 		}
 		if mods, _ := env["modifies"].([]any); len(mods) > 0 {
 			var modifies []dexos.BatchModify
@@ -492,4 +523,29 @@ func gatewayAction(t *testing.T, cat *Catalog, path string, body any) ([]byte, d
 	}
 	digest := testDomain.ActionHash(account, uint16(num(t, env["subaccount"])), inner, num(t, env["nonce"]), expiry)
 	return digest, mustAddr(t, who)
+}
+
+func gatewayTarget(t *testing.T, mk *Market, v any) dexos.OrderTarget {
+	t.Helper()
+	if s, ok := v.(string); ok {
+		n, err := strconv.ParseUint(s, 10, 64)
+		if err != nil {
+			t.Fatal(err)
+		}
+		id := dexos.NewOrderID(mk.SigningMarketID, n)
+		return dexos.OrderTarget{OrderID: &id}
+	}
+	ref := m(v)
+	if inner, ok := ref["ref"]; ok {
+		if len(ref) != 1 {
+			t.Fatalf("撤单引用项只能有 ref: %v", ref)
+		}
+		ref = m(inner)
+	}
+	for k := range ref {
+		if k != "seq" && k != "sub" && k != "item" {
+			t.Fatalf("引用只收 seq、sub、item,多了 %s", k)
+		}
+	}
+	return dexos.OrderTarget{Ref: &dexos.CommandRef{Market: mk.SigningMarketID, Seq: num(t, ref["seq"]), Sub: uint16(num(t, ref["sub"])), Item: uint16(num(t, ref["item"]))}}
 }

@@ -125,6 +125,7 @@
         "required": [
           "epoch",
           "asOfSeq",
+          "token",
           "collateral",
           "equity",
           "marginUsed",
@@ -156,14 +157,25 @@
           "subaccount": {
             "type": "integer"
           },
+          "dex": {
+            "type": "integer",
+            "description": "The merchant dex whose balance was read. Present only when the request named a dex other than 0."
+          },
           "vault": {
             "type": "integer",
             "description": "Present instead of `address` / `subaccount` when the request addressed a vault (`vault=<id>`, specification v1.1 §4.3)"
           },
+          "token": {
+            "type": "string",
+            "enum": [
+              "USDC"
+            ],
+            "description": "Settlement token the top-level totals (`collateral`, `equity`, `marginUsed`, `maintenanceMargin`, `cross*`, `openOrderMargin`, `availableTo*`) are counted in. They cover the USDC group only and are kept for compatibility; an account holding other settlement tokens reads `groups[]`, which is authoritative per token"
+          },
           "collateral": {
             "type": "string",
             "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
-            "description": "USDC collateral"
+            "description": "USDC collateral (the USDC group only; see `token` and `groups[]`)"
           },
           "equity": {
             "type": "string",
@@ -218,7 +230,7 @@
           },
           "groups": {
             "type": "array",
-            "description": "Per collateral group (one per settlement token) from the same risk view",
+            "description": "Per collateral group (one per settlement token) from the same risk view. Authoritative for accounts that hold a settlement token other than USDC; the top-level totals cover the USDC group only",
             "items": {
               "type": "object",
               "properties": {
@@ -514,6 +526,10 @@
           },
           "subaccount": {
             "type": "integer"
+          },
+          "dex": {
+            "type": "integer",
+            "description": "The merchant dex whose balance was read. Present only when the request named a dex other than 0."
           },
           "vault": {
             "type": "integer",
@@ -921,6 +937,24 @@
                   "type": "string",
                   "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
                   "description": "Cancel items canceled: size removed from the book; modify items: remaining size of the old order that was canceled (accepted, or rejected after the old order was removed — absent when the old order was not there)"
+                },
+                "ref": {
+                  "type": "object",
+                  "description": "Replace items that named their target by `ref`: the reference as given, with `market`",
+                  "properties": {
+                    "market": {
+                      "type": "integer"
+                    },
+                    "seq": {
+                      "type": "integer"
+                    },
+                    "sub": {
+                      "type": "integer"
+                    },
+                    "item": {
+                      "type": "integer"
+                    }
+                  }
                 }
               }
             }
@@ -1223,6 +1257,14 @@
             "type": "integer",
             "format": "uint64",
             "description": "Log upper bound of the read-model generation the entity was read from"
+          },
+          "dex": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 1,
+            "description": "The entry's home merchant dex: set when every listed / close-only market in the catalog belongs to one merchant dex (hidden entries ignored), null otherwise. A white-label front end reads the user's balance under this dex by default (merchant fund isolation, #295)."
           }
         }
       },
@@ -1312,7 +1354,7 @@
             "description": "Display order (smaller first; ties by code)"
           }
         },
-        "description": "A category definition. A layer's `categories` = its own definitions ∪ the platform templates its references use; an own definition with a template's code wins (`docs/specs/market-categories.md` §3.1)"
+        "description": "A category definition. A layer's `categories` = its own definitions ∪ the platform templates its references use; an own definition with a template's code wins (`archive/docs-20261111/specs/market-categories.md` §3.1)"
       },
       "DeliveryDetailResponse": {
         "type": "object",
@@ -2287,9 +2329,11 @@
           },
           "insurance": {
             "type": "object",
-            "description": "Merchant insurance fund (dex-os#311, `docs/specs/merchant-insurance-isolation.md` §5.5). dex 0 reports its platform fund with no policy.",
+            "description": "Merchant insurance fund (dex-os#311, `archive/docs-20261111/specs/merchant-insurance-isolation.md` §5.5). dex 0 reports its platform fund with no policy.",
             "required": [
               "balance",
+              "equity",
+              "positions",
               "principal",
               "minAmount",
               "withdrawDelayMs",
@@ -2301,7 +2345,39 @@
               "balance": {
                 "type": "string",
                 "pattern": "^-?[0-9]+$",
-                "description": "Fund balance"
+                "description": "Fund cash balance; negative while the fund holds positions it took over (dex-os#311, `archive/docs-20261111/specs/merchant-liquidation-hl.md` §4.6)"
+              },
+              "equity": {
+                "type": "string",
+                "pattern": "^-?[0-9]+$",
+                "description": "Fund equity: cash plus the positions it took over at mark price. The reduce-only minimum and withdrawals are judged on this"
+              },
+              "positions": {
+                "type": "array",
+                "description": "Positions the fund took over from liquidated accounts and has not unwound yet",
+                "items": {
+                  "type": "object",
+                  "required": [
+                    "market",
+                    "lots",
+                    "costBasis"
+                  ],
+                  "properties": {
+                    "market": {
+                      "type": "integer"
+                    },
+                    "lots": {
+                      "type": "integer",
+                      "format": "int64",
+                      "description": "Signed size; negative = short"
+                    },
+                    "costBasis": {
+                      "type": "string",
+                      "pattern": "^-?[0-9]+$",
+                      "description": "Signed entry cost in the collateral token's smallest unit"
+                    }
+                  }
+                }
               },
               "principal": {
                 "type": "string",
@@ -2638,6 +2714,10 @@
                 "const": "v1"
               }
             }
+          },
+          "merchantIsolation": {
+            "type": "boolean",
+            "description": "Whether the exchange-wide merchant isolation switch is on: orders on a merchant dex's markets then use the signing subaccount's balance under that dex (merchant fund isolation, #295)."
           }
         },
         "required": [
@@ -2753,6 +2833,10 @@
           },
           "subaccount": {
             "type": "integer"
+          },
+          "dex": {
+            "type": "integer",
+            "description": "The merchant dex whose balance was read. Present only when the request named a dex other than 0."
           },
           "vault": {
             "type": "integer",
@@ -2990,6 +3074,10 @@
           },
           "subaccount": {
             "type": "integer"
+          },
+          "dex": {
+            "type": "integer",
+            "description": "The merchant dex whose balance was read. Present only when the request named a dex other than 0."
           },
           "vault": {
             "type": "integer",
@@ -3330,7 +3418,7 @@
               "pattern": "^[a-z0-9-]{1,24}$"
             },
             "maxItems": 8,
-            "description": "Category codes of the dex this market belongs to (`docs/specs/market-categories.md` §3.2), in the order they were set; empty array when none. Each code is defined for that dex or is a platform template — `GET /v1/dexes/{id}` gives the display names. Display only: never enters the execution layer or any signature. Behind a builder's entry use `GET /v1/builder` instead (the builder's own categories)"
+            "description": "Category codes of the dex this market belongs to (`archive/docs-20261111/specs/market-categories.md` §3.2), in the order they were set; empty array when none. Each code is defined for that dex or is a platform template — `GET /v1/dexes/{id}` gives the display names. Display only: never enters the execution layer or any signature. Behind a builder's entry use `GET /v1/builder` instead (the builder's own categories)"
           },
           "priceSource": {
             "type": [
@@ -3355,7 +3443,7 @@
               }
             },
             "maxItems": 8,
-            "description": "Price sources the platform bound to this perpetual (`docs/specs/market-price-source.md` §3.4), in write order; the keeper feeds the oracle from their median. Null when the market has no binding (sources are then derived from the symbol) and always null for spot. Never enters the execution layer or any signature"
+            "description": "Price sources the platform bound to this perpetual (`archive/docs-20261111/specs/market-price-source.md` §3.4), in write order; the keeper feeds the oracle from their median. Null when the market has no binding (sources are then derived from the symbol) and always null for spot. Never enters the execution layer or any signature"
           },
           "aggTicks": {
             "type": [
@@ -3857,9 +3945,8 @@
       },
       "ModifyItem": {
         "type": "object",
-        "description": "One modify of `POST /v1/orders/replace` (`modifies[]`): the same semantics as `POST /v1/orders/modify` — one amend record that cancels `orderId` and places the new price / size with the side inherited from it. The old order is gone (filled / canceled / not yours) → the item is rejected `UnknownOrder` and nothing changes; the new order is refused → the item is rejected with the real code and the old order is canceled anyway. No `side`, `type`, `symbol` or `clientOrderId` (400)",
+        "description": "One modify of `POST /v1/orders/replace` (`modifies[]`): the same semantics as `POST /v1/orders/modify` — one amend record that cancels `orderId` and places the new price / size with the side inherited from it. The old order is gone (filled / canceled / not yours) → the item is rejected `UnknownOrder` and nothing changes; the new order is refused → the item is rejected with the real code and the old order is canceled anyway. No `side`, `type`, `symbol` or `clientOrderId` (400). Give exactly one of `orderId` and `ref` (`ref` needs `replaceVersion: 3`).",
         "required": [
-          "orderId",
           "price",
           "size"
         ],
@@ -3892,6 +3979,10 @@
           "reduceOnly": {
             "type": "boolean",
             "default": false
+          },
+          "ref": {
+            "$ref": "#/components/schemas/CommandRef",
+            "description": "Instead of `orderId`, with `replaceVersion: 3`: the new order of an earlier replace"
           }
         }
       },
@@ -4487,7 +4578,7 @@
               "null"
             ],
             "format": "int64",
-            "description": "When the next funding settlement is due: `lastFundingMs + fundingTickSec × 1000` (`fundingTickSec` from `GET /v1/exchange`). Settlement happens at the first block whose time reaches it, so the actual time can be a block later. null for spot and before the first settlement"
+            "description": "When the next funding settlement is due: the first period boundary after `lastFundingMs`, where boundaries are multiples of `fundingTickSec` (from `GET /v1/exchange`) since the Unix epoch, i.e. the top of every UTC hour for 3600. Settlement happens at the first funding sample whose block time reaches it, so the actual time can be one sample interval later. null for spot and before the first sample"
           },
           "openInterest": {
             "type": [
@@ -4544,6 +4635,37 @@
             ],
             "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
             "description": "Σ price × size of the trades in the rolling 24h window, in quote units. null when unknown (24h statistics unavailable, or the window only holds migrated candles without per-trade ticks)"
+          }
+        }
+      },
+      "PairedLegFee": {
+        "type": "object",
+        "description": "One paired-trade leg's fees, all in `feeToken` units; positive = paid, negative = rebate",
+        "required": [
+          "fee",
+          "feeToken",
+          "protocol",
+          "deployer"
+        ],
+        "properties": {
+          "fee": {
+            "type": "string",
+            "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
+            "description": "Total actually charged on this leg = `protocol` + `deployer`"
+          },
+          "feeToken": {
+            "type": "string",
+            "description": "Token this leg was charged in: spot buy leg → base, spot sell leg → quote; perp → the market's settlement token"
+          },
+          "protocol": {
+            "type": "string",
+            "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
+            "description": "Sum of this leg's fill fees (`fills` for the taker, `makerFills` for the maker)"
+          },
+          "deployer": {
+            "type": "string",
+            "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
+            "description": "Deployer fee this leg paid (ledger `deployer_fee`); only the taker leg pays it, the maker leg is always \"0\""
           }
         }
       },
@@ -4632,7 +4754,7 @@
       },
       "SignedEnvelope": {
         "type": "object",
-        "description": "The signature envelope shared by every write endpoint (specification §3.2). With `sigVersion` omitted or 1 the signature is over the existing EIP-712 typed struct (`x-eip712.typeString`), using the account nonce from `GET /v1/account/nonce`; price and size fields inside it are the **scaled integers**. With `sigVersion: 2` (subaccount model v2, `docs/specs/subaccount-model.md`) the account is addressed as (`account` = owner address, `subaccount` = index) with **no numeric account id**, `nonce` is the signer's window nonce (a Unix-ms timestamp, unique per signer, within block time − 2 d .. + 1 d; `GET /v1/account/nonce` is not consulted), and the trading endpoints sign the generic `Action(address account,uint16 subaccount,bytes32 action,uint64 nonce,uint64 expiry)` struct whose `action` is the keccak256 of the inner command's canonical bytes with the actor account set to the placeholder `0xFFFFFFFF` (`x-eip712.v2TypeString` on each endpoint; the inner command shape is stated in `x-eip712.v2Inner`). The fund / subaccount / agent endpoints sign the named v2 structs instead. `signer` may be the owner itself or an API wallet approved at owner level (`subaccountMask`); `vault` is not supported with `sigVersion: 2`.",
+        "description": "The signature envelope shared by every write endpoint (specification §3.2). With `sigVersion` omitted or 1 the signature is over the existing EIP-712 typed struct (`x-eip712.typeString`), using the account nonce from `GET /v1/account/nonce`; price and size fields inside it are the **scaled integers**. With `sigVersion: 2` (subaccount model v2, `archive/docs-20261111/specs/subaccount-model.md`) the account is addressed as (`account` = owner address, `subaccount` = index) with **no numeric account id**, `nonce` is the signer's window nonce (a Unix-ms timestamp, unique per signer, within block time − 2 d .. + 1 d; `GET /v1/account/nonce` is not consulted), and the trading endpoints sign the generic `Action(address account,uint16 subaccount,bytes32 action,uint64 nonce,uint64 expiry)` struct whose `action` is the keccak256 of the inner command's canonical bytes with the actor account set to the placeholder `0xFFFFFFFF` (`x-eip712.v2TypeString` on each endpoint; the inner command shape is stated in `x-eip712.v2Inner`). The fund / subaccount / agent endpoints sign the named v2 structs instead. `signer` may be the owner itself or an API wallet approved at owner level (`subaccountMask`); With `vault` set (mutually exclusive with `subaccount`) the trading endpoints sign `VaultAction(address account,uint16 vault,bytes32 action,uint64 nonce,uint64 expiry)` instead, with `account` = the vault manager's owner: `signer` is that owner or an API wallet of the manager account (approved on that account, or at owner level with `subaccountMask` covering the manager's index), the vault main account is the actor, and the window nonce is the signer's same window as `Action`.",
         "required": [
           "account",
           "nonce",
@@ -4650,7 +4772,7 @@
           },
           "vault": {
             "type": "integer",
-            "description": "Optional (specification v1.1 §4.3): act as this vault — the vault's main account is the account acted on and `account` must be the manager's main wallet (else 403 `GatewayForbidden`; an unclaimed vault is 403 `VaultNoManager`). Mutually exclusive with `subaccount`. The main wallet signs with the vault's own nonce (`GET /v1/account/nonce?vault=`, `signingAccountId` = the vault main account); an API wallet must be approved on the account the manager claimed with. Allowed: place (single / batch), cancel, cancel-all, replace, schedule-cancel, leverage; every other write is 403 as a vault. The account rate-limit bucket is `vault:<id>`"
+            "description": "Optional (specification v1.1 §4.3): act as this vault — the vault's main account is the account acted on and `account` must be the manager's main wallet (else 403 `GatewayForbidden`; an unclaimed vault is 403 `VaultNoManager`). Mutually exclusive with `subaccount`. The main wallet signs with the vault's own nonce (`GET /v1/account/nonce?vault=`, `signingAccountId` = the vault main account); an API wallet must be approved on the account the manager claimed with. Allowed: place (single / batch), cancel, cancel-all, replace, schedule-cancel, leverage; every other write is 403 as a vault. The account rate-limit bucket is `vault:<id>`. With `sigVersion: 2` the same endpoints sign `VaultAction` with the signer's window nonce instead of the vault's own nonce (see the schema description); `send`, `dex-transfer` and paired-trade legs are 403 as a vault"
           },
           "signer": {
             "type": "string",
@@ -4664,7 +4786,7 @@
           },
           "expiresAt": {
             "type": "integer",
-            "description": "Unsigned milliseconds. Order permits 0/omitted (no expiry). WithdrawalV2 requires a nonzero value, signed as expiry; it rejects expiry before signature verification. On sigVersion 2 it is the `Action` struct's expiry (0 / omitted = never expires). Other operations follow their named EIP-712 type.",
+            "description": "Unsigned milliseconds. Order permits 0/omitted (no expiry). WithdrawalV2 requires a nonzero value, signed as expiry; it rejects expiry before signature verification. On sigVersion 2 it is the `Action` / `VaultAction` struct's expiry (0 / omitted = never expires), checked against the later of the gateway's receive time and the last block time. Other operations follow their named EIP-712 type.",
             "minimum": 0,
             "maximum": 18446744073709551615
           },
@@ -5371,7 +5493,8 @@
       "VaultMarket": {
         "type": "object",
         "required": [
-          "symbol"
+          "symbol",
+          "kind"
         ],
         "properties": {
           "symbol": {
@@ -5380,6 +5503,14 @@
             "examples": [
               "BTC-USD"
             ]
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "perp",
+              "spot"
+            ],
+            "description": "Market type. A perp and a spot market may share a symbol; `symbol` + `kind` names exactly one market."
           }
         }
       },
@@ -5387,6 +5518,7 @@
         "type": "object",
         "required": [
           "symbol",
+          "kind",
           "status"
         ],
         "properties": {
@@ -5396,6 +5528,14 @@
             "examples": [
               "BTC-USD"
             ]
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "perp",
+              "spot"
+            ],
+            "description": "Market type. A perp and a spot market may share a symbol; `symbol` + `kind` names exactly one market."
           },
           "status": {
             "type": "string",
@@ -5407,6 +5547,7 @@
         "type": "object",
         "required": [
           "symbol",
+          "kind",
           "maxLeverage"
         ],
         "properties": {
@@ -5416,6 +5557,14 @@
             "examples": [
               "BTC-USD"
             ]
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "perp",
+              "spot"
+            ],
+            "description": "Market type. A perp and a spot market may share a symbol; `symbol` + `kind` names exactly one market."
           },
           "maxLeverage": {
             "type": "integer"
@@ -5481,6 +5630,30 @@
             "description": "`limit` reached: narrow `from` or widen `interval`"
           }
         }
+      },
+      "CommandRef": {
+        "type": "object",
+        "required": [
+          "seq",
+          "sub",
+          "item"
+        ],
+        "description": "A new order of an earlier `replaceVersion: 3` replace by the same account, named by that replace's sequenced receipt `(seq, sub)` and the input position `item` (modifies first, then orders, one numbering from 0). Resolves only within the account's last 64 such replaces and 60 s of log time; outside → that item is rejected `ReferenceOutOfRange`; another account's replace → `NotOrderOwner`; that input produced no order (rejected at translation, or past the end) → `UnknownOrder`.",
+        "properties": {
+          "seq": {
+            "type": "integer",
+            "format": "uint64",
+            "description": "`seq` of the referenced replace's receipt"
+          },
+          "sub": {
+            "type": "integer",
+            "description": "`sub` of the referenced replace's receipt"
+          },
+          "item": {
+            "type": "integer",
+            "description": "Input position in the referenced replace: `modifies[]` first, then `orders[]`"
+          }
+        }
       }
     }
   },
@@ -5488,7 +5661,7 @@
     "title": "DEXOS Open API v1",
     "version": "0.1.0",
     "summary": "The standard public interface (REST + WebSocket) for builders, developers and liquidity providers",
-    "description": "The DEXOS public API for third-party developers, builders and liquidity providers. The specification\nlives in `docs/specs/public-api-v1.md`; `docs/research/api-landscape-2026-09.md` compares it with\nHyperliquid, Lighter, Aster and Pacifica. **This document mirrors the gateway's v1 route table**\n(`crates/gateway/src/api/v1.rs`, pinned by `scripts/check-openapi.mjs`, INV-API-V1-SPEC-MIRROR).\n**Every read endpoint, write endpoint, vault endpoint and WebSocket channel listed here is implemented.**\nThe timestamp-window nonce shipped with the subaccount model v2 (`sigVersion: 2`, `docs/specs/subaccount-model.md`); the only planned item\nis the builder volume projection (§6 of the specification).\nThe legacy endpoints (`/order`, `/markets`, `/ws`, …, documented at `/docs`) remain available; v1 is a\ntranslation layer on top of them and returns bit-identical data.\n\n## Quick start\n\n1. `GET /v1/exchange` → the EIP-712 domain (`domain` / `chainId`) and the token table (with the numeric\n   `token` ids the `Withdrawal` / `Transfer` structs carry); `GET /v1/markets/BTC-USD` → `priceDecimals` /\n   `sizeDecimals` and `signingMarketId` (the `market` field of the signed structs).\n2. `GET /v1/account/nonce?address=<your address>` → the next `nonce` and `signingAccountId` (the value for the\n   `accountId` field of the signed struct; signing is the only thing it is for).\n3. Scale `price` and `size` to integers locally (`ticks = price × 10^priceDecimals`,\n   `lots = size × 10^sizeDecimals`), sign the `Order(...)` struct (each write endpoint states its\n   `x-eip712.typeString`) and `POST /v1/orders`\n   `{account, nonce, signature, symbol, side, type: \"limit\", price, size, clientOrderId?}` →\n   `200 {orderId, status: resting|filled|…}` or `422 {error}`.\n4. Programmatic trading: approve an API wallet once from the main wallet with\n   `POST /v1/account/agents/approve`, then sign with it and pass its address as `signer`\n   (the `AgentExec` signature covers the canonical-bytes hash of the inner command). Batch orders,\n   cancels, replaces and the dead man's switch all go through the API wallet; **an API wallet cannot\n   move funds**.\n5. Subscriptions: `GET /v1/ws` → `{\"method\":\"subscribe\",\"params\":{\"channel\":\"book\",\"symbol\":\"BTC-USD\"}}`.\n   After a disconnect, resume from the last `id` you saw with `/v1/account/fills?after=` or\n   `/v1/events?after=`.\n\n## Conventions\n\n- Path prefix `/v1`; JSON; camelCase field names; timestamps in Unix milliseconds; lower-case enums.\n- **Prices, sizes and amounts are decimal strings**: `ticks = price × 10^priceDecimals`,\n  `lots = size × 10^sizeDecimals` (both must divide exactly); USDC amounts are scaled by `10^6`.\n  `priceDecimals` / `sizeDecimals` come from `GET /v1/markets`.\n- Markets are addressed by **`symbol`** (`BTC-USD` / `BTC-USDC`), accounts by **`address`**\n  (+ `subaccount`, 0 = main account), vaults by **`vault`** (the vault id; v1.1 §4.3). **No v1 response addresses anything by a numeric id.** The numeric ids v1\n  does return (`signingAccountId` on `/v1/account/nonce` and `/v1/account/subaccounts`, `signingMarketId` on\n  `/v1/markets`, `token` on `/v1/exchange`) exist only because the EIP-712 structs carry them; they are inputs to\n  signing, never addresses.\n- Every error has the shape `{error:{code, num, message, details?}}`: `code` is a stable string\n  (`Gateway*` for the gateway, the `CoreError` variant name for the execution layer), `num` a stable\n  number (1xxxx gateway / 2xxxx execution layer). HTTP status: 400 malformed request · 401 bad\n  signature · 403 ownership / scope · 404 · 409 · 412 replica behind · 421 wrong node · 422 business\n  rejection · 429 rate limited · 5xx.\n- Pagination: `?limit=&after=<cursor>` → `{…, next, hasMore}`; execution-history endpoints also\n  return a fixed upper bound `upper`, which you pass back unchanged on the following pages.\n- Read consistency: write receipts carry `x-dexos-seq`; a **read after a write** sends\n  `x-dexos-min-seq` and gets 412 when the replica is behind (same semantics as the legacy API).\n\n## Signing (write endpoints)\n\nAll write endpoints share one envelope: `{account, subaccount?, signer?, nonce, expiresAt?, signature,\n…business fields}`. The signature is over the existing EIP-712 typed structs (each endpoint states its\n`x-eip712.typeString`), with the domain from `GET /v1/exchange`. Prices and sizes inside the struct are\nthe **scaled integers**: the SDK scales locally and signs, the gateway performs the same scaling for its\npre-check, and the execution layer verifies the signature authoritatively. When `signer` is present the\nrequest is signed by an API wallet (its nonce lives in the agent scope:\n`GET /v1/account/nonce?address=&signer=`). API wallets can only trade; every fund-moving endpoint\nanswers `403 AgentScopeViolation`.\n\n## Write receipts\n\nBy default (`ack=result`) the request waits for the fold (at most one epoch) and returns the business\noutcome: a single order gets `200` with the order object or `422` with the rejection reason; a batch\nalways gets `200` with per-item `items[]`. `ack=sequenced` returns only `{seq, sub}` (for\nhigh-frequency clients). If the outcome does not arrive within the budget the response is `202`:\n**do not resend**; look it up with `GET /v1/requests/{requestId}`.\n\n## Rate limiting\n\nTwo budgets, each a fixed 60-second window counted in request weights:\n\n- **Per IP** — every `/v1/*` request. The IP is the TCP peer of the gateway; behind the deployment's own\n  reverse proxy it is the `x-real-ip` that proxy writes. `x-forwarded-for`, and an `x-real-ip` sent by\n  anyone other than a trusted proxy, are ignored.\n- **Per account** — writes only, charged **after** the signature pre-check passes, keyed by the main wallet\n  of the account being acted on (subaccounts share their main wallet's budget). A request that names\n  someone else's address cannot pass the pre-check, so it never touches that account's budget.\n\nWeights: reads 1, order book and prices 2, history endpoints 5, writes `1 + floor(n / 40)` where `n` is\nthe number of orders plus cancels in the request (a replace counts both). Both budgets default to 1200\nper minute; the operator can raise either for a given IP or main wallet (market-maker tiers). Every\n`/v1/*` response carries `ratelimit: limit=…, remaining=…, reset=…` and `ratelimit-policy: <limit>;w=60`\nfor the IP budget; a write that reached the account budget also carries\n`x-ratelimit-account: limit=…, remaining=…, reset=…`. Exceeding either budget returns\n`429 GatewayRateLimited` with `retry-after` and `details.bucket` = `ip` | `account`. API-wallet writes are\npre-checked at the gateway too: a signature that does not recover to `signer` is `401\nGatewayBadSignature`; a `signer` with no grant on the account is `403 UnknownAgent`, an expired one\n`403 AgentExpired` — none of them is sequenced. Right after approving an API wallet, send\n`x-dexos-min-seq` = the approval receipt's `seq` with the first write. The legacy endpoints are not rate\nlimited (except `POST /subaccount`, which shares the IP budget).\n"
+    "description": "The DEXOS public API for third-party developers, builders and liquidity providers. The specification\nlives in `archive/docs-20261111/specs/public-api-v1.md`; `archive/docs-20261111/research/api-landscape-2026-09.md` compares it with\nHyperliquid, Lighter, Aster and Pacifica. **This document mirrors the gateway's v1 route table**\n(`crates/gateway/src/api/v1.rs`, pinned by `scripts/check-openapi.mjs`, INV-API-V1-SPEC-MIRROR).\n**Every read endpoint, write endpoint, vault endpoint and WebSocket channel listed here is implemented.**\nThe timestamp-window nonce shipped with the subaccount model v2 (`sigVersion: 2`, `archive/docs-20261111/specs/subaccount-model.md`); the only planned item\nis the builder volume projection (§6 of the specification).\nThe legacy endpoints (`/order`, `/markets`, `/ws`, …, documented at `/docs`) remain available; v1 is a\ntranslation layer on top of them and returns bit-identical data.\n\n## Quick start\n\n1. `GET /v1/exchange` → the EIP-712 domain (`domain` / `chainId`) and the token table (with the numeric\n   `token` ids the `Withdrawal` / `Transfer` structs carry); `GET /v1/markets/BTC-USD` → `priceDecimals` /\n   `sizeDecimals` and `signingMarketId` (the `market` field of the signed structs).\n2. `GET /v1/account/nonce?address=<your address>` → the next `nonce` and `signingAccountId` (the value for the\n   `accountId` field of the signed struct; signing is the only thing it is for).\n3. Scale `price` and `size` to integers locally (`ticks = price × 10^priceDecimals`,\n   `lots = size × 10^sizeDecimals`), sign the `Order(...)` struct (each write endpoint states its\n   `x-eip712.typeString`) and `POST /v1/orders`\n   `{account, nonce, signature, symbol, side, type: \"limit\", price, size, clientOrderId?}` →\n   `200 {orderId, status: resting|filled|…}` or `422 {error}`.\n4. Programmatic trading: approve an API wallet once from the main wallet with\n   `POST /v1/account/agents/approve`, then sign with it and pass its address as `signer`\n   (the `AgentExec` signature covers the canonical-bytes hash of the inner command). Batch orders,\n   cancels, replaces and the dead man's switch all go through the API wallet; **an API wallet cannot\n   move funds**.\n5. Subscriptions: `GET /v1/ws` → `{\"method\":\"subscribe\",\"params\":{\"channel\":\"book\",\"symbol\":\"BTC-USD\"}}`.\n   After a disconnect, resume from the last `id` you saw with `/v1/account/fills?after=` or\n   `/v1/events?after=`.\n\n## Conventions\n\n- Path prefix `/v1`; JSON; camelCase field names; timestamps in Unix milliseconds; lower-case enums.\n- **Prices, sizes and amounts are decimal strings**: `ticks = price × 10^priceDecimals`,\n  `lots = size × 10^sizeDecimals` (both must divide exactly); USDC amounts are scaled by `10^6`.\n  `priceDecimals` / `sizeDecimals` come from `GET /v1/markets`.\n- Markets are addressed by **`symbol`** (`BTC-USD` / `BTC-USDC`), accounts by **`address`**\n  (+ `subaccount`, 0 = main account), vaults by **`vault`** (the vault id; v1.1 §4.3). **No v1 response addresses anything by a numeric id.** The numeric ids v1\n  does return (`signingAccountId` on `/v1/account/nonce` and `/v1/account/subaccounts`, `signingMarketId` on\n  `/v1/markets`, `token` on `/v1/exchange`) exist only because the EIP-712 structs carry them; they are inputs to\n  signing, never addresses.\n- Every error has the shape `{error:{code, num, message, details?}}`: `code` is a stable string\n  (`Gateway*` for the gateway, the `CoreError` variant name for the execution layer), `num` a stable\n  number (1xxxx gateway / 2xxxx execution layer). HTTP status: 400 malformed request · 401 bad\n  signature · 403 ownership / scope · 404 · 409 · 412 replica behind · 421 wrong node · 422 business\n  rejection · 429 rate limited · 5xx.\n- Pagination: `?limit=&after=<cursor>` → `{…, next, hasMore}`; execution-history endpoints also\n  return a fixed upper bound `upper`, which you pass back unchanged on the following pages.\n- Read consistency: write receipts carry `x-dexos-seq`; a **read after a write** sends\n  `x-dexos-min-seq` and gets 412 when the replica is behind (same semantics as the legacy API).\n\n## Signing (write endpoints)\n\nAll write endpoints share one envelope: `{account, subaccount?, signer?, nonce, expiresAt?, signature,\n…business fields}`. The signature is over the existing EIP-712 typed structs (each endpoint states its\n`x-eip712.typeString`), with the domain from `GET /v1/exchange`. Prices and sizes inside the struct are\nthe **scaled integers**: the SDK scales locally and signs, the gateway performs the same scaling for its\npre-check, and the execution layer verifies the signature authoritatively. When `signer` is present the\nrequest is signed by an API wallet (its nonce lives in the agent scope:\n`GET /v1/account/nonce?address=&signer=`). API wallets can only trade; every fund-moving endpoint\nanswers `403 AgentScopeViolation`.\n\n## Write receipts\n\nBy default (`ack=result`) the request waits for the fold (at most one epoch) and returns the business\noutcome: a single order gets `200` with the order object or `422` with the rejection reason; a batch\nalways gets `200` with per-item `items[]`. `ack=sequenced` returns only `{seq, sub}` (for\nhigh-frequency clients). If the outcome does not arrive within the budget the response is `202`:\n**do not resend**; look it up with `GET /v1/requests/{requestId}`.\nA `421 GatewayNotLeader` on a write means it never reached the log: send it to another node (or with a new nonce).\nA `503 GatewayUnavailable` whose `details.outcome` is `\"unknown\"` (response header `x-dexos-outcome: unknown`)\nmeans the node lost the write after handing it to consensus: it may still execute, so look it up with\n`GET /v1/requests/{details.requestId}` before sending it again.\n\n## Rate limiting\n\nTwo budgets, each a fixed 60-second window counted in request weights:\n\n- **Per IP** — every `/v1/*` request. The IP is the TCP peer of the gateway; behind the deployment's own\n  reverse proxy it is the `x-real-ip` that proxy writes. `x-forwarded-for`, and an `x-real-ip` sent by\n  anyone other than a trusted proxy, are ignored.\n- **Per account** — writes only, charged **after** the signature pre-check passes, keyed by the main wallet\n  of the account being acted on (subaccounts share their main wallet's budget). A request that names\n  someone else's address cannot pass the pre-check, so it never touches that account's budget.\n\nWeights: reads 1, order book and prices 2, history endpoints 5, writes `1 + floor(n / 40)` where `n` is\nthe number of orders plus cancels in the request (a replace counts both). Both budgets default to 1200\nper minute; the operator can raise either for a given IP or main wallet (market-maker tiers). Every\n`/v1/*` response carries `ratelimit: limit=…, remaining=…, reset=…` and `ratelimit-policy: <limit>;w=60`\nfor the IP budget; a write that reached the account budget also carries\n`x-ratelimit-account: limit=…, remaining=…, reset=…`. Exceeding either budget returns\n`429 GatewayRateLimited` with `retry-after` and `details.bucket` = `ip` | `account`. API-wallet writes are\npre-checked at the gateway too: a signature that does not recover to `signer` is `401\nGatewayBadSignature`; a `signer` with no grant on the account is `403 UnknownAgent`, an expired one\n`403 AgentExpired` — none of them is sequenced. Right after approving an API wallet, send\n`x-dexos-min-seq` = the approval receipt's `seq` with the first write. The legacy endpoints are not rate\nlimited (except `POST /subaccount`, which shares the IP budget).\n"
   },
   "openapi": "3.1.0",
   "paths": {
@@ -5522,6 +5695,15 @@
               "default": 0
             },
             "description": "Subaccount index (0 = main account; in creation order)"
+          },
+          {
+            "name": "dex",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Read this subaccount's balance under a merchant dex (number or dex code), like Hyperliquid's `clearinghouseState{dex}`: each (address, subaccount) has one balance per merchant dex after the merchant isolation switch. Omitted or 0 = the platform balance. No balance under that dex yet = 404; an unknown code = 404."
           },
           {
             "name": "vault",
@@ -5911,6 +6093,15 @@
             "description": "Subaccount index (0 = main account; in creation order)"
           },
           {
+            "name": "dex",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Read under a merchant dex (number or dex code): each (address, subaccount) has one balance per merchant dex after the merchant isolation switch, same as `dex` on `/v1/account`. Omitted or 0 = the platform balance. No balance under that dex yet = 404; an unknown code = 404. Ignored when `vault` is given."
+          },
+          {
             "name": "vault",
             "in": "query",
             "required": false,
@@ -6049,6 +6240,15 @@
               "default": 0
             },
             "description": "Subaccount index (0 = main account; in creation order)"
+          },
+          {
+            "name": "dex",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Read under a merchant dex (number or dex code): each (address, subaccount) has one balance per merchant dex after the merchant isolation switch, same as `dex` on `/v1/account`. Omitted or 0 = the platform balance. No balance under that dex yet = 404; an unknown code = 404. Ignored when `vault` is given."
           },
           {
             "name": "vault",
@@ -6331,6 +6531,15 @@
               "default": 0
             },
             "description": "Subaccount index (0 = main account; in creation order)"
+          },
+          {
+            "name": "dex",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Read under a merchant dex (number or dex code): each (address, subaccount) has one balance per merchant dex after the merchant isolation switch, same as `dex` on `/v1/account`. Omitted or 0 = the platform balance. No balance under that dex yet = 404; an unknown code = 404. Ignored when `vault` is given."
           },
           {
             "name": "vault",
@@ -6726,6 +6935,15 @@
             "description": "Subaccount index (0 = main account; in creation order)"
           },
           {
+            "name": "dex",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Read under a merchant dex (number or dex code): each (address, subaccount) has one balance per merchant dex after the merchant isolation switch, same as `dex` on `/v1/account`. Omitted or 0 = the platform balance. No balance under that dex yet = 404; an unknown code = 404. Ignored when `vault` is given."
+          },
+          {
             "name": "vault",
             "in": "query",
             "required": false,
@@ -6770,6 +6988,10 @@
                     },
                     "subaccount": {
                       "type": "integer"
+                    },
+                    "dex": {
+                      "type": "integer",
+                      "description": "The merchant dex whose balance was read. Present only when the request named a dex other than 0."
                     },
                     "vault": {
                       "type": "integer",
@@ -6831,6 +7053,15 @@
               "default": 0
             },
             "description": "Subaccount index (0 = main account; in creation order)"
+          },
+          {
+            "name": "dex",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Read under a merchant dex (number or dex code): each (address, subaccount) has one balance per merchant dex after the merchant isolation switch, same as `dex` on `/v1/account`. Omitted or 0 = the platform balance. No balance under that dex yet = 404; an unknown code = 404. Ignored when `vault` is given."
           },
           {
             "name": "vault",
@@ -6934,6 +7165,10 @@
                     "subaccount": {
                       "type": "integer"
                     },
+                    "dex": {
+                      "type": "integer",
+                      "description": "The merchant dex whose balance was read. Present only when the request named a dex other than 0."
+                    },
                     "vault": {
                       "type": "integer",
                       "description": "Present instead of `address` / `subaccount` when the request addressed a vault (`vault=<id>`, specification v1.1 §4.3)"
@@ -7008,6 +7243,15 @@
             "description": "Subaccount index (0 = main account; in creation order)"
           },
           {
+            "name": "dex",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Read under a merchant dex (number or dex code): each (address, subaccount) has one balance per merchant dex after the merchant isolation switch, same as `dex` on `/v1/account`. Omitted or 0 = the platform balance. No balance under that dex yet = 404; an unknown code = 404. Ignored when `vault` is given."
+          },
+          {
             "name": "vault",
             "in": "query",
             "required": false,
@@ -7077,6 +7321,15 @@
               "default": 0
             },
             "description": "Subaccount index (0 = main account; in creation order)"
+          },
+          {
+            "name": "dex",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Read under a merchant dex (number or dex code): each (address, subaccount) has one balance per merchant dex after the merchant isolation switch, same as `dex` on `/v1/account`. Omitted or 0 = the platform balance. No balance under that dex yet = 404; an unknown code = 404."
           },
           {
             "name": "period",
@@ -7149,6 +7402,15 @@
             "description": "Subaccount index (0 = main account; in creation order)"
           },
           {
+            "name": "dex",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Read under a merchant dex (number or dex code): each (address, subaccount) has one balance per merchant dex after the merchant isolation switch, same as `dex` on `/v1/account`. Omitted or 0 = the platform balance. No balance under that dex yet = 404; an unknown code = 404. Ignored when `vault` is given."
+          },
+          {
             "name": "vault",
             "in": "query",
             "required": false,
@@ -7177,6 +7439,10 @@
                     },
                     "subaccount": {
                       "type": "integer"
+                    },
+                    "dex": {
+                      "type": "integer",
+                      "description": "The merchant dex whose balance was read. Present only when the request named a dex other than 0."
                     },
                     "vault": {
                       "type": "integer",
@@ -7379,6 +7645,76 @@
         "x-eip712": {
           "typeString": "CreateSubaccount(address owner,uint64 nonce)",
           "v2TypeString": "CreateSubaccountAt(address owner,uint16 subaccount,uint64 nonce)"
+        }
+      }
+    },
+    "/v1/account/dex-buckets": {
+      "get": {
+        "tags": [
+          "Account"
+        ],
+        "summary": "Merchant buckets",
+        "description": "The caller's per-dex balances (merchant fund isolation, #295; same model as Hyperliquid's per-perp-dex balances): one per (subaccount, merchant dex) that has been funded. After the exchange-wide switch `merchantIsolation` is on, orders on a merchant dex's markets are filled from the signing subaccount's balance under that dex. A balance is opened by the owner's first `POST /v1/account/dex-transfer` into it.",
+        "operationId": "v1_dex_buckets",
+        "parameters": [
+          {
+            "name": "address",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^0x[0-9a-f]{40}$"
+            },
+            "description": "Main wallet address"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "address": {
+                      "type": "string",
+                      "pattern": "^0x[0-9a-f]{40}$"
+                    },
+                    "merchantIsolation": {
+                      "type": "boolean",
+                      "description": "Whether the exchange-wide merchant isolation switch is on"
+                    },
+                    "buckets": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "subaccount": {
+                            "type": "integer",
+                            "description": "The subaccount this balance belongs to"
+                          },
+                          "dex": {
+                            "type": "integer",
+                            "minimum": 1
+                          },
+                          "code": {
+                            "type": [
+                              "string",
+                              "null"
+                            ],
+                            "description": "Dex code from the registry; null when not registered"
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          }
         }
       }
     },
@@ -8176,7 +8512,7 @@
           "Market data"
         ],
         "summary": "Single dex",
-        "description": "One row of `/v1/dexes` (`markets` (perpetuals only) and `spotMarkets` (spot only) are listed separately) plus `categories`: the dex's own category definitions ∪ the platform templates used by its markets' `tags` (dex 0 included), by `sort` then code — the display names for `/v1/markets[].tags` (`docs/specs/market-categories.md` §3.6). Read with the symbol table (cached up to 2 s).",
+        "description": "One row of `/v1/dexes` (`markets` (perpetuals only) and `spotMarkets` (spot only) are listed separately) plus `categories`: the dex's own category definitions ∪ the platform templates used by its markets' `tags` (dex 0 included), by `sort` then code — the display names for `/v1/markets[].tags` (`archive/docs-20261111/specs/market-categories.md` §3.6). Read with the symbol table (cached up to 2 s).",
         "operationId": "v1_dex",
         "parameters": [
           {
@@ -8262,6 +8598,15 @@
               "description": "EVM address (always lower-case in responses; case-insensitive in requests)"
             },
             "description": ""
+          },
+          {
+            "name": "dex",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Read under a merchant dex (number or dex code): each (address, subaccount) has one balance per merchant dex after the merchant isolation switch, same as `dex` on `/v1/account`. Omitted or 0 = the platform balance. No balance under that dex yet = 404; an unknown code = 404. Only with `address`."
           },
           {
             "name": "after",
@@ -9002,7 +9347,7 @@
             }
           },
           "422": {
-            "description": "Business rejection (`code` = the CoreError variant name)",
+            "description": "Business rejection (`code` = the CoreError variant name). Gateway precheck `GatewayCollateralTokenMismatch` (10422): the account holds collateral but none in the perpetual's settlement token and has no position there; `details` = `{symbol, kind, settleToken}`. A command that bypasses the gateway is still refused by execution as `InsufficientMargin`",
             "content": {
               "application/json": {
                 "schema": {
@@ -9045,7 +9390,7 @@
           "Trading"
         ],
         "summary": "Paired trade (testnet only)",
-        "description": "**Test environments only** (specification `docs/specs/paired-trade.md`). Two accounts trade with each other atomically in **one request**: the maker leg and the taker leg are each signed by their own account (`sigVersion: 2`), and the execution layer either fills them against each other at `price` for `size` or leaves both legs without effect. The legs never rest on the book and never touch anyone else's orders; at execution `price` must be strictly between the best bid and the best ask (else 422 `PairedTradeOutsideSpread`). The execution layer refuses the command on any non-testnet chain id (`PairedTradeDisabled`). The gateway only serves accounts listed in its `PAIRED_TRADE_ACCOUNTS` setting: when the setting is empty the endpoint does not exist (404); a leg outside the list is 403 `GatewayForbidden` with `details.reason = paired_trade_not_allowed`. Fills count in candles, trades and 24h statistics like any other fill. One-phase: perpetual markets only.",
+        "description": "**Test environments only** (specification `archive/docs-20261111/specs/paired-trade.md`). Two accounts trade with each other atomically in **one request**: the maker leg and the taker leg are each signed by their own account (`sigVersion: 2`), and the execution layer either fills them against each other at `price` for `size` or leaves both legs without effect. The legs never rest on the book and never touch anyone else's orders; at execution `price` must be strictly between the best bid and the best ask (else 422 `PairedTradeOutsideSpread`). The execution layer refuses the command on any non-testnet chain id (`PairedTradeDisabled`). The gateway only serves accounts listed in its `PAIRED_TRADE_ACCOUNTS` setting: when the setting is empty the endpoint does not exist (404); a leg outside the list is 403 `GatewayForbidden` with `details.reason = paired_trade_not_allowed`. Fills count in candles, trades and 24h statistics like any other fill. One-phase: perpetual markets only.",
         "operationId": "v1_paired_trade",
         "parameters": [
           {
@@ -9202,11 +9547,36 @@
         },
         "responses": {
           "200": {
-            "description": "Filled: `{status: \"filled\", symbol, price, size, makerOrderId, takerOrderId, fills, avgPrice, seq, sub, requestId}`; `fills` are the taker leg's fills",
+            "description": "Filled: `{status: \"filled\", symbol, price, size, makerOrderId, takerOrderId, fills, avgPrice, makerFills, legFees, seq, sub, requestId}`; `fills` are the taker leg's fills, `makerFills` the maker leg's, `legFees` what each leg was actually charged",
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object"
+                  "type": "object",
+                  "properties": {
+                    "makerFills": {
+                      "type": "array",
+                      "description": "The maker leg's fills, same shape and `fillId` as `fills`; `fee` is the maker protocol fee (negative = rebate), equal to the maker account's row for the same fill in `/v1/account/fills`",
+                      "items": {
+                        "$ref": "#/components/schemas/ReceiptFill"
+                      }
+                    },
+                    "legFees": {
+                      "type": "object",
+                      "description": "Fees each leg actually paid in this command. `fee` equals minus the sum of that leg account's ledger amounts at the same `seq` with kind `taker_fee`, `maker_fee`, `maker_rebate`, `deployer_fee` or `builder_fee` (paired legs carry no builder attribution, so no builder fee is charged)",
+                      "required": [
+                        "maker",
+                        "taker"
+                      ],
+                      "properties": {
+                        "maker": {
+                          "$ref": "#/components/schemas/PairedLegFee"
+                        },
+                        "taker": {
+                          "$ref": "#/components/schemas/PairedLegFee"
+                        }
+                      }
+                    }
+                  }
                 }
               }
             }
@@ -9857,7 +10227,7 @@
           "Trading"
         ],
         "summary": "Replace order",
-        "description": "Cancel the old order and place the new one in a single state transition (not atomic). The new orders are attributed like `POST /v1/orders` (the top-level `builder`, else the entry domain) and pass the builder's catalog gate item by item; a replace that only cancels resolves no builder. Optional `modifies[]` (dex-os#256): each item is one modify with the semantics of `POST /v1/orders/modify` (the old order is gone → only that item is rejected `UnknownOrder` and no new order is placed; the new order is refused → that item is rejected and the old order is canceled anyway); items never affect each other. Records run cancels → modifies → orders, each in input order. With modifies the signed inner command is `BatchReplace2{account, cancels, modifies, orders, nowMs}` (tag 0x88); without (absent or empty) it stays `BatchReplace`, byte for byte. 400 when an orderId appears more than once across `cancels` and `modifies`. Each non-reduce-only modify passes the same `closeOnly` check as `POST /v1/orders/modify`; the rate weight counts cancels + modifies + orders.",
+        "description": "Cancel the old order and place the new one in a single state transition (not atomic). The new orders are attributed like `POST /v1/orders` (the top-level `builder`, else the entry domain) and pass the builder's catalog gate item by item; a replace that only cancels resolves no builder. Optional `modifies[]` (dex-os#256): each item is one modify with the semantics of `POST /v1/orders/modify` (the old order is gone → only that item is rejected `UnknownOrder` and no new order is placed; the new order is refused → that item is rejected and the old order is canceled anyway); items never affect each other. Records run cancels → modifies → orders, each in input order. With modifies the signed inner command is `BatchReplace2{account, cancels, modifies, orders, nowMs}` (tag 0x88); without (absent or empty) it stays `BatchReplace`, byte for byte. 400 when an orderId appears more than once across `cancels` and `modifies`. Each non-reduce-only modify passes the same `closeOnly` check as `POST /v1/orders/modify`; the rate weight counts cancels + modifies + orders. With `replaceVersion: 3` cancels and modifies may name a new order of an earlier replace by `ref` (`CommandRef`) instead of its orderId, so the next replace can go out on the sequenced receipt without waiting for the result; each item's result echoes `ref` and, when it resolved, the orderId. A ref modify is checked against `closeOnly` with this request's builder (its order is not known before execution).",
         "operationId": "v1_replace",
         "parameters": [
           {
@@ -9972,8 +10342,25 @@
                       "cancels": {
                         "type": "array",
                         "items": {
-                          "type": "string"
-                        }
+                          "oneOf": [
+                            {
+                              "type": "string",
+                              "description": "orderId"
+                            },
+                            {
+                              "type": "object",
+                              "required": [
+                                "ref"
+                              ],
+                              "properties": {
+                                "ref": {
+                                  "$ref": "#/components/schemas/CommandRef"
+                                }
+                              }
+                            }
+                          ]
+                        },
+                        "description": "orderId strings; with `replaceVersion: 3` an item may instead be `{\"ref\": CommandRef}`"
                       },
                       "orders": {
                         "type": "array",
@@ -9999,6 +10386,13 @@
                         "examples": [
                           "1"
                         ]
+                      },
+                      "replaceVersion": {
+                        "type": "integer",
+                        "enum": [
+                          3
+                        ],
+                        "description": "3 signs the inner command as `BatchReplace3{account, cancels: [OrderTarget], modifies: [{target: OrderTarget, price, lots, tif, reduceOnly}], orders, nowMs}` (tag 0xE2; `OrderTarget` = u8 0 + u64 orderId, or u8 1 + u16 market + u64 seq + u16 sub + u16 item). Only such replaces can be referenced and only they accept `ref` targets; absent keeps `BatchReplace` / `BatchReplace2`."
                       }
                     }
                   }
@@ -10341,6 +10735,15 @@
               "default": 0
             },
             "description": "Subaccount index (0 = main account; in creation order)"
+          },
+          {
+            "name": "dex",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Read under a merchant dex (number or dex code): each (address, subaccount) has one balance per merchant dex after the merchant isolation switch, same as `dex` on `/v1/account`. Omitted or 0 = the platform balance. No balance under that dex yet = 404; an unknown code = 404. Ignored when `vault` is given."
           },
           {
             "name": "vault",
@@ -12085,6 +12488,163 @@
         }
       }
     },
+    "/v1/account/dex-transfer": {
+      "post": {
+        "tags": [
+          "Funds"
+        ],
+        "summary": "Transfer between dex balances",
+        "operationId": "v1_dex_transfer",
+        "description": "Move collateral between per-dex balances, like Hyperliquid's `sendAsset{sourceDex, destinationDex}`. sigVersion 2 only, signed by the owner wallet (API wallets cannot move funds) over `DexTransfer(address owner,uint16 fromSubaccount,uint16 fromDex,address to,uint16 toSubaccount,uint16 toDex,uint32 token,uint128 amount,uint64 nonce)`. `fromSubaccount` is the envelope's `subaccount`; `to` defaults to the owner and `toSubaccount` to `fromSubaccount` when sending to oneself (0 otherwise); `fromDex` / `toDex` default to 0 (the platform balance). The owner's first transfer into a merchant dex opens that balance; a merchant dex balance that does not exist is `UnknownDexBucket` (also before the merchant isolation switch is on). Withdrawals leave from the platform balance (dex 0).",
+        "parameters": [
+          {
+            "name": "ack",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "result",
+                "sequenced"
+              ],
+              "default": "result"
+            },
+            "description": "Default: wait for the fold and return the business outcome; high-frequency clients use `sequenced` to get only `{status, seq, sub, requestId}`"
+          },
+          {
+            "$ref": "#/components/parameters/WaitMs"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string"
+                    },
+                    "token": {
+                      "type": "string"
+                    },
+                    "amount": {
+                      "type": "string",
+                      "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
+                      "description": "Decimal string"
+                    },
+                    "fromSubaccount": {
+                      "type": "integer"
+                    },
+                    "to": {
+                      "type": "string",
+                      "pattern": "^0x[0-9a-f]{40}$",
+                      "description": "EVM address (always lower-case in responses; case-insensitive in requests)"
+                    },
+                    "toSubaccount": {
+                      "type": "integer"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "202": {
+            "$ref": "#/components/responses/Sequenced"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "description": "Bad signature",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Ownership / scope (an API wallet cannot move funds)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Business rejection (`code` = the CoreError variant name)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "allOf": [
+                  {
+                    "$ref": "#/components/schemas/SignedEnvelope"
+                  },
+                  {
+                    "type": "object",
+                    "required": [
+                      "amount"
+                    ],
+                    "properties": {
+                      "fromDex": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "default": 0,
+                        "description": "Source dex balance; 0 = platform"
+                      },
+                      "to": {
+                        "type": "string",
+                        "pattern": "^0x[0-9a-f]{40}$",
+                        "description": "Receiving owner; defaults to the signer's own address"
+                      },
+                      "toSubaccount": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "description": "Defaults to `fromSubaccount` when `to` is the owner, otherwise 0"
+                      },
+                      "toDex": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "default": 0,
+                        "description": "Destination dex balance; 0 = platform"
+                      },
+                      "token": {
+                        "type": "string",
+                        "default": "USDC"
+                      },
+                      "amount": {
+                        "type": "string",
+                        "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
+                        "description": "Decimal string"
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        },
+        "x-eip712": {
+          "typeString": "DexTransfer(address owner,uint16 fromSubaccount,uint16 fromDex,address to,uint16 toSubaccount,uint16 toDex,uint32 token,uint128 amount,uint64 nonce)"
+        }
+      }
+    },
     "/v1/account/subaccounts/name": {
       "post": {
         "tags": [
@@ -12477,7 +13037,7 @@
           "Funds"
         ],
         "summary": "Fund a merchant dex insurance fund",
-        "description": "The account owner signs a sigVersion 2 action whose inner command is `FundDexInsurance { account: placeholder, dex, amount }` (tag 0x8D); the amount moves from the account's withdrawable balance of the dex collateral token into the dex insurance account and counts as principal. API wallets get 403 `AgentScopeViolation`; dex 0 → 422 `InvalidDexConfig`. `token` (default USDC) only selects the decimals of `amount`. See `docs/specs/merchant-insurance-isolation.md` §4.1.",
+        "description": "The account owner signs a sigVersion 2 action whose inner command is `FundDexInsurance { account: placeholder, dex, amount }` (tag 0x8D); the amount moves from the account's withdrawable balance of the dex collateral token into the dex insurance account and counts as principal. API wallets get 403 `AgentScopeViolation`; dex 0 → 422 `InvalidDexConfig`. `token` (default USDC) only selects the decimals of `amount`. See `archive/docs-20261111/specs/merchant-insurance-isolation.md` §4.1.",
         "operationId": "v1_dex_insurance_fund",
         "parameters": [
           {
@@ -12650,6 +13210,7 @@
       "GatewayDuplicateClientOrderId": 10409,
       "GatewayReplicaBehind": 10412,
       "GatewayNotLeader": 10421,
+      "GatewayCollateralTokenMismatch": 10422,
       "GatewayRateLimited": 10429,
       "GatewayError": 10500,
       "GatewayUnavailable": 10503

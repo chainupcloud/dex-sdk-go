@@ -15,6 +15,9 @@ type ReplaceRequest struct {
 	Market   uint16
 	Cancels  []uint64
 	Orders   []BatchOrder
+	// CancelRefs 只用于核对 BatchReplace3 的回执([RequestReceipt.CheckReplace]):为空或与 Cancels 等长,
+	// CancelRefs[i] 非 nil 时第 i 个撤单项按引用撤,Cancels[i] 不用。
+	CancelRefs []*CommandRef `json:",omitempty"`
 }
 
 // ReplaceJournal 在同一 Session nonce 锁内提供发送前/收到结果后的持久化边界。

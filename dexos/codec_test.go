@@ -125,6 +125,20 @@ func TestOrderIDPacking(t *testing.T) {
 
 // BatchReplace2(tag 0x88)不进共享金样:字面量与 dex-os `batch_replace2_roundtrips_with_pinned_layout` 相同,
 // 两边各自对着它,差一个字节就有一边红。
+func TestEncodeBatchReplace3Pinned(t *testing.T) {
+	order := NewOrderID(0, 9)
+	got := EncodeBatchReplace3(4, 2003,
+		[]OrderTarget{{OrderID: &order}, {Ref: &CommandRef{Market: 7, Seq: 77, Sub: 2, Item: 1}}},
+		[]BatchModify3{{Target: OrderTarget{Ref: &CommandRef{Market: 7, Seq: 76, Sub: 0, Item: 0}}, Price: 51000, Lots: 5, TIF: PostOnly, ReduceOnly: true}},
+		[]BatchOrder{{Market: 7, Side: Sell, Price: 52000, Lots: 3, TIF: GTC}},
+	)
+	const want = "01e204000000d307000000000000020000000009000000000000000107004d0000000000000002000100010000000107004c00000000000000000000" +
+		"0038c70000050000000000000002010100000007000120cb000003000000000000000000"
+	if hex.EncodeToString(got) != want {
+		t.Fatalf("BatchReplace3 字节漂移:\n got %x\nwant %s", got, want)
+	}
+}
+
 func TestEncodeBatchReplace2Pinned(t *testing.T) {
 	got := EncodeBatchReplace2(4, 2003,
 		[]OrderID{9},

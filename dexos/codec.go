@@ -50,6 +50,8 @@ const (
 	tagBatchReplace2 byte = 0x88
 	// 成对成交的一条腿(dex-os#292,规格 dex-os docs/specs/paired-trade.md)
 	tagPairedTradeLeg byte = 0x8C
+	// 撤单、改单目标可按命令位置引用新单的原子换单(dex-os#612)
+	tagBatchReplace3 byte = 0xE2
 )
 
 // Side 买卖方向。取值必须与内核的 put_side 一致。
@@ -238,6 +240,75 @@ func EncodeBatchReplace2(account uint32, nowMs uint64, cancels []OrderID, modifi
 		e.order(o)
 	}
 	return e.buf
+}
+
+// CommandRef 引用此前一条 BatchReplace3 挂出的第 Item 张新单:Seq / Sub 是那条命令定序回执里的位号,
+// Item 是那条命令里第几个输入(改单项在前、新单在后,从 0 起;撤单项不编号)。
+type CommandRef struct {
+	Market uint16 `json:"market"`
+	Seq    uint64 `json:"seq"`
+	Sub    uint16 `json:"sub"`
+	Item   uint16 `json:"item"`
+}
+
+// OrderTarget BatchReplace3 的撤单、改单目标:OrderID 与 Ref 恰好给一个。
+type OrderTarget struct {
+	OrderID *OrderID
+	Ref     *CommandRef
+}
+
+// BatchModify3 BatchReplace3 的改单项,语义同 [BatchModify],目标可以是引用。
+type BatchModify3 struct {
+	Target     OrderTarget
+	Price      uint32
+	Lots       uint64
+	TIF        TimeInForce
+	ReduceOnly bool
+}
+
+// EncodeBatchReplace3 规范编码 Command::BatchReplace3(tag 0xE2)。布局同 BatchReplace2,只是每个撤单目标、
+// 改单目标换成 OrderTarget:按单号 u8 0 | OrderId u64,按引用 u8 1 | market u16 | seq u64 | sub u16 | item u16。
+// 字节钉在 TestEncodeBatchReplace3Pinned,与 dex-os `batch_replace3_roundtrips_with_pinned_layout` 同一个字面量。
+// 两个都给或都不给的目标编不出合法命令,调用方先用 [OrderTarget.Valid] 核。
+func EncodeBatchReplace3(account uint32, nowMs uint64, cancels []OrderTarget, modifies []BatchModify3, orders []BatchOrder) []byte {
+	e := &encoder{}
+	e.u8(codecVersion)
+	e.u8(tagBatchReplace3)
+	e.u32(account)
+	e.u64(nowMs)
+	e.u32(uint32(len(cancels)))
+	for _, c := range cancels {
+		e.target(c)
+	}
+	e.u32(uint32(len(modifies)))
+	for _, m := range modifies {
+		e.target(m.Target)
+		e.u32(m.Price)
+		e.u64(m.Lots)
+		e.u8(byte(m.TIF))
+		e.boolean(m.ReduceOnly)
+	}
+	e.u32(uint32(len(orders)))
+	for _, o := range orders {
+		e.order(o)
+	}
+	return e.buf
+}
+
+// Valid 目标恰好给了订单号或引用之一。
+func (t OrderTarget) Valid() bool { return (t.OrderID == nil) != (t.Ref == nil) }
+
+func (e *encoder) target(t OrderTarget) {
+	if t.Ref != nil {
+		e.u8(1)
+		e.u16(t.Ref.Market)
+		e.u64(t.Ref.Seq)
+		e.u16(t.Ref.Sub)
+		e.u16(t.Ref.Item)
+		return
+	}
+	e.u8(0)
+	e.u64(uint64(*t.OrderID))
 }
 
 // EncodeCancelOrder 规范编码 Command::CancelOrder(单撤)。
