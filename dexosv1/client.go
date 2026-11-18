@@ -28,7 +28,8 @@ type Client struct {
 	// seq 这个客户端见过的最大提交位号(`x-dexos-seq`)。语义与 dexos.Client 相同:账户类读取带上
 	// `x-dexos-min-seq`,落后的只读副本以 412 明确失败,而不是悄悄返回写之前的状态。
 	// 行情类读取不带(OpenAPI 明确要求:行情投影有自己的时间线,带了只会无谓地 412)。
-	// 位号只在一本账本里有意义:[Client.SecurityNetwork] 读到的网络身份与上次不同(账本重置),就清零重新采信。
+	// 位号只在一本账本里有意义:读回来的位号第一次采信前先读网络身份,钉住它属于哪本账本(读不到就不采信);
+	// [Client.SecurityNetwork] 读到的网络身份与上次不同(账本重置),就清零重新采信。
 	seq atomic.Uint64
 	// ledger 上次 [Client.SecurityNetwork] 读到的网络身份。
 	ledger atomic.Pointer[ledgerID]
@@ -37,6 +38,17 @@ type Client struct {
 type ledgerID struct {
 	network, genesis Hash
 	epoch            uint64
+}
+
+const networkPath = "/v1/security/network"
+
+func (c *Client) adoptSeq(ctx context.Context, v uint64) {
+	if c.ledger.Load() == nil {
+		if _, err := c.SecurityNetwork(ctx); err != nil {
+			return
+		}
+	}
+	c.ObserveSeq(v)
 }
 
 func (c *Client) pinLedger(n Network) {
@@ -156,16 +168,20 @@ func (c *Client) roundTrip(ctx context.Context, path string, q url.Values, kind 
 	if err != nil {
 		return 0, nil, nil, err
 	}
-	defer resp.Body.Close()
-	// 只在 2xx 上采信位号:412 带的是副本**本地已应用**位号,并入它会把要求放松,方向正好错。
-	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		if v, err := strconv.ParseUint(resp.Header.Get(seqHeader), 10, 64); err == nil {
-			c.ObserveSeq(v)
-		}
-	}
 	raw, err := io.ReadAll(resp.Body)
+	resp.Body.Close()
 	if err != nil {
 		return 0, nil, nil, fmt.Errorf("dexosv1: 响应读取失败: %w", err)
+	}
+	// 只在 2xx 上采信位号:412 带的是副本**本地已应用**位号,并入它会把要求放松,方向正好错。
+	// 412 时重读一次网络身份:账本已重置的话,旧账本的位号就此作废,下一次读不再带它。
+	switch {
+	case resp.StatusCode >= 200 && resp.StatusCode < 300 && path != networkPath:
+		if v, err := strconv.ParseUint(resp.Header.Get(seqHeader), 10, 64); err == nil {
+			c.adoptSeq(ctx, v)
+		}
+	case resp.StatusCode == http.StatusPreconditionFailed && kind == accountRead:
+		_, _ = c.SecurityNetwork(ctx)
 	}
 	return resp.StatusCode, resp.Header, raw, nil
 }

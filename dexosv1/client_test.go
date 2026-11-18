@@ -4,11 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -641,6 +643,7 @@ func TestNonceScopes(t *testing.T) {
 // 行情读不带 x-dexos-min-seq;账户读带上见过的最大位号。
 func TestMinSeqOnlyOnAccountReads(t *testing.T) {
 	f, c := newFake(t)
+	f.routes[networkPath] = serveNetwork("1", strings.Repeat("22", 32))
 	f.routes["/v1/account"] = serve(t, 200, "account.json", "x-dexos-seq", "900")
 	f.routes["/v1/markets"] = serve(t, 200, "markets.json")
 	ctx := context.Background()
@@ -657,7 +660,7 @@ func TestMinSeqOnlyOnAccountReads(t *testing.T) {
 	if _, err := c.Account(ctx, ref); err != nil {
 		t.Fatal(err)
 	}
-	reqs := f.requests()
+	reqs := slices.DeleteFunc(f.requests(), func(r *http.Request) bool { return r.URL.Path == networkPath })
 	if reqs[0].Header.Get(minSeqHeader) != "" || reqs[1].Header.Get(minSeqHeader) != "" || reqs[2].Header.Get(minSeqHeader) != "900" {
 		t.Fatalf("min-seq 头不对: %q %q %q", reqs[0].Header.Get(minSeqHeader), reqs[1].Header.Get(minSeqHeader), reqs[2].Header.Get(minSeqHeader))
 	}
@@ -669,13 +672,10 @@ func TestNewLedgerDropsTheOldLedgerSeq(t *testing.T) {
 	f, c := newFake(t)
 	var mu sync.Mutex
 	epoch, genesis := "1", strings.Repeat("22", 32)
-	f.routes["/v1/security/network"] = func(w http.ResponseWriter, _ *http.Request) {
+	f.routes[networkPath] = func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		defer mu.Unlock()
-		w.Header().Set("content-type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]string{"networkId": "0x" + strings.Repeat("11", 32), "genesisHash": "0x" + genesis,
-			"ledgerEpoch": epoch, "nodeChainId": "0x" + strings.Repeat("00", 29) + "aa36a7",
-			"nodeVerifier": testAgent, "manifestHash": "0x" + strings.Repeat("33", 32)})
+		serveNetwork(epoch, genesis)(w, r)
 	}
 	seq := "63253248"
 	f.routes["/v1/account"] = func(w http.ResponseWriter, r *http.Request) {
@@ -726,6 +726,74 @@ func TestNewLedgerDropsTheOldLedgerSeq(t *testing.T) {
 		if got := minSeqOfLastRead(); got != want {
 			t.Fatalf("新账本上的位号要接着采信: %q, 想要 %s", got, want)
 		}
+	}
+}
+
+func serveNetwork(epoch, genesis string) http.HandlerFunc {
+	return func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("content-type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]string{"networkId": "0x" + strings.Repeat("11", 32), "genesisHash": "0x" + genesis,
+			"ledgerEpoch": epoch, "nodeChainId": "0x" + strings.Repeat("00", 29) + "aa36a7",
+			"nodeVerifier": testAgent, "manifestHash": "0x" + strings.Repeat("33", 32)})
+	}
+}
+
+// 只读的客户端(从不主动读网络身份)也跟得上账本重置:第一次采信位号前先钉住账本,重置后账户读遇 412 时重读网络身份、
+// 丢掉旧账本的位号,下一次读就读到新账本。同一本账本上的 412(副本真落后)不动位号。
+func TestReadOnlyClientFollowsALedgerReset(t *testing.T) {
+	f, c := newFake(t)
+	var mu sync.Mutex
+	epoch, applied := "1", uint64(63253248)
+	f.routes[networkPath] = func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		serveNetwork(epoch, strings.Repeat("22", 32))(w, r)
+	}
+	f.routes["/v1/account"] = func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		if required, err := strconv.ParseUint(r.Header.Get(minSeqHeader), 10, 64); err == nil && required > applied {
+			w.WriteHeader(http.StatusPreconditionFailed)
+			_, _ = fmt.Fprintf(w, `{"applied":%d,"error":"replica behind","required":%d,"source":"ledger"}`, applied, required)
+			return
+		}
+		serve(t, 200, "account.json", "x-dexos-seq", strconv.FormatUint(applied, 10))(w, r)
+	}
+	ctx := context.Background()
+	ref := AccountRef{Address: mustAddr(t, testAddr)}
+	if _, err := c.Account(ctx, ref); err != nil || c.Seq() != 63253248 {
+		t.Fatalf("重置前的账户读: seq %d, %v", c.Seq(), err)
+	}
+	set := func(e string, a uint64) {
+		mu.Lock()
+		defer mu.Unlock()
+		epoch, applied = e, a
+	}
+	set("2", 5871360)
+	var behind *Error
+	if _, err := c.Account(ctx, ref); !errors.As(err, &behind) || behind.Status != http.StatusPreconditionFailed || c.Seq() != 0 {
+		t.Fatalf("账本重置后第一次读 412,并就此丢掉旧账本的位号: seq %d, %v", c.Seq(), err)
+	}
+	if _, err := c.Account(ctx, ref); err != nil || c.Seq() != 5871360 {
+		t.Fatalf("之后的账户读读到新账本: seq %d, %v", c.Seq(), err)
+	}
+	reqs := f.requests()
+	if last := reqs[len(reqs)-1]; last.URL.Path != "/v1/account" || last.Header.Get(minSeqHeader) != "" {
+		t.Fatalf("重置后第一次成功的读不带旧位号: %s %q", last.URL.Path, last.Header.Get(minSeqHeader))
+	}
+	set("2", 5871000)
+	if _, err := c.Account(ctx, ref); !errors.As(err, &behind) || behind.Status != http.StatusPreconditionFailed || c.Seq() != 5871360 {
+		t.Fatalf("同一本账本上副本落后:要 412、位号不动: seq %d, %v", c.Seq(), err)
+	}
+}
+
+// 读不到网络身份就不知道位号属于哪本账本:这次读照常返回,位号不采信。
+func TestSeqNotAdoptedWithoutTheLedger(t *testing.T) {
+	f, c := newFake(t)
+	f.routes[networkPath] = func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusServiceUnavailable) }
+	f.routes["/v1/account"] = serve(t, 200, "account.json", "x-dexos-seq", "900")
+	if _, err := c.Account(context.Background(), AccountRef{Address: mustAddr(t, testAddr)}); err != nil || c.Seq() != 0 {
+		t.Fatalf("读到了账户、位号不采信: seq %d, %v", c.Seq(), err)
 	}
 }
 
