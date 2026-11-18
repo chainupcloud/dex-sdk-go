@@ -64,7 +64,7 @@ func (c *Client) SecurityNetwork(ctx context.Context) (Network, error) {
 		NodeVerifier string `json:"nodeVerifier"`
 		ManifestHash Hash   `json:"manifestHash"`
 	}
-	if err := c.get(ctx, "/v1/security/network", nil, marketRead, &w); err != nil {
+	if err := c.get(ctx, networkPath, nil, marketRead, &w); err != nil {
 		return Network{}, err
 	}
 	chain := new(big.Int).SetBytes(w.NodeChainID[:])
