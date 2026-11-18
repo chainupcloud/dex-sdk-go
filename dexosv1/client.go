@@ -28,7 +28,22 @@ type Client struct {
 	// seq 这个客户端见过的最大提交位号(`x-dexos-seq`)。语义与 dexos.Client 相同:账户类读取带上
 	// `x-dexos-min-seq`,落后的只读副本以 412 明确失败,而不是悄悄返回写之前的状态。
 	// 行情类读取不带(OpenAPI 明确要求:行情投影有自己的时间线,带了只会无谓地 412)。
+	// 位号只在一本账本里有意义:[Client.SecurityNetwork] 读到的网络身份与上次不同(账本重置),就清零重新采信。
 	seq atomic.Uint64
+	// ledger 上次 [Client.SecurityNetwork] 读到的网络身份。
+	ledger atomic.Pointer[ledgerID]
+}
+
+type ledgerID struct {
+	network, genesis Hash
+	epoch            uint64
+}
+
+func (c *Client) pinLedger(n Network) {
+	id := ledgerID{network: n.NetworkID, genesis: n.GenesisHash, epoch: n.LedgerEpoch}
+	if prev := c.ledger.Swap(&id); prev != nil && *prev != id {
+		c.seq.Store(0)
+	}
 }
 
 // 读一致性的两个头,与旧接口同义。
@@ -42,7 +57,7 @@ func NewClient(baseURL string) *Client {
 	return &Client{BaseURL: baseURL, HTTP: &http.Client{Timeout: 15 * time.Second}}
 }
 
-// Seq 这个客户端见过的最大提交位号。
+// Seq 这个客户端在当前账本上见过的最大提交位号。
 func (c *Client) Seq() uint64 { return c.seq.Load() }
 
 // ObserveSeq 把外部得知的位号并入(取较大者),让本客户端之后的账户读取挂在同一条链上。

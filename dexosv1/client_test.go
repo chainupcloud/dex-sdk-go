@@ -663,6 +663,72 @@ func TestMinSeqOnlyOnAccountReads(t *testing.T) {
 	}
 }
 
+// 账本重置(网络身份变了)之后,旧账本的位号不再作 min-seq:新账本的位号从头数起,带着旧位号的账户读会被永远 412。
+// 网络身份没变时位号照旧带上。
+func TestNewLedgerDropsTheOldLedgerSeq(t *testing.T) {
+	f, c := newFake(t)
+	var mu sync.Mutex
+	epoch, genesis := "1", strings.Repeat("22", 32)
+	f.routes["/v1/security/network"] = func(w http.ResponseWriter, _ *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		w.Header().Set("content-type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]string{"networkId": "0x" + strings.Repeat("11", 32), "genesisHash": "0x" + genesis,
+			"ledgerEpoch": epoch, "nodeChainId": "0x" + strings.Repeat("00", 29) + "aa36a7",
+			"nodeVerifier": testAgent, "manifestHash": "0x" + strings.Repeat("33", 32)})
+	}
+	seq := "63253248"
+	f.routes["/v1/account"] = func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		serve(t, 200, "account.json", "x-dexos-seq", seq)(w, r)
+	}
+	ctx := context.Background()
+	ref := AccountRef{Address: mustAddr(t, testAddr)}
+	minSeqOfLastRead := func() string {
+		t.Helper()
+		if _, err := c.Account(ctx, ref); err != nil {
+			t.Fatal(err)
+		}
+		reqs := f.requests()
+		return reqs[len(reqs)-1].Header.Get(minSeqHeader)
+	}
+	network := func() {
+		t.Helper()
+		if _, err := c.SecurityNetwork(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	network()
+	minSeqOfLastRead()
+	network()
+	if got := minSeqOfLastRead(); got != "63253248" {
+		t.Fatalf("网络身份没变,位号要照旧带上: %q", got)
+	}
+	for _, reset := range []func(){
+		func() { epoch, seq = "2", "5871360" },
+		func() { genesis, seq = strings.Repeat("44", 32), "17" },
+	} {
+		mu.Lock()
+		before := seq
+		reset()
+		mu.Unlock()
+		network()
+		if c.Seq() != 0 {
+			t.Fatalf("账本换了,旧账本的位号 %s 还留着: %d", before, c.Seq())
+		}
+		if got := minSeqOfLastRead(); got != "" {
+			t.Fatalf("新账本上第一次账户读不该带旧账本的位号: %q", got)
+		}
+		mu.Lock()
+		want := seq
+		mu.Unlock()
+		if got := minSeqOfLastRead(); got != want {
+			t.Fatalf("新账本上的位号要接着采信: %q, 想要 %s", got, want)
+		}
+	}
+}
+
 func TestFillsPageThroughCarriesEpochAndUpper(t *testing.T) {
 	f, c := newFake(t)
 	cat := catalog(t, f, c)
