@@ -53,7 +53,8 @@ func (o *optDecU64) UnmarshalJSON(b []byte) error {
 	return nil
 }
 
-// SecurityNetwork 读 GET /v1/security/network:签 139 要钉的网络身份。
+// SecurityNetwork 读 GET /v1/security/network:签 139 要钉的网络身份。网络身份与这个客户端上次读到的不同
+// (账本重置)时,丢掉旧账本的读一致性位号,见 [Client.Seq]。
 func (c *Client) SecurityNetwork(ctx context.Context) (Network, error) {
 	var w struct {
 		NetworkID    Hash   `json:"networkId"`
@@ -77,7 +78,9 @@ func (c *Client) SecurityNetwork(ctx context.Context) (Network, error) {
 	if w.NetworkID.IsZero() || w.GenesisHash.IsZero() || w.ManifestHash.IsZero() {
 		return Network{}, fmt.Errorf("dexosv1: /v1/security/network 缺网络身份")
 	}
-	return Network{NetworkID: w.NetworkID, GenesisHash: w.GenesisHash, LedgerEpoch: uint64(w.LedgerEpoch), ChainID: chain.Uint64(), Verifier: verifier, ManifestHash: w.ManifestHash}, nil
+	n := Network{NetworkID: w.NetworkID, GenesisHash: w.GenesisHash, LedgerEpoch: uint64(w.LedgerEpoch), ChainID: chain.Uint64(), Verifier: verifier, ManifestHash: w.ManifestHash}
+	c.pinLedger(n)
+	return n, nil
 }
 
 // SecurityTime 账本认证时间与读到它的位号。139 的有效期按 TimestampMs 判;按 actionId 查回执时把 HostLogIndex
