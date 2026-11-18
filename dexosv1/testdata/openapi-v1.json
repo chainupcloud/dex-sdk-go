@@ -11180,6 +11180,147 @@
         }
       }
     },
+    "/v1/results": {
+      "get": {
+        "tags": [
+          "Account"
+        ],
+        "summary": "Execution results by log position",
+        "description": "Wait for the execution results of writes by their log position `(seq, sub)`, the pair every write receipt carries (`ack=sequenced` included). Up to 64 positions per call. The call waits up to `waitMs` until the earliest asked position has been applied on the replica that answers, then answers every asked position at once, in the order asked: `executed` (with `items`, rendered exactly as the `items` of the `ack=result` response of a batch place / cancel / replace; empty for other commands; `clientOrderId` is not echoed), `rejected` (the whole command was rejected; `error` is the error object `ack=result` answers with 422), `pending` (not applied yet on this replica: ask again), `not_found` (no command at this position) or `evicted` (outside the replica's in-memory result window: read `GET /v1/requests/{requestId}` instead). A resent request that is rejected because its original already executed answers with the original's result (`duplicate`, `original`), as `ack=result` does; when that original may be outside the window the position is `evicted`. Answers come only from the in-memory result window (default 10 minutes), never from the execution-history store. Rate limit: one read, the same as other public reads, whatever the number of positions.",
+        "operationId": "v1_results",
+        "parameters": [
+          {
+            "name": "at",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9]+:[0-9]+(,[0-9]+:[0-9]+){0,63}$"
+            },
+            "description": "1 to 64 log positions `seq:sub`, comma-separated, e.g. `1201:0,1203:2`"
+          },
+          {
+            "name": "waitMs",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 5000,
+              "default": 0
+            },
+            "description": "How long to wait for the earliest asked position to be applied (`0` = answer at once)"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One entry per asked position, in the order asked",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "results"
+                  ],
+                  "properties": {
+                    "results": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "required": [
+                          "seq",
+                          "sub",
+                          "status"
+                        ],
+                        "properties": {
+                          "seq": {
+                            "type": "integer",
+                            "format": "uint64",
+                            "description": "Raft log sequence number asked for (the `seq` of a write receipt)"
+                          },
+                          "sub": {
+                            "type": "integer"
+                          },
+                          "status": {
+                            "type": "string",
+                            "enum": [
+                              "executed",
+                              "rejected",
+                              "pending",
+                              "not_found",
+                              "evicted"
+                            ]
+                          },
+                          "requestId": {
+                            "type": "string",
+                            "pattern": "^0x[0-9a-f]{64}$",
+                            "description": "`executed` / `rejected`: identity of the signed request at this position (signed commands only), the same as the write receipt's `requestId`"
+                          },
+                          "duplicate": {
+                            "type": "boolean",
+                            "description": "Present (true) only when this position is a resend of a request that already executed: the result is the original's"
+                          },
+                          "original": {
+                            "type": "object",
+                            "properties": {
+                              "seq": {
+                                "type": "integer",
+                                "format": "uint64"
+                              },
+                              "sub": {
+                                "type": "integer"
+                              }
+                            },
+                            "description": "With `duplicate`: the position of the original"
+                          },
+                          "items": {
+                            "type": "array",
+                            "items": {
+                              "type": "object"
+                            },
+                            "description": "`executed`: the per-item outcomes, each item exactly as in `BatchResult.items` of the `ack=result` response of the same write (empty for commands that are not a batch place / cancel / replace)"
+                          },
+                          "error": {
+                            "type": "object",
+                            "required": [
+                              "code",
+                              "num",
+                              "message"
+                            ],
+                            "properties": {
+                              "code": {
+                                "type": "string"
+                              },
+                              "num": {
+                                "type": "integer"
+                              },
+                              "message": {
+                                "type": "string"
+                              }
+                            },
+                            "description": "`rejected`: the `error` object that `ack=result` answers with 422 for the same write"
+                          },
+                          "message": {
+                            "type": "string",
+                            "description": "`evicted`: where to read instead"
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
     "/v1/tickers": {
       "get": {
         "tags": [

@@ -1,4 +1,6 @@
-- `openapi-v1.json`：dex-os 开放 API v1 规格的逐字节副本，取自 chainupcloud/dex-os `web/openapi-v1.json` @ `b9d88880d3f68de24a3c6eeafcd3be04108e0895`（#625 BatchReplace3 main 版实施分支，尚未合入 main）。
+- `openapi-v1.json`：dex-os 开放 API v1 规格的逐字节副本，取自 chainupcloud/dex-os #625（`feat/batch-replace3-main` @ `b9d88880d`，BatchReplace3）与 #667（`feat/pipeline-wait-results-main` @ `15d6c2d95`，按日志位置取执行结果）合并后的 `web/openapi-v1.json`，两者都尚未合入 main。
+  本次同步带来 `GET /v1/results`；样例 `results.json` 的逐项结果取自 `w_replace3.json`。
+- 再前一次取自 `b9d88880d3f68de24a3c6eeafcd3be04108e0895`（#625 BatchReplace3 main 版实施分支，尚未合入 main）。
   本次同步带来 `/v1/orders/replace` 的 `replaceVersion`、按命令位置引用的 `CommandRef` 与回执逐项 `ref`；样例按新增必填字段补齐：`account.json` / `account_vault.json` 的 `token`（USDC），金库市场项的 `kind`（perp）。
 - 再前一次取自 `d4fe0a4e636f9592b80071ad01a23de70f5c97b2`（#346 实施分支）。
   本次同步包含 `subticksPerTick`、`tradingRulesVersion`、`tickChangePending` 必填字段；版本按规则状态转换递增。
