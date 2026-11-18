@@ -219,6 +219,7 @@ var fixtureSchemas = []struct {
 	file, path, status, component string
 }{
 	{"markets.json", "/v1/markets", "200", ""},
+	{"results.json", "/v1/results", "200", ""},
 	{"book.json", "/v1/markets/{symbol}/book", "200", ""},
 	{"account.json", "/v1/account", "200", ""},
 	{"positions.json", "/v1/account/positions", "200", ""},
@@ -343,6 +344,7 @@ func TestDecodedFieldsExistInPinnedSpec(t *testing.T) {
 		props map[string]any
 	}{
 		{"Market", reflect.TypeFor[wireMarket](), schema("Market")},
+		{"results[]", reflect.TypeFor[wireResult](), props(obj(obj(obj(responseSchema(t, spec, "/v1/results", "200")["properties"])["results"])["items"]))},
 		{"Account", reflect.TypeFor[Account](), schema("Account")},
 		{"Balance", reflect.TypeFor[Balance](), schema("Balance")},
 		{"Account.leverage[]", reflect.TypeFor[MarketLeverage](), props(obj(obj(schema("Account")["leverage"])["items"]))},
