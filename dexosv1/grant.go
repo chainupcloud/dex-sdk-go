@@ -24,6 +24,7 @@ const (
 	ActionBatchPlace    uint16 = 0x31
 	ActionBatchReplace  uint16 = 0x3E
 	ActionBatchReplace2 uint16 = 0x88
+	ActionBatchReplace3 uint16 = 0xE3
 	ActionPairedTrade   uint16 = 0xD2
 )
 
