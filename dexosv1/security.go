@@ -630,6 +630,42 @@ func (c *Client) CommandReceipt(ctx context.Context, actionID, digest Hash, minS
 	return CommandReceipt{}, &Error{Status: resp.StatusCode, Code: securityErrorCode(raw), Body: string(raw)}
 }
 
+// AwaitCommand 让网关等这条命令撮合完再回(GET /v1/requests/{actionId}?wait=match,下单类最多等 5 秒):
+// 撮合完回 Stage = [StageMatched] 的回执;拿不到撮合回执时照普通回执回(已落定 [StageFolded]、未落定 ResultsPending、
+// 没看到 [CommandUnknown])。网关不允许与 digest 同用,所以这里不核 digest,要核的用 [Client.CommandReceipt]。
+func (c *Client) AwaitCommand(ctx context.Context, actionID Hash) (CommandReceipt, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.BaseURL+"/v1/requests/"+actionID.Hex()+"?wait=match", nil)
+	if err != nil {
+		return CommandReceipt{}, err
+	}
+	if c.Host != "" {
+		req.Host = c.Host
+	}
+	resp, err := c.HTTP.Do(req)
+	if err != nil {
+		return CommandReceipt{}, err
+	}
+	defer resp.Body.Close()
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return CommandReceipt{}, fmt.Errorf("dexosv1: 回执读取失败: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNotFound {
+		return CommandReceipt{}, &Error{Status: resp.StatusCode, Code: securityErrorCode(raw), Body: string(raw)}
+	}
+	r, err := decodeReceipt(raw)
+	if err != nil {
+		return CommandReceipt{}, fmt.Errorf("dexosv1: 回执解析失败(HTTP %d): %w: %s", resp.StatusCode, err, raw)
+	}
+	if resp.StatusCode == http.StatusNotFound && r.Status != CommandUnknown {
+		return CommandReceipt{}, fmt.Errorf("dexosv1: 404 回执状态是 %q: %s", r.Status, raw)
+	}
+	if v, err := strconv.ParseUint(resp.Header.Get(seqHeader), 10, 64); err == nil {
+		r.ReadSeq = max(r.ReadSeq, v)
+	}
+	return r, nil
+}
+
 // ErrNotFinal 还下不了结论:命令还没过期,或已受理但结果未落定、读视图落后。稍后再查。
 var ErrNotFinal = errors.New("dexosv1: 命令结论还没落定")
 
