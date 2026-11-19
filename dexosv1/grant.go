@@ -27,7 +27,7 @@ const (
 	ActionPairedTrade   uint16 = 0xD2
 )
 
-// GrantMarket grant 里一个市场的限制。SpecVersion 取 GET /v1/security/markets 的 marketSpecVersion,
+// GrantMarket grant 里一个市场的限制。SpecVersion 取 GET /v1/markets 的 marketSpecVersion,
 // 和账本不一致时代理的单被拒 PolicyVersionMismatch;价格须落在 [MinTick, MaxTick]。
 type GrantMarket struct {
 	Market      uint16

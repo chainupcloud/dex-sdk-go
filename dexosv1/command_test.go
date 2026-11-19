@@ -406,7 +406,7 @@ func TestFinalizeDecidesOnlyAfterExpiryOnACoveringReadView(t *testing.T) {
 	}
 	f, c := newFake(t)
 	now, status, minSeq := uint64(4000), 404, ""
-	f.routes["/v1/security/time"] = func(w http.ResponseWriter, r *http.Request) {
+	f.routes["/v1/time/certified"] = func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(w, `{"hostLogIndex":"900","manifestHash":"%s","time":{"timestampMs":"%d"}}`, net.ManifestHash.Hex(), now)
 	}
 	f.routes["/v1/requests/"+cmd.ActionID.Hex()] = func(w http.ResponseWriter, r *http.Request) {

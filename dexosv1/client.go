@@ -40,7 +40,7 @@ type ledgerID struct {
 	epoch            uint64
 }
 
-const networkPath = "/v1/security/network"
+const networkPath = "/v1/network"
 
 func (c *Client) adoptSeq(ctx context.Context, v uint64) {
 	if c.ledger.Load() == nil {

@@ -65,7 +65,7 @@ func main() {
 		}
 	}
 	if spec == 0 {
-		log.Fatalf("市场 %d 不在 /v1/security/markets", *market)
+		log.Fatalf("市场 %d 不在 /v1/markets", *market)
 	}
 	agent := must(dexos.GenerateSigner())
 	var salt dexosv1.Hash
@@ -140,7 +140,6 @@ type sent struct {
 	ack     dexosv1.CommandAck
 	receipt dexosv1.CommandReceipt
 }
-
 
 func submitAndWait(ctx context.Context, c *dexosv1.Client, net dexosv1.Network, p dexosv1.Principal, lane dexosv1.Lane, payload []byte, s *dexos.Signer, what string) sent {
 	w := must(c.SecurityNonce(ctx, p, lane))

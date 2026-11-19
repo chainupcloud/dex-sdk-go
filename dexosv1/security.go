@@ -53,7 +53,7 @@ func (o *optDecU64) UnmarshalJSON(b []byte) error {
 	return nil
 }
 
-// SecurityNetwork 读 GET /v1/security/network:签 139 要钉的网络身份。网络身份与这个客户端上次读到的不同
+// SecurityNetwork 读 GET /v1/network:签 139 要钉的网络身份。网络身份与这个客户端上次读到的不同
 // (账本重置)时,丢掉旧账本的读一致性位号,见 [Client.Seq]。
 func (c *Client) SecurityNetwork(ctx context.Context) (Network, error) {
 	var w struct {
@@ -76,7 +76,7 @@ func (c *Client) SecurityNetwork(ctx context.Context) (Network, error) {
 		return Network{}, fmt.Errorf("dexosv1: nodeVerifier: %w", err)
 	}
 	if w.NetworkID.IsZero() || w.GenesisHash.IsZero() || w.ManifestHash.IsZero() {
-		return Network{}, fmt.Errorf("dexosv1: /v1/security/network 缺网络身份")
+		return Network{}, fmt.Errorf("dexosv1: /v1/network 缺网络身份")
 	}
 	n := Network{NetworkID: w.NetworkID, GenesisHash: w.GenesisHash, LedgerEpoch: uint64(w.LedgerEpoch), ChainID: chain.Uint64(), Verifier: verifier, ManifestHash: w.ManifestHash}
 	c.pinLedger(n)
@@ -91,7 +91,7 @@ type SecurityTime struct {
 	ManifestHash Hash
 }
 
-// SecurityTime 读 GET /v1/security/time。
+// SecurityTime 读 GET /v1/time/certified。
 func (c *Client) SecurityTime(ctx context.Context) (SecurityTime, error) {
 	var w struct {
 		HostLogIndex decU64 `json:"hostLogIndex"`
@@ -101,7 +101,7 @@ func (c *Client) SecurityTime(ctx context.Context) (SecurityTime, error) {
 			Paused      bool   `json:"paused"`
 		} `json:"time"`
 	}
-	if err := c.get(ctx, "/v1/security/time", nil, marketRead, &w); err != nil {
+	if err := c.get(ctx, "/v1/time/certified", nil, marketRead, &w); err != nil {
 		return SecurityTime{}, err
 	}
 	if w.Time.TimestampMs == 0 || w.HostLogIndex == 0 {
@@ -117,7 +117,7 @@ type NonceWindow struct {
 	Next  uint64
 }
 
-// SecurityNonce 读 GET /v1/security/nonces。
+// SecurityNonce 读 GET /v1/nonces。
 func (c *Client) SecurityNonce(ctx context.Context, p Principal, lane Lane) (NonceWindow, error) {
 	if err := p.check(); err != nil {
 		return NonceWindow{}, err
@@ -132,7 +132,7 @@ func (c *Client) SecurityNonce(ctx context.Context, p Principal, lane Lane) (Non
 		High  optDecU64 `json:"high"`
 		Next  decU64    `json:"next"`
 	}
-	if err := c.get(ctx, "/v1/security/nonces", q, accountRead, &w); err != nil {
+	if err := c.get(ctx, "/v1/nonces", q, accountRead, &w); err != nil {
 		return NonceWindow{}, err
 	}
 	return NonceWindow{Floor: uint64(w.Floor), High: w.High.v, Next: uint64(w.Next)}, nil
@@ -148,34 +148,44 @@ type SecurityAccount struct {
 	SoleSigner  bool
 }
 
-// SecurityAccounts 读 GET /v1/security/accounts?member=:成员里有这个地址的全部账户策略。
+// SecurityAccounts 读 GET /v1/accounts?member=:成员里有这个地址的全部账户策略。按 next 翻页直到 null。
 func (c *Client) SecurityAccounts(ctx context.Context, member dexos.Address) ([]SecurityAccount, error) {
-	var w struct {
-		Accounts []struct {
-			AccountID   uint32   `json:"accountId"`
-			PolicyID    decU64   `json:"policyId"`
-			PolicyEpoch decU64   `json:"policyEpoch"`
-			Members     []string `json:"members"`
-			Threshold   int      `json:"threshold"`
-			SoleSigner  bool     `json:"soleSigner"`
-		} `json:"accounts"`
-	}
-	if err := c.get(ctx, "/v1/security/accounts", url.Values{"member": {member.Hex()}}, accountRead, &w); err != nil {
-		return nil, err
-	}
-	out := make([]SecurityAccount, 0, len(w.Accounts))
-	for _, a := range w.Accounts {
-		row := SecurityAccount{AccountID: a.AccountID, PolicyID: uint64(a.PolicyID), PolicyEpoch: uint64(a.PolicyEpoch), Threshold: a.Threshold, SoleSigner: a.SoleSigner}
-		for _, m := range a.Members {
-			addr, err := dexos.ParseAddress(m)
-			if err != nil {
-				return nil, fmt.Errorf("dexosv1: 账户 %d 的成员 %q: %w", a.AccountID, m, err)
-			}
-			row.Members = append(row.Members, addr)
+	var out []SecurityAccount
+	q := url.Values{"member": {member.Hex()}, "limit": {"1000"}}
+	for {
+		var w struct {
+			Accounts []struct {
+				AccountID   uint32   `json:"accountId"`
+				PolicyID    decU64   `json:"policyId"`
+				PolicyEpoch decU64   `json:"policyEpoch"`
+				Members     []string `json:"members"`
+				Threshold   int      `json:"threshold"`
+				SoleSigner  bool     `json:"soleSigner"`
+			} `json:"accounts"`
+			Next *string `json:"next"`
 		}
-		out = append(out, row)
+		if err := c.get(ctx, "/v1/accounts", q, accountRead, &w); err != nil {
+			return nil, err
+		}
+		for _, a := range w.Accounts {
+			row := SecurityAccount{AccountID: a.AccountID, PolicyID: uint64(a.PolicyID), PolicyEpoch: uint64(a.PolicyEpoch), Threshold: a.Threshold, SoleSigner: a.SoleSigner}
+			for _, m := range a.Members {
+				addr, err := dexos.ParseAddress(m)
+				if err != nil {
+					return nil, fmt.Errorf("dexosv1: 账户 %d 的成员 %q: %w", a.AccountID, m, err)
+				}
+				row.Members = append(row.Members, addr)
+			}
+			out = append(out, row)
+		}
+		if w.Next == nil {
+			return out, nil
+		}
+		if *w.Next == q.Get("after") {
+			return nil, fmt.Errorf("dexosv1: /v1/accounts 的 next %q 没有前进", *w.Next)
+		}
+		q.Set("after", *w.Next)
 	}
-	return out, nil
 }
 
 // GrantStatus grant 的状态。
@@ -187,7 +197,7 @@ const (
 	GrantRevoked GrantStatus = "Revoked"
 )
 
-// Grant 账本上的一份 grant(GET /v1/security/grants 的一行)。Reclaimable 非空 = 已失效、名额可回收
+// Grant 账本上的一份 grant(GET /v1/grants 的一行)。Reclaimable 非空 = 已失效、名额可回收
 // ("revoked" | "expired" | "issuerEpochStale" | "resourceOwnerEpochStale")。
 type Grant struct {
 	GrantID     Hash
@@ -213,7 +223,7 @@ type Grants struct {
 	Grants         []Grant
 }
 
-// SecurityGrants 读 GET /v1/security/grants?policy=。
+// SecurityGrants 读 GET /v1/grants?policy=。
 func (c *Client) SecurityGrants(ctx context.Context, policy uint64) (Grants, error) {
 	var w struct {
 		PolicyID       decU64 `json:"policyId"`
@@ -247,7 +257,7 @@ func (c *Client) SecurityGrants(ctx context.Context, policy uint64) (Grants, err
 			Reclaimable *string `json:"reclaimable"`
 		} `json:"grants"`
 	}
-	if err := c.get(ctx, "/v1/security/grants", url.Values{"policy": {strconv.FormatUint(policy, 10)}}, accountRead, &w); err != nil {
+	if err := c.get(ctx, "/v1/grants", url.Values{"policy": {strconv.FormatUint(policy, 10)}}, accountRead, &w); err != nil {
 		return Grants{}, err
 	}
 	out := Grants{PolicyID: uint64(w.PolicyID), IssuerEpoch: uint64(w.IssuerEpoch), LiveGrants: w.LiveGrants, MaxLiveGrants: w.MaxLive, MaxGrants: w.MaxGrants, OccupiedGrants: w.OccupiedGrants}
@@ -290,17 +300,17 @@ type SecurityMarket struct {
 	Admission   int
 }
 
-// SecurityMarkets 读 GET /v1/security/markets。
+// SecurityMarkets 读 GET /v1/markets 每行的账本字段。账本上的市场都在,还没有目录名的也在(symbol 为 null)。
 func (c *Client) SecurityMarkets(ctx context.Context) ([]SecurityMarket, error) {
 	var w struct {
 		Markets []struct {
 			Dex               uint16 `json:"dex"`
-			Market            uint16 `json:"market"`
+			Market            uint16 `json:"signingMarketId"`
 			MarketSpecVersion decU64 `json:"marketSpecVersion"`
 			Admission         int    `json:"admission"`
 		} `json:"markets"`
 	}
-	if err := c.get(ctx, "/v1/security/markets", nil, marketRead, &w); err != nil {
+	if err := c.get(ctx, "/v1/markets", nil, marketRead, &w); err != nil {
 		return nil, err
 	}
 	out := make([]SecurityMarket, 0, len(w.Markets))
@@ -320,7 +330,7 @@ var (
 )
 
 // CommandRejectedError 网关在定序之前拒了这份命令:没执行、nonce 也没消耗。Code 是网关的稳定错误码,
-// 如 invalid_security_identity、precheck_rejected、grant_revoked、GatewayBuilderMarketNotListed。
+// 如 invalid_command_identity、precheck_rejected、grant_revoked、GatewayBuilderMarketNotListed。
 type CommandRejectedError struct {
 	Status int
 	Code   string
