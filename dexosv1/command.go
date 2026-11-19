@@ -107,7 +107,7 @@ func (p Principal) check() error {
 	return nil
 }
 
-// Network 签名要钉住的网络身份,读自 GET /v1/security/network。账本换代后这几项都会变,
+// Network 签名要钉住的网络身份,读自 GET /v1/network。账本换代后这几项都会变,
 // 旧网络上签的命令带着 ManifestHash 发出去会被网关以 503 upstream_manifest_mismatch 拒。
 type Network struct {
 	NetworkID    Hash
@@ -118,7 +118,7 @@ type Network struct {
 	ManifestHash Hash
 }
 
-// Authorization 一条 139 的授权参数。ValidUntilMs 按账本认证时间判(GET /v1/security/time),
+// Authorization 一条 139 的授权参数。ValidUntilMs 按账本认证时间判(GET /v1/time/certified),
 // 过期的原件永远不会被受理。
 type Authorization struct {
 	Principal    Principal

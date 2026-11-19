@@ -2,6 +2,7 @@ package dexosv1
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/url"
@@ -314,15 +315,32 @@ func sortKinds(kinds []string) {
 	})
 }
 
-// Catalog 拉 `/v1/markets` 建目录。
+// Catalog 拉 `/v1/markets` 建目录。账本上还没有目录名的市场(symbol 为 null,dex-os#690)不可交易,不进目录。
 func (c *Client) Catalog(ctx context.Context) (*Catalog, error) {
 	var resp struct {
-		Markets []wireMarket `json:"markets"`
+		Markets []json.RawMessage `json:"markets"`
 	}
 	if err := c.get(ctx, "/v1/markets", nil, marketRead, &resp); err != nil {
 		return nil, err
 	}
-	return newCatalog(resp.Markets)
+	named := make([]wireMarket, 0, len(resp.Markets))
+	for _, raw := range resp.Markets {
+		var head struct {
+			Symbol json.RawMessage `json:"symbol"`
+		}
+		if err := json.Unmarshal(raw, &head); err != nil {
+			return nil, fmt.Errorf("dexosv1: 市场行解析失败: %w", err)
+		}
+		if string(head.Symbol) == "null" {
+			continue
+		}
+		var w wireMarket
+		if err := json.Unmarshal(raw, &w); err != nil {
+			return nil, fmt.Errorf("dexosv1: 市场行解析失败: %w", err)
+		}
+		named = append(named, w)
+	}
+	return newCatalog(named)
 }
 
 // newCatalog 建目录。市场号重复是目录错误(按市场号定位就不唯一了);名称重复不是:下市后名称释放、可再上同名新市场
