@@ -32,7 +32,7 @@ type fakeV1 struct {
 	reqs   []*http.Request
 }
 
-func newFake(t *testing.T) (*fakeV1, *Client) {
+func newFake(t testing.TB) (*fakeV1, *Client) {
 	t.Helper()
 	f := &fakeV1{routes: map[string]http.HandlerFunc{}}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -51,7 +51,7 @@ func newFake(t *testing.T) (*fakeV1, *Client) {
 	return f, NewClient(srv.URL)
 }
 
-func fixture(t *testing.T, name string) []byte {
+func fixture(t testing.TB, name string) []byte {
 	t.Helper()
 	raw, err := os.ReadFile(filepath.Join("testdata", "fixtures", name))
 	if err != nil {
@@ -61,7 +61,7 @@ func fixture(t *testing.T, name string) []byte {
 }
 
 // serve 固定回一个 fixture。
-func serve(t *testing.T, status int, name string, headers ...string) http.HandlerFunc {
+func serve(t testing.TB, status int, name string, headers ...string) http.HandlerFunc {
 	body := fixture(t, name)
 	return func(w http.ResponseWriter, _ *http.Request) {
 		for i := 0; i+1 < len(headers); i += 2 {
@@ -79,7 +79,7 @@ func (f *fakeV1) requests() []*http.Request {
 	return append([]*http.Request(nil), f.reqs...)
 }
 
-func mustAddr(t *testing.T, s string) dexos.Address {
+func mustAddr(t testing.TB, s string) dexos.Address {
 	t.Helper()
 	a, err := dexos.ParseAddress(s)
 	if err != nil {
@@ -88,7 +88,7 @@ func mustAddr(t *testing.T, s string) dexos.Address {
 	return a
 }
 
-func catalog(t *testing.T, f *fakeV1, c *Client) *Catalog {
+func catalog(t testing.TB, f *fakeV1, c *Client) *Catalog {
 	t.Helper()
 	f.routes["/v1/markets"] = serve(t, 200, "markets.json")
 	cat, err := c.Catalog(context.Background())

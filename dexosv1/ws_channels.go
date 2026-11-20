@@ -1,7 +1,6 @@
 package dexosv1
 
 import (
-	"encoding/json"
 	"fmt"
 	"sort"
 	"strconv"
@@ -14,15 +13,11 @@ func (st *Stream) SubscribePrices(fn func(*Prices)) (*Subscription, error) {
 	sub := &Subscription{channel: "prices", route: "prices", snapshot: true,
 		params: map[string]any{"channel": "prices"}}
 	sub.apply = func(f *wsFrame) error {
-		var w wirePrices
-		if err := json.Unmarshal(f.Data, &w); err != nil {
-			return fmt.Errorf("dexosv1: prices 帧解析失败: %w", err)
-		}
-		p, err := w.prices(st.catalog())
+		p, err := f.body.(*wirePrices).prices(st.catalog())
 		if err != nil {
 			return err
 		}
-		fn(p)
+		st.deliverData(sub, func() { fn(p) })
 		return nil
 	}
 	return st.add(sub)
@@ -56,15 +51,11 @@ func (st *Stream) SubscribeBook(m *Market, depth int, fn func(*Book)) (*Subscrip
 		sub.params["depth"] = depth
 	}
 	sub.apply = func(f *wsFrame) error {
-		var w wireBook
-		if err := json.Unmarshal(f.Data, &w); err != nil {
-			return fmt.Errorf("dexosv1: book 帧解析失败: %w", err)
-		}
-		b, err := w.book(m)
+		b, err := f.body.(*wireBook).book(m)
 		if err != nil {
 			return err
 		}
-		fn(b)
+		st.deliverData(sub, func() { fn(b) })
 		return nil
 	}
 	return st.add(sub)
@@ -86,15 +77,7 @@ func (st *Stream) SubscribeBBO(m *Market, fn func(BBO)) (*Subscription, error) {
 		return nil, err
 	}
 	sub.apply = func(f *wsFrame) error {
-		var w struct {
-			Symbol string     `json:"symbol"`
-			Bid    *[2]string `json:"bid"`
-			Ask    *[2]string `json:"ask"`
-			TS     int64      `json:"ts"`
-		}
-		if err := json.Unmarshal(f.Data, &w); err != nil {
-			return fmt.Errorf("dexosv1: bbo 帧解析失败: %w", err)
-		}
+		w := f.body.(*wireBBO)
 		out := BBO{Symbol: w.Symbol, Kind: m.Kind, TS: w.TS}
 		for _, side := range []struct {
 			in  *[2]string
@@ -109,7 +92,7 @@ func (st *Stream) SubscribeBBO(m *Market, fn func(BBO)) (*Subscription, error) {
 			}
 			*side.out = &l[0]
 		}
-		fn(out)
+		st.deliverData(sub, func() { fn(out) })
 		return nil
 	}
 	return st.add(sub)
@@ -133,17 +116,7 @@ func (st *Stream) SubscribeTrades(m *Market, fn func(Trade)) (*Subscription, err
 		return nil, err
 	}
 	sub.apply = func(f *wsFrame) error {
-		var w struct {
-			ID     string `json:"id"`
-			Symbol string `json:"symbol"`
-			Side   string `json:"side"`
-			Price  string `json:"price"`
-			Size   string `json:"size"`
-			TS     int64  `json:"ts"`
-		}
-		if err := json.Unmarshal(f.Data, &w); err != nil {
-			return fmt.Errorf("dexosv1: trades 帧解析失败: %w", err)
-		}
+		w := f.body.(*wireTrade)
 		t := Trade{ID: w.ID, Symbol: w.Symbol, Kind: m.Kind, Side: w.Side, TS: w.TS}
 		var err error
 		if t.Price, err = m.Scale.Ticks(w.Price); err != nil {
@@ -152,7 +125,7 @@ func (st *Stream) SubscribeTrades(m *Market, fn func(Trade)) (*Subscription, err
 		if t.Lots, err = m.Scale.Lots(w.Size); err != nil {
 			return fmt.Errorf("dexosv1: 成交 %s size: %w", w.ID, err)
 		}
-		fn(t)
+		st.deliverData(sub, func() { fn(t) })
 		return nil
 	}
 	return st.add(sub)
@@ -167,11 +140,16 @@ func (st *Stream) SubscribeAccount(ref AccountRef, fn func(*Account)) (*Subscrip
 		return nil, err
 	}
 	sub.apply = func(f *wsFrame) error {
-		a, err := decodeAccount(f.Data, "WS account 帧")
-		if err != nil {
-			return err
+		w := f.body.(*accountBody)
+		if w.Epoch == nil || *w.Epoch == "" || w.AsOfSeq == nil {
+			return fmt.Errorf("dexosv1: WS account 帧 缺 epoch / asOfSeq: %s", f.Data)
 		}
-		fn(a)
+		a := &w.Account
+		a.Epoch, a.AsOfSeq = *w.Epoch, *w.AsOfSeq
+		if w.Subaccount != nil {
+			a.Subaccount = *w.Subaccount
+		}
+		st.deliverData(sub, func() { fn(a) })
 		return nil
 	}
 	return st.add(sub)
@@ -184,17 +162,11 @@ func (st *Stream) SubscribePositions(ref AccountRef, fn func([]Position)) (*Subs
 		return nil, err
 	}
 	sub.apply = func(f *wsFrame) error {
-		var w struct {
-			Positions []wirePosition `json:"positions"`
-		}
-		if err := json.Unmarshal(f.Data, &w); err != nil {
-			return fmt.Errorf("dexosv1: positions 帧解析失败: %w", err)
-		}
-		ps, err := positionsFrom(st.catalog(), w.Positions)
+		ps, err := positionsFrom(st.catalog(), f.body.(*positionsBody).Positions)
 		if err != nil {
 			return err
 		}
-		fn(ps)
+		st.deliverData(sub, func() { fn(ps) })
 		return nil
 	}
 	return st.add(sub)
@@ -256,8 +228,9 @@ type wireOrderEvent struct {
 // remaining 时不猜,退订重订换一帧新快照(期间 Syncing)。服务端自己算不出某帧时会直接重发快照。
 // 待触发的条件单也在集合里(Order.Trigger 非 nil):它被下单、触发、拒绝、自动撤时服务端重发快照,被撤时推 canceled 帧。
 func (st *Stream) SubscribeOrders(ref AccountRef, fn func(OrdersUpdate)) (*Subscription, error) {
-	return st.subscribeOrders(ref, func(snapshot bool, ev *OrderEvent, open map[uint64]Order, seq uint64) {
-		fn(OrdersUpdate{Snapshot: snapshot, Event: ev, Open: sortedOrders(open), Seq: seq})
+	return st.subscribeOrders(ref, func(snapshot bool, ev *OrderEvent, open map[uint64]Order, seq uint64) func() {
+		u := OrdersUpdate{Snapshot: snapshot, Event: ev, Open: sortedOrders(open), Seq: seq}
+		return func() { fn(u) }
 	})
 }
 
@@ -275,16 +248,14 @@ type OrderChange struct {
 // SubscribeOrderChanges 与 [Stream.SubscribeOrders] 订同一个频道,快照、校验与对不上时重订都相同;
 // 只是增量帧不再附带全部在挂单,只给这一张单应用之后的状态。
 func (st *Stream) SubscribeOrderChanges(ref AccountRef, fn func(OrderChange)) (*Subscription, error) {
-	return st.subscribeOrders(ref, func(snapshot bool, ev *OrderEvent, open map[uint64]Order, seq uint64) {
-		if snapshot {
-			fn(OrderChange{Snapshot: true, Open: sortedOrders(open), Seq: seq})
-			return
-		}
+	return st.subscribeOrders(ref, func(snapshot bool, ev *OrderEvent, open map[uint64]Order, seq uint64) func() {
 		c := OrderChange{Event: ev, Seq: seq}
-		if o, ok := open[ev.OrderID]; ok {
+		if snapshot {
+			c = OrderChange{Snapshot: true, Open: sortedOrders(open), Seq: seq}
+		} else if o, ok := open[ev.OrderID]; ok {
 			c.Order = &o
 		}
-		fn(c)
+		return func() { fn(c) }
 	})
 }
 
@@ -297,25 +268,20 @@ func sortedOrders(open map[uint64]Order) []Order {
 	return list
 }
 
-func (st *Stream) subscribeOrders(ref AccountRef, emitTo func(snapshot bool, ev *OrderEvent, open map[uint64]Order, seq uint64)) (*Subscription, error) {
+func (st *Stream) subscribeOrders(ref AccountRef, emitTo func(snapshot bool, ev *OrderEvent, open map[uint64]Order, seq uint64) func()) (*Subscription, error) {
 	sub, err := accountSub("orders", ref, true)
 	if err != nil {
 		return nil, err
 	}
 	open := map[uint64]Order{}
-	emit := func(snapshot bool, ev *OrderEvent, seq uint64) { emitTo(snapshot, ev, open, seq) }
+	emit := func(snapshot bool, ev *OrderEvent, seq uint64) { st.deliverData(sub, emitTo(snapshot, ev, open, seq)) }
 	sub.apply = func(f *wsFrame) error {
 		var seq uint64
 		if f.Seq != nil {
 			seq = *f.Seq
 		}
+		w := f.body.(*ordersBody)
 		if f.IsSnapshot {
-			var w struct {
-				Orders []wireOrder `json:"orders"`
-			}
-			if err := json.Unmarshal(f.Data, &w); err != nil {
-				return fmt.Errorf("dexosv1: orders 快照解析失败: %w", err)
-			}
 			next := make(map[uint64]Order, len(w.Orders))
 			for _, wo := range w.Orders {
 				o, err := wo.order(st.catalog())
@@ -331,10 +297,6 @@ func (st *Stream) subscribeOrders(ref AccountRef, emitTo func(snapshot bool, ev 
 		if sub.State() != StateLive {
 			// 快照之前的增量:快照会包含它
 			return nil
-		}
-		var w wireOrderEvent
-		if err := json.Unmarshal(f.Data, &w); err != nil {
-			return fmt.Errorf("dexosv1: orders 帧解析失败: %w", err)
 		}
 		ev, err := w.event(st.catalog())
 		if err != nil {

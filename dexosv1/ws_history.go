@@ -2,7 +2,6 @@ package dexosv1
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"strconv"
@@ -20,8 +19,6 @@ import (
 //   - WS 帧的连续性:订阅确认帧给出起点位号,位号大于它的条目都会在这个订阅上推;服务端没推的必有 `lagged`,
 //     而 lagged 之后推的帧都在它给的上界之后;
 //   - 先补齐、再放行:(重)订阅确认之后补拉到起点、lagged 之后补拉到上界,补齐之前到的帧先缓存,补齐后再交付。
-//
-// REST 补拉在后台 goroutine 里跑,结果回到 Run 的 goroutine 里交付,不阻塞其他频道的帧。
 
 // HistoryCursor 流水订阅的起点:只交付严格大于 After 的条目;Epoch 是 After 所属的账本纪元。
 // 一般来自上一次的 [Subscription.Cursor],或 [Client.HistoryHead](从「现在」起)。
@@ -80,11 +77,11 @@ type histItem struct {
 	emit func()
 }
 
-// histSync 一个流水订阅的续传状态。lastID 受 mu 保护(给 Cursor 读);其余只在 Run 的 goroutine 里读写。
 type histSync struct {
 	mu     sync.Mutex
 	lastID string
 	epoch  string
+	queued string
 
 	last       cpos       // 已交付到的位置;不超过它的都已交付
 	covered    cpos       // REST 已补齐到(含)的位置
@@ -99,15 +96,18 @@ type histSync struct {
 	decode func(f *wsFrame) ([]histItem, error)
 }
 
-func (h *histSync) emit(it histItem) {
+func (st *Stream) histEmit(sub *Subscription, it histItem) {
+	h := sub.hist
 	if !h.last.less(it.pos) {
 		return
 	}
-	h.last = it.pos
-	h.mu.Lock()
-	h.lastID = it.id
-	h.mu.Unlock()
-	it.emit()
+	h.last, h.queued = it.pos, it.id
+	st.deliverData(sub, func() {
+		it.emit()
+		h.mu.Lock()
+		h.lastID = it.id
+		h.mu.Unlock()
+	})
 }
 
 // reset 在当前连接上(重)订阅:WS 帧要重新接上。缓存的旧帧丢掉,由新确认帧之后的补拉覆盖。
@@ -145,11 +145,7 @@ func (st *Stream) SubscribeFills(ref AccountRef, from HistoryCursor, fn func(Fil
 		return out, nil
 	}
 	h.decode = func(f *wsFrame) ([]histItem, error) {
-		var w wireFill
-		if err := json.Unmarshal(f.Data, &w); err != nil {
-			return nil, fmt.Errorf("dexosv1: fills 帧解析失败: %w", err)
-		}
-		fill, err := w.fill(st.catalog())
+		fill, err := f.body.(*fillsBody).fill(st.catalog())
 		if err != nil {
 			return nil, err
 		}
@@ -209,12 +205,7 @@ func (st *Stream) SubscribeLedger(ref AccountRef, from HistoryCursor, fn func(Le
 }
 
 func ledgerFrameEntries(f *wsFrame) ([]LedgerEntry, error) {
-	var w struct {
-		Entries *[]LedgerEntry `json:"entries"`
-	}
-	if err := json.Unmarshal(f.Data, &w); err != nil {
-		return nil, fmt.Errorf("dexosv1: ledger 帧解析失败: %w", err)
-	}
+	w := f.body.(*ledgerBody)
 	if w.Entries == nil {
 		return nil, fmt.Errorf("dexosv1: ledger 帧没有 entries: %s", f.Data)
 	}
@@ -315,7 +306,7 @@ func (st *Stream) histSub(channel string, ref AccountRef, from HistoryCursor) (*
 	if err != nil {
 		return nil, nil, err
 	}
-	h := &histSync{lastID: from.After, epoch: from.Epoch, last: p}
+	h := &histSync{lastID: from.After, queued: from.After, epoch: from.Epoch, last: p}
 	sub.hist = h
 	return sub, h, nil
 }
@@ -346,7 +337,7 @@ func (st *Stream) histFrame(sub *Subscription, f *wsFrame) error {
 	}
 	if h.streaming {
 		for _, it := range items {
-			h.emit(it)
+			st.histEmit(sub, it)
 		}
 		return nil
 	}
@@ -382,7 +373,7 @@ func (st *Stream) histKick(sub *Subscription) {
 		return
 	}
 	h.running = true
-	from, epoch, ctx := h.lastID, h.epoch, st.ctx
+	from, epoch, ctx := h.queued, h.epoch, st.ctx
 	go func() {
 		items, err := st.histFetch(ctx, h, from, epoch, target)
 		st.post(func() { st.histDone(sub, target, items, err) })
@@ -440,7 +431,7 @@ func (st *Stream) histDone(sub *Subscription, upper cpos, items []histItem, err 
 		return
 	}
 	for _, it := range items {
-		h.emit(it)
+		st.histEmit(sub, it)
 	}
 	if !h.hasCovered || h.covered.less(upper) {
 		h.covered, h.hasCovered = upper, true
@@ -454,7 +445,7 @@ func (st *Stream) histDone(sub *Subscription, upper cpos, items []histItem, err 
 	}
 	if h.streaming {
 		for _, it := range h.buf {
-			h.emit(it)
+			st.histEmit(sub, it)
 		}
 		h.buf = nil
 		sub.retries = 0

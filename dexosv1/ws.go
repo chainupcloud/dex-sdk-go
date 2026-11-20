@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -117,14 +118,13 @@ type StreamOptions struct {
 	// CatchUpWait 补拉的上界还没写进执行历史(400 GatewayHistoryIncomplete)时最多等多久,缺省 10s;
 	// 等不到就把订阅置为 Syncing、稍后再试。
 	CatchUpWait time.Duration
-	// OnState 订阅状态变化。在 Run 的 goroutine 里调用,不要阻塞。
-	OnState func(StateEvent)
+	OnState     func(StateEvent)
 	// OnConnError 连接层的错误(连不上、读写失败、心跳超时、协议错误)。在 Run 的 goroutine 里调用。
-	OnConnError func(error)
+	OnConnError  func(error)
+	PrivateQueue int
 }
 
-// Stream 一条 v1 WS 连接。Subscribe* 可在 Run 之前或运行中从任意 goroutine 调用;
-// 数据回调与 OnState 都在 Run 的 goroutine 里按序调用。
+// Stream 一条 v1 WS 连接。Subscribe* 可在 Run 之前或运行中从任意 goroutine 调用。
 type Stream struct {
 	c   *Client
 	cat atomic.Pointer[Catalog]
@@ -137,6 +137,8 @@ type Stream struct {
 	due     chan func()
 	quit    chan struct{}
 	started atomic.Bool
+	priv    chan delivery
+	latest  *latestQueue
 
 	// 以下只在 Run 的 goroutine 里读写
 	ctx     context.Context
@@ -187,12 +189,17 @@ func NewStream(c *Client, cat *Catalog, opt StreamOptions) (*Stream, error) {
 	def(&opt.ReconnectMin, 500*time.Millisecond)
 	def(&opt.ReconnectMax, 30*time.Second)
 	def(&opt.CatchUpWait, 10*time.Second)
+	if opt.PrivateQueue <= 0 {
+		opt.PrivateQueue = 65536
+	}
 	st := &Stream{
 		c: c, opt: opt, url: opt.URL,
-		subs: map[*Subscription]struct{}{},
-		wake: make(chan struct{}, 1),
-		due:  make(chan func(), 256),
-		quit: make(chan struct{}),
+		subs:   map[*Subscription]struct{}{},
+		wake:   make(chan struct{}, 1),
+		due:    make(chan func(), 256),
+		quit:   make(chan struct{}),
+		priv:   make(chan delivery, opt.PrivateQueue),
+		latest: newLatestQueue(),
 	}
 	st.cat.Store(cat)
 	return st, nil
@@ -345,6 +352,8 @@ func (st *Stream) Run(ctx context.Context) error {
 	}
 	defer close(st.quit)
 	st.ctx = ctx
+	go st.deliverPrivate()
+	go st.deliverLatest()
 	backoff := st.opt.ReconnectMin
 	for {
 		var header http.Header
@@ -390,7 +399,8 @@ func (st *Stream) setState(sub *Subscription, s State, err error) {
 		return
 	}
 	if st.opt.OnState != nil {
-		st.opt.OnState(StateEvent{Sub: sub, State: s, Err: err})
+		ev := StateEvent{Sub: sub, State: s, Err: err}
+		st.enqueue(sub, func() { st.opt.OnState(ev) }, false)
 	}
 }
 
@@ -663,6 +673,7 @@ type wsFrame struct {
 	Epoch      *string         `json:"epoch"`
 	IsSnapshot bool            `json:"isSnapshot"`
 	ID         *int64          `json:"id"`
+	body       frameBody
 }
 
 func (st *Stream) handle(raw []byte) error {
@@ -685,7 +696,23 @@ func (st *Stream) handle(raw []byte) error {
 	if f.Epoch != nil && st.epoch != "" && *f.Epoch != st.epoch {
 		st.epochChanged(*f.Epoch)
 	}
-	route, err := st.routeOf(f.Channel, f.Data)
+	body := newBody(f.Channel)
+	if body == nil {
+		return nil
+	}
+	var route string
+	var err error
+	bodyErr := json.Unmarshal(f.Data, body)
+	if bodyErr == nil {
+		f.body = body
+		route, err = st.routeOf(f.Channel, body.header())
+	} else {
+		var h routeHeader
+		if err := json.Unmarshal(f.Data, &h); err != nil {
+			return fmt.Errorf("dexosv1: %s 帧的 data 不是对象: %w", f.Channel, err)
+		}
+		route, err = st.routeOf(f.Channel, h)
+	}
 	if err != nil {
 		return err
 	}
@@ -694,9 +721,12 @@ func (st *Stream) handle(raw []byte) error {
 		// 退订之后在途的帧
 		return nil
 	}
-	if sub.hist != nil {
+	switch {
+	case bodyErr != nil:
+		err = fmt.Errorf("dexosv1: %s 帧解析失败: %w", f.Channel, bodyErr)
+	case sub.hist != nil:
 		err = st.histFrame(sub, &f)
-	} else {
+	default:
 		err = sub.apply(&f)
 	}
 	if err != nil {
@@ -727,17 +757,7 @@ type resyncError struct{ err error }
 func (e *resyncError) Error() string { return e.err.Error() }
 
 // routeOf 数据帧 → 路由键,与 Subscribe* 登记时的一致。只在 Run 的 goroutine 里调用(读 st.routes)。
-func (st *Stream) routeOf(channel string, data json.RawMessage) (string, error) {
-	var h struct {
-		Symbol     string  `json:"symbol"`
-		Kind       string  `json:"kind"`
-		Address    string  `json:"address"`
-		Subaccount *uint32 `json:"subaccount"`
-		Vault      *uint16 `json:"vault"`
-	}
-	if err := json.Unmarshal(data, &h); err != nil {
-		return "", fmt.Errorf("dexosv1: %s 帧的 data 不是对象: %w", channel, err)
-	}
+func (st *Stream) routeOf(channel string, h routeHeader) (string, error) {
 	switch channel {
 	case "prices":
 		return "prices", nil
@@ -765,7 +785,7 @@ func (st *Stream) routeOf(channel string, data json.RawMessage) (string, error) 
 		case h.Vault != nil && h.Address == "" && h.Subaccount == nil:
 			return accountRoute(channel, VaultAccount(*h.Vault)), nil
 		case h.Vault == nil && h.Address != "" && h.Subaccount != nil:
-			return fmt.Sprintf("%s:%s:%d", channel, strings.ToLower(h.Address), *h.Subaccount), nil
+			return channel + ":" + strings.ToLower(h.Address) + ":" + strconv.FormatUint(uint64(*h.Subaccount), 10), nil
 		}
 		return "", fmt.Errorf("dexosv1: %s 帧的身份应为 address + subaccount 或 vault 之一", channel)
 	}

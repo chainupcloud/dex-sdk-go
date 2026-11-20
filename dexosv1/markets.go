@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -260,30 +261,37 @@ func (c *Catalog) Lookup(symbol, kind string) (*Market, error) {
 // lookup 同 [Catalog.Lookup],但不核 kind 的取值:响应行上的 kind 原样按目录里的 Market.Kind 比,
 // dex-os 以后多一种类型也不会让整份读取失败(对不上就是目录外的市场)。
 func (c *Catalog) lookup(symbol, kind string) (*Market, error) {
-	live := map[string][]int{}
-	var kinds []string
-	for _, i := range c.sameName[strings.ToUpper(symbol)] {
-		m := &c.markets[i]
-		if m.Status == statusDelisted || (kind != "" && m.Kind != kind) {
-			continue
+	same := c.sameName[strings.ToUpper(symbol)]
+	live := func(m *Market) bool { return m.Status != statusDelisted && (kind == "" || m.Kind == kind) }
+	found, many, mixed := -1, false, false
+	for _, i := range same {
+		switch m := &c.markets[i]; {
+		case !live(m):
+		case found < 0:
+			found = i
+		default:
+			many = true
+			mixed = mixed || m.Kind != c.markets[found].Kind
 		}
-		if _, seen := live[m.Kind]; !seen {
-			kinds = append(kinds, m.Kind)
-		}
-		live[m.Kind] = append(live[m.Kind], i)
 	}
 	switch {
-	case len(kinds) == 0 && kind != "":
+	case found < 0 && kind != "":
 		return nil, fmt.Errorf("dexosv1: 市场目录里没有 %s 市场 %q(新上市场请重新取目录)", kind, symbol)
-	case len(kinds) == 0:
+	case found < 0:
 		return nil, fmt.Errorf("dexosv1: 市场目录里没有 %q(新上市场请重新取目录)", symbol)
-	case len(kinds) > 1:
+	case mixed:
+		var kinds []string
+		for _, i := range same {
+			if m := &c.markets[i]; live(m) && !slices.Contains(kinds, m.Kind) {
+				kinds = append(kinds, m.Kind)
+			}
+		}
 		sortKinds(kinds)
 		return nil, &SymbolError{Rule: ruleAmbiguousSymbol, Symbol: symbol, Kinds: kinds}
-	case len(live[kinds[0]]) > 1:
-		return nil, &SymbolError{Rule: ruleDuplicateSymbol, Symbol: symbol, Kind: kind, Kinds: kinds}
+	case many:
+		return nil, &SymbolError{Rule: ruleDuplicateSymbol, Symbol: symbol, Kind: kind, Kinds: []string{c.markets[found].Kind}}
 	}
-	return &c.markets[live[kinds[0]][0]], nil
+	return &c.markets[found], nil
 }
 
 // MarketByID 按市场号([Market.SigningMarketID])取市场,含已下市的。市场号在一个 dex-os 上唯一,不受同名、改名影响。
