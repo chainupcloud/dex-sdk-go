@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/chainupcloud/dex-sdk-go/dexos"
 )
@@ -332,9 +333,10 @@ var (
 // CommandRejectedError 网关在定序之前拒了这份命令:没执行、nonce 也没消耗。Code 是网关的稳定错误码,
 // 如 invalid_command_identity、precheck_rejected、grant_revoked、GatewayBuilderMarketNotListed。
 type CommandRejectedError struct {
-	Status int
-	Code   string
-	Body   string
+	Status     int
+	Code       string
+	Body       string
+	RetryAfter time.Duration
 }
 
 func (e *CommandRejectedError) Error() string {
@@ -398,6 +400,9 @@ func (c *Client) SubmitCommand(ctx context.Context, cmd Command, opts ...SubmitO
 	if err != nil {
 		return CommandAck{}, fmt.Errorf("%w: 应答读取失败: %w", ErrCommandOutcomeUnknown, err)
 	}
+	if resp.StatusCode >= 400 && rejectedBeforeAdmission(raw) {
+		return CommandAck{}, &CommandRejectedError{Status: resp.StatusCode, Code: securityErrorCode(raw), Body: string(raw), RetryAfter: retryAfterHeader(resp.Header)}
+	}
 	switch resp.StatusCode {
 	case http.StatusAccepted:
 		var w struct {
@@ -432,7 +437,12 @@ func (c *Client) SubmitCommand(ctx context.Context, cmd Command, opts ...SubmitO
 		}
 		return CommandAck{RequestID: cmd.ActionID, Seq: r.Seq, Sub: r.Sub, Duplicate: w.Duplicate, Receipt: &r}, nil
 	case http.StatusTooManyRequests:
-		return CommandAck{}, parseError(resp.StatusCode, resp.Header, raw)
+		err := parseError(resp.StatusCode, resp.Header, raw)
+		var limited *RateLimitedError
+		if !errors.As(err, &limited) && securityErrorCode(raw) == "GatewayRateLimited" {
+			return CommandAck{}, &CommandRejectedError{Status: resp.StatusCode, Code: "GatewayRateLimited", Body: string(raw), RetryAfter: retryAfterHeader(resp.Header)}
+		}
+		return CommandAck{}, err
 	}
 	code := securityErrorCode(raw)
 	switch {
@@ -444,6 +454,22 @@ func (c *Client) SubmitCommand(ctx context.Context, cmd Command, opts ...SubmitO
 		return CommandAck{}, fmt.Errorf("%w: HTTP %d %s", ErrCommandOutcomeUnknown, resp.StatusCode, raw)
 	}
 	return CommandAck{}, &CommandRejectedError{Status: resp.StatusCode, Code: code, Body: string(raw)}
+}
+
+func rejectedBeforeAdmission(raw []byte) bool {
+	var w struct {
+		Status        string `json:"status"`
+		NonceConsumed *bool  `json:"nonceConsumed"`
+	}
+	return json.Unmarshal(raw, &w) == nil && w.Status == "RejectedBeforeAdmission" && (w.NonceConsumed == nil || !*w.NonceConsumed)
+}
+
+func retryAfterHeader(h http.Header) time.Duration {
+	s, err := strconv.Atoi(strings.TrimSpace(h.Get("retry-after")))
+	if err != nil || s < 0 {
+		return 0
+	}
+	return time.Duration(s) * time.Second
 }
 
 func securityErrorCode(raw []byte) string {
