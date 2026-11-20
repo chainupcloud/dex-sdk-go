@@ -1,6 +1,7 @@
 package dexosv1
 
 import (
+	"errors"
 	"fmt"
 	"reflect"
 	"slices"
@@ -302,4 +303,36 @@ func TestStreamNoCallbackAfterUnsubscribeReturns(t *testing.T) {
 		t.Fatalf("在跑的那次回调照常结束: %d", id)
 	}
 	quiet(t, got, 100*time.Millisecond)
+}
+
+func TestStreamFrameWithMistypedFieldResyncsOnlyItsSubscription(t *testing.T) {
+	h := newWSHarness(t, nil)
+	eth := mustMarket(t, h.cat, "eth-usd")
+	bs, _ := h.st.SubscribeBook(eth, 5, func(*Book) {})
+	as, _ := h.st.SubscribeAccount(h.ref, func(*Account) {})
+	h.run()
+	conn := h.fw.accept(t)
+	reqs := conn.subscribes(t, 2)
+	conn.ack(t, reqs["book"], testEpoch, 1)
+	conn.ack(t, reqs["account"], testEpoch, 1)
+	conn.push(t, "book", bookFrame(1), 1, "", true)
+	conn.push(t, "account", jsonObj(t, fixture(t, "account.json"), nil), 1, testEpoch, true)
+	h.waitState(bs, StateLive)
+	h.waitState(as, StateLive)
+
+	bad := bookFrame(2)
+	bad["bids"] = "not-levels"
+	conn.push(t, "book", bad, 2, "", false)
+	if e := h.waitState(bs, StateSyncing); e.Err == nil || errors.Is(e.Err, ErrConnLost) {
+		t.Fatalf("解不开的帧只让这个订阅 Syncing: %v", e.Err)
+	}
+	if q := conn.next(t); q.Method != "unsubscribe" || q.Params["channel"] != "book" {
+		t.Fatalf("要先退订 %+v", q)
+	}
+	if q := conn.next(t); q.Method != "subscribe" || q.Params["channel"] != "book" {
+		t.Fatalf("要重订 %+v", q)
+	}
+	if as.State() != StateLive || len(h.connErrors()) != 0 {
+		t.Fatalf("别的订阅与连接不受影响: account %s, 连接错误 %v", as.State(), h.connErrors())
+	}
 }

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -672,6 +673,7 @@ type wsFrame struct {
 	Epoch      *string         `json:"epoch"`
 	IsSnapshot bool            `json:"isSnapshot"`
 	ID         *int64          `json:"id"`
+	body       frameBody
 }
 
 func (st *Stream) handle(raw []byte) error {
@@ -694,7 +696,23 @@ func (st *Stream) handle(raw []byte) error {
 	if f.Epoch != nil && st.epoch != "" && *f.Epoch != st.epoch {
 		st.epochChanged(*f.Epoch)
 	}
-	route, err := st.routeOf(f.Channel, f.Data)
+	body := newBody(f.Channel)
+	if body == nil {
+		return nil
+	}
+	var route string
+	var err error
+	bodyErr := json.Unmarshal(f.Data, body)
+	if bodyErr == nil {
+		f.body = body
+		route, err = st.routeOf(f.Channel, body.header())
+	} else {
+		var h routeHeader
+		if err := json.Unmarshal(f.Data, &h); err != nil {
+			return fmt.Errorf("dexosv1: %s 帧的 data 不是对象: %w", f.Channel, err)
+		}
+		route, err = st.routeOf(f.Channel, h)
+	}
 	if err != nil {
 		return err
 	}
@@ -703,9 +721,12 @@ func (st *Stream) handle(raw []byte) error {
 		// 退订之后在途的帧
 		return nil
 	}
-	if sub.hist != nil {
+	switch {
+	case bodyErr != nil:
+		err = fmt.Errorf("dexosv1: %s 帧解析失败: %w", f.Channel, bodyErr)
+	case sub.hist != nil:
 		err = st.histFrame(sub, &f)
-	} else {
+	default:
 		err = sub.apply(&f)
 	}
 	if err != nil {
@@ -736,17 +757,7 @@ type resyncError struct{ err error }
 func (e *resyncError) Error() string { return e.err.Error() }
 
 // routeOf 数据帧 → 路由键,与 Subscribe* 登记时的一致。只在 Run 的 goroutine 里调用(读 st.routes)。
-func (st *Stream) routeOf(channel string, data json.RawMessage) (string, error) {
-	var h struct {
-		Symbol     string  `json:"symbol"`
-		Kind       string  `json:"kind"`
-		Address    string  `json:"address"`
-		Subaccount *uint32 `json:"subaccount"`
-		Vault      *uint16 `json:"vault"`
-	}
-	if err := json.Unmarshal(data, &h); err != nil {
-		return "", fmt.Errorf("dexosv1: %s 帧的 data 不是对象: %w", channel, err)
-	}
+func (st *Stream) routeOf(channel string, h routeHeader) (string, error) {
 	switch channel {
 	case "prices":
 		return "prices", nil
@@ -774,7 +785,7 @@ func (st *Stream) routeOf(channel string, data json.RawMessage) (string, error) 
 		case h.Vault != nil && h.Address == "" && h.Subaccount == nil:
 			return accountRoute(channel, VaultAccount(*h.Vault)), nil
 		case h.Vault == nil && h.Address != "" && h.Subaccount != nil:
-			return fmt.Sprintf("%s:%s:%d", channel, strings.ToLower(h.Address), *h.Subaccount), nil
+			return channel + ":" + strings.ToLower(h.Address) + ":" + strconv.FormatUint(uint64(*h.Subaccount), 10), nil
 		}
 		return "", fmt.Errorf("dexosv1: %s 帧的身份应为 address + subaccount 或 vault 之一", channel)
 	}

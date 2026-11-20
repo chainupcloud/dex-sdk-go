@@ -1,7 +1,6 @@
 package dexosv1
 
 import (
-	"encoding/json"
 	"fmt"
 	"sort"
 	"strconv"
@@ -14,11 +13,7 @@ func (st *Stream) SubscribePrices(fn func(*Prices)) (*Subscription, error) {
 	sub := &Subscription{channel: "prices", route: "prices", snapshot: true,
 		params: map[string]any{"channel": "prices"}}
 	sub.apply = func(f *wsFrame) error {
-		var w wirePrices
-		if err := json.Unmarshal(f.Data, &w); err != nil {
-			return fmt.Errorf("dexosv1: prices 帧解析失败: %w", err)
-		}
-		p, err := w.prices(st.catalog())
+		p, err := f.body.(*wirePrices).prices(st.catalog())
 		if err != nil {
 			return err
 		}
@@ -56,11 +51,7 @@ func (st *Stream) SubscribeBook(m *Market, depth int, fn func(*Book)) (*Subscrip
 		sub.params["depth"] = depth
 	}
 	sub.apply = func(f *wsFrame) error {
-		var w wireBook
-		if err := json.Unmarshal(f.Data, &w); err != nil {
-			return fmt.Errorf("dexosv1: book 帧解析失败: %w", err)
-		}
-		b, err := w.book(m)
+		b, err := f.body.(*wireBook).book(m)
 		if err != nil {
 			return err
 		}
@@ -86,15 +77,7 @@ func (st *Stream) SubscribeBBO(m *Market, fn func(BBO)) (*Subscription, error) {
 		return nil, err
 	}
 	sub.apply = func(f *wsFrame) error {
-		var w struct {
-			Symbol string     `json:"symbol"`
-			Bid    *[2]string `json:"bid"`
-			Ask    *[2]string `json:"ask"`
-			TS     int64      `json:"ts"`
-		}
-		if err := json.Unmarshal(f.Data, &w); err != nil {
-			return fmt.Errorf("dexosv1: bbo 帧解析失败: %w", err)
-		}
+		w := f.body.(*wireBBO)
 		out := BBO{Symbol: w.Symbol, Kind: m.Kind, TS: w.TS}
 		for _, side := range []struct {
 			in  *[2]string
@@ -133,17 +116,7 @@ func (st *Stream) SubscribeTrades(m *Market, fn func(Trade)) (*Subscription, err
 		return nil, err
 	}
 	sub.apply = func(f *wsFrame) error {
-		var w struct {
-			ID     string `json:"id"`
-			Symbol string `json:"symbol"`
-			Side   string `json:"side"`
-			Price  string `json:"price"`
-			Size   string `json:"size"`
-			TS     int64  `json:"ts"`
-		}
-		if err := json.Unmarshal(f.Data, &w); err != nil {
-			return fmt.Errorf("dexosv1: trades 帧解析失败: %w", err)
-		}
+		w := f.body.(*wireTrade)
 		t := Trade{ID: w.ID, Symbol: w.Symbol, Kind: m.Kind, Side: w.Side, TS: w.TS}
 		var err error
 		if t.Price, err = m.Scale.Ticks(w.Price); err != nil {
@@ -167,9 +140,14 @@ func (st *Stream) SubscribeAccount(ref AccountRef, fn func(*Account)) (*Subscrip
 		return nil, err
 	}
 	sub.apply = func(f *wsFrame) error {
-		a, err := decodeAccount(f.Data, "WS account 帧")
-		if err != nil {
-			return err
+		w := f.body.(*accountBody)
+		if w.Epoch == nil || *w.Epoch == "" || w.AsOfSeq == nil {
+			return fmt.Errorf("dexosv1: WS account 帧 缺 epoch / asOfSeq: %s", f.Data)
+		}
+		a := &w.Account
+		a.Epoch, a.AsOfSeq = *w.Epoch, *w.AsOfSeq
+		if w.Subaccount != nil {
+			a.Subaccount = *w.Subaccount
 		}
 		st.deliverData(sub, func() { fn(a) })
 		return nil
@@ -184,13 +162,7 @@ func (st *Stream) SubscribePositions(ref AccountRef, fn func([]Position)) (*Subs
 		return nil, err
 	}
 	sub.apply = func(f *wsFrame) error {
-		var w struct {
-			Positions []wirePosition `json:"positions"`
-		}
-		if err := json.Unmarshal(f.Data, &w); err != nil {
-			return fmt.Errorf("dexosv1: positions 帧解析失败: %w", err)
-		}
-		ps, err := positionsFrom(st.catalog(), w.Positions)
+		ps, err := positionsFrom(st.catalog(), f.body.(*positionsBody).Positions)
 		if err != nil {
 			return err
 		}
@@ -308,13 +280,8 @@ func (st *Stream) subscribeOrders(ref AccountRef, emitTo func(snapshot bool, ev 
 		if f.Seq != nil {
 			seq = *f.Seq
 		}
+		w := f.body.(*ordersBody)
 		if f.IsSnapshot {
-			var w struct {
-				Orders []wireOrder `json:"orders"`
-			}
-			if err := json.Unmarshal(f.Data, &w); err != nil {
-				return fmt.Errorf("dexosv1: orders 快照解析失败: %w", err)
-			}
 			next := make(map[uint64]Order, len(w.Orders))
 			for _, wo := range w.Orders {
 				o, err := wo.order(st.catalog())
@@ -330,10 +297,6 @@ func (st *Stream) subscribeOrders(ref AccountRef, emitTo func(snapshot bool, ev 
 		if sub.State() != StateLive {
 			// 快照之前的增量:快照会包含它
 			return nil
-		}
-		var w wireOrderEvent
-		if err := json.Unmarshal(f.Data, &w); err != nil {
-			return fmt.Errorf("dexosv1: orders 帧解析失败: %w", err)
 		}
 		ev, err := w.event(st.catalog())
 		if err != nil {

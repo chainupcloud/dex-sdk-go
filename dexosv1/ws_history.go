@@ -2,7 +2,6 @@ package dexosv1
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"strconv"
@@ -146,11 +145,7 @@ func (st *Stream) SubscribeFills(ref AccountRef, from HistoryCursor, fn func(Fil
 		return out, nil
 	}
 	h.decode = func(f *wsFrame) ([]histItem, error) {
-		var w wireFill
-		if err := json.Unmarshal(f.Data, &w); err != nil {
-			return nil, fmt.Errorf("dexosv1: fills 帧解析失败: %w", err)
-		}
-		fill, err := w.fill(st.catalog())
+		fill, err := f.body.(*fillsBody).fill(st.catalog())
 		if err != nil {
 			return nil, err
 		}
@@ -210,12 +205,7 @@ func (st *Stream) SubscribeLedger(ref AccountRef, from HistoryCursor, fn func(Le
 }
 
 func ledgerFrameEntries(f *wsFrame) ([]LedgerEntry, error) {
-	var w struct {
-		Entries *[]LedgerEntry `json:"entries"`
-	}
-	if err := json.Unmarshal(f.Data, &w); err != nil {
-		return nil, fmt.Errorf("dexosv1: ledger 帧解析失败: %w", err)
-	}
+	w := f.body.(*ledgerBody)
 	if w.Entries == nil {
 		return nil, fmt.Errorf("dexosv1: ledger 帧没有 entries: %s", f.Data)
 	}
