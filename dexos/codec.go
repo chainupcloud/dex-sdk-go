@@ -51,7 +51,7 @@ const (
 	// 成对成交的一条腿(dex-os#292,规格 dex-os docs/specs/paired-trade.md)
 	tagPairedTradeLeg byte = 0x8C
 	// 撤单、改单目标可按命令位置引用新单的原子换单(dex-os#612)
-	tagBatchReplace3 byte = 0xE2
+	tagBatchReplace3 byte = 0xE4
 )
 
 // Side 买卖方向。取值必须与内核的 put_side 一致。
@@ -266,7 +266,7 @@ type BatchModify3 struct {
 	ReduceOnly bool
 }
 
-// EncodeBatchReplace3 规范编码 Command::BatchReplace3(tag 0xE2)。布局同 BatchReplace2,只是每个撤单目标、
+// EncodeBatchReplace3 规范编码 Command::BatchReplace3(dex-os dev 的 tag 0xE4)。布局同 BatchReplace2,只是每个撤单目标、
 // 改单目标换成 OrderTarget:按单号 u8 0 | OrderId u64,按引用 u8 1 | market u16 | seq u64 | sub u16 | item u16。
 // 字节钉在 TestEncodeBatchReplace3Pinned,与 dex-os `batch_replace3_roundtrips_with_pinned_layout` 同一个字面量。
 // 两个都给或都不给的目标编不出合法命令,调用方先用 [OrderTarget.Valid] 核。

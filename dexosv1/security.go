@@ -351,13 +351,32 @@ type CommandAck struct {
 	Receipt   *CommandReceipt
 }
 
+// SubmitOption 调整一次 [Client.SubmitCommand]。
+type SubmitOption func(*submitOptions)
+
+type submitOptions struct {
+	waitMatch bool
+}
+
+// WaitMatch 让网关等这条下单类命令撮合完再回(?wait=match):200 带撮合回执(Stage = [StageMatched],
+// 已折叠的是 [StageFolded]);网关等待超时回 202,结果改按 actionId 查。非下单类命令被拒(400 wait_match_unsupported_command)。
+func WaitMatch() SubmitOption { return func(o *submitOptions) { o.waitMatch = true } }
+
 // SubmitCommand 提交一条签好名的 139 / 179。命令签名时的 manifest 随请求钉住,签到旧网络上的命令拿到 [ErrNetworkChanged]。
-func (c *Client) SubmitCommand(ctx context.Context, cmd Command) (CommandAck, error) {
+func (c *Client) SubmitCommand(ctx context.Context, cmd Command, opts ...SubmitOption) (CommandAck, error) {
+	var o submitOptions
+	for _, opt := range opts {
+		opt(&o)
+	}
 	body, err := json.Marshal(map[string]string{"command": cmd.Hex()})
 	if err != nil {
 		return CommandAck{}, err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.BaseURL+"/v1/commands", bytes.NewReader(body))
+	target := c.BaseURL + "/v1/commands"
+	if o.waitMatch {
+		target += "?wait=match"
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, target, bytes.NewReader(body))
 	if err != nil {
 		return CommandAck{}, err
 	}
@@ -397,9 +416,21 @@ func (c *Client) SubmitCommand(ctx context.Context, cmd Command) (CommandAck, er
 	case http.StatusOK:
 		r, err := decodeReceipt(raw)
 		if err != nil {
-			return CommandAck{}, fmt.Errorf("%w: 重发应答解析失败: %w", ErrCommandOutcomeUnknown, err)
+			return CommandAck{}, fmt.Errorf("%w: 200 应答解析失败: %w", ErrCommandOutcomeUnknown, err)
 		}
-		return CommandAck{RequestID: cmd.ActionID, Seq: r.Seq, Sub: r.Sub, Duplicate: true, Receipt: &r}, nil
+		var w struct {
+			Duplicate bool `json:"duplicate"`
+		}
+		if err := json.Unmarshal(raw, &w); err != nil {
+			return CommandAck{}, fmt.Errorf("%w: 200 应答解析失败: %w", ErrCommandOutcomeUnknown, err)
+		}
+		if !w.Duplicate && r.Stage == "" {
+			return CommandAck{}, fmt.Errorf("%w: 200 应答既不是重发也不带撮合阶段: %s", ErrCommandOutcomeUnknown, raw)
+		}
+		if !w.Duplicate {
+			c.ObserveSeq(r.Seq)
+		}
+		return CommandAck{RequestID: cmd.ActionID, Seq: r.Seq, Sub: r.Sub, Duplicate: w.Duplicate, Receipt: &r}, nil
 	case http.StatusTooManyRequests:
 		return CommandAck{}, parseError(resp.StatusCode, resp.Header, raw)
 	}
@@ -449,6 +480,14 @@ const (
 	CommandConflict CommandStatus = "Conflict"
 )
 
+// CommandStage 回执出自哪一步:撮合时交出的,或纪元折叠之后的。两者内容相同。
+type CommandStage string
+
+const (
+	StageMatched CommandStage = "matched"
+	StageFolded  CommandStage = "folded"
+)
+
 // CommandEvent 回执里的一条业务事件。
 type CommandEvent struct {
 	Kind string          `json:"kind"`
@@ -458,6 +497,7 @@ type CommandEvent struct {
 // CommandReceipt GET /v1/requests/{actionId} 的结论。
 type CommandReceipt struct {
 	Status           CommandStatus
+	Stage            CommandStage
 	Digest           Hash
 	Seq              uint64
 	Sub              uint16
@@ -474,6 +514,7 @@ type CommandReceipt struct {
 func decodeReceipt(raw []byte) (CommandReceipt, error) {
 	var w struct {
 		Status         CommandStatus `json:"status"`
+		Stage          CommandStage  `json:"stage"`
 		Digest         *Hash         `json:"digest"`
 		HostLogIndex   decU64        `json:"hostLogIndex"`
 		Seq            decU64        `json:"seq"`
@@ -493,7 +534,7 @@ func decodeReceipt(raw []byte) (CommandReceipt, error) {
 	if err := json.Unmarshal(raw, &w); err != nil {
 		return CommandReceipt{}, err
 	}
-	r := CommandReceipt{Status: w.Status, ReadSeq: uint64(w.HostLogIndex), ResultsPending: w.ResultsPending, StableError: w.StableError, ErrorCode: w.ErrorCode, Events: w.Events, Items: w.Items}
+	r := CommandReceipt{Status: w.Status, Stage: w.Stage, ReadSeq: uint64(w.HostLogIndex), ResultsPending: w.ResultsPending, StableError: w.StableError, ErrorCode: w.ErrorCode, Events: w.Events, Items: w.Items}
 	if w.Digest != nil {
 		r.Digest = *w.Digest
 	}
@@ -587,6 +628,42 @@ func (c *Client) CommandReceipt(ctx context.Context, actionID, digest Hash, minS
 		return CommandReceipt{}, &ReadViewBehindError{ReadSeq: uint64(w.HostLogIndex), RequiredSeq: uint64(w.RequiredSeq)}
 	}
 	return CommandReceipt{}, &Error{Status: resp.StatusCode, Code: securityErrorCode(raw), Body: string(raw)}
+}
+
+// AwaitCommand 让网关等这条命令撮合完再回(GET /v1/requests/{actionId}?wait=match,下单类最多等 5 秒):
+// 撮合完回 Stage = [StageMatched] 的回执;拿不到撮合回执时照普通回执回(已落定 [StageFolded]、未落定 ResultsPending、
+// 没看到 [CommandUnknown])。网关不允许与 digest 同用,所以这里不核 digest,要核的用 [Client.CommandReceipt]。
+func (c *Client) AwaitCommand(ctx context.Context, actionID Hash) (CommandReceipt, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.BaseURL+"/v1/requests/"+actionID.Hex()+"?wait=match", nil)
+	if err != nil {
+		return CommandReceipt{}, err
+	}
+	if c.Host != "" {
+		req.Host = c.Host
+	}
+	resp, err := c.HTTP.Do(req)
+	if err != nil {
+		return CommandReceipt{}, err
+	}
+	defer resp.Body.Close()
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return CommandReceipt{}, fmt.Errorf("dexosv1: 回执读取失败: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNotFound {
+		return CommandReceipt{}, &Error{Status: resp.StatusCode, Code: securityErrorCode(raw), Body: string(raw)}
+	}
+	r, err := decodeReceipt(raw)
+	if err != nil {
+		return CommandReceipt{}, fmt.Errorf("dexosv1: 回执解析失败(HTTP %d): %w: %s", resp.StatusCode, err, raw)
+	}
+	if resp.StatusCode == http.StatusNotFound && r.Status != CommandUnknown {
+		return CommandReceipt{}, fmt.Errorf("dexosv1: 404 回执状态是 %q: %s", r.Status, raw)
+	}
+	if v, err := strconv.ParseUint(resp.Header.Get(seqHeader), 10, 64); err == nil {
+		r.ReadSeq = max(r.ReadSeq, v)
+	}
+	return r, nil
 }
 
 // ErrNotFinal 还下不了结论:命令还没过期,或已受理但结果未落定、读视图落后。稍后再查。

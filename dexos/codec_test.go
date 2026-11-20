@@ -132,7 +132,7 @@ func TestEncodeBatchReplace3Pinned(t *testing.T) {
 		[]BatchModify3{{Target: OrderTarget{Ref: &CommandRef{Market: 7, Seq: 76, Sub: 0, Item: 0}}, Price: 51000, Lots: 5, TIF: PostOnly, ReduceOnly: true}},
 		[]BatchOrder{{Market: 7, Side: Sell, Price: 52000, Lots: 3, TIF: GTC}},
 	)
-	const want = "01e204000000d307000000000000020000000009000000000000000107004d0000000000000002000100010000000107004c00000000000000000000" +
+	const want = "01e404000000d307000000000000020000000009000000000000000107004d0000000000000002000100010000000107004c00000000000000000000" +
 		"0038c70000050000000000000002010100000007000120cb000003000000000000000000"
 	if hex.EncodeToString(got) != want {
 		t.Fatalf("BatchReplace3 字节漂移:\n got %x\nwant %s", got, want)
