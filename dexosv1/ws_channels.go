@@ -22,7 +22,7 @@ func (st *Stream) SubscribePrices(fn func(*Prices)) (*Subscription, error) {
 		if err != nil {
 			return err
 		}
-		fn(p)
+		st.deliverData(sub, func() { fn(p) })
 		return nil
 	}
 	return st.add(sub)
@@ -64,7 +64,7 @@ func (st *Stream) SubscribeBook(m *Market, depth int, fn func(*Book)) (*Subscrip
 		if err != nil {
 			return err
 		}
-		fn(b)
+		st.deliverData(sub, func() { fn(b) })
 		return nil
 	}
 	return st.add(sub)
@@ -109,7 +109,7 @@ func (st *Stream) SubscribeBBO(m *Market, fn func(BBO)) (*Subscription, error) {
 			}
 			*side.out = &l[0]
 		}
-		fn(out)
+		st.deliverData(sub, func() { fn(out) })
 		return nil
 	}
 	return st.add(sub)
@@ -152,7 +152,7 @@ func (st *Stream) SubscribeTrades(m *Market, fn func(Trade)) (*Subscription, err
 		if t.Lots, err = m.Scale.Lots(w.Size); err != nil {
 			return fmt.Errorf("dexosv1: 成交 %s size: %w", w.ID, err)
 		}
-		fn(t)
+		st.deliverData(sub, func() { fn(t) })
 		return nil
 	}
 	return st.add(sub)
@@ -171,7 +171,7 @@ func (st *Stream) SubscribeAccount(ref AccountRef, fn func(*Account)) (*Subscrip
 		if err != nil {
 			return err
 		}
-		fn(a)
+		st.deliverData(sub, func() { fn(a) })
 		return nil
 	}
 	return st.add(sub)
@@ -194,7 +194,7 @@ func (st *Stream) SubscribePositions(ref AccountRef, fn func([]Position)) (*Subs
 		if err != nil {
 			return err
 		}
-		fn(ps)
+		st.deliverData(sub, func() { fn(ps) })
 		return nil
 	}
 	return st.add(sub)
@@ -256,8 +256,9 @@ type wireOrderEvent struct {
 // remaining 时不猜,退订重订换一帧新快照(期间 Syncing)。服务端自己算不出某帧时会直接重发快照。
 // 待触发的条件单也在集合里(Order.Trigger 非 nil):它被下单、触发、拒绝、自动撤时服务端重发快照,被撤时推 canceled 帧。
 func (st *Stream) SubscribeOrders(ref AccountRef, fn func(OrdersUpdate)) (*Subscription, error) {
-	return st.subscribeOrders(ref, func(snapshot bool, ev *OrderEvent, open map[uint64]Order, seq uint64) {
-		fn(OrdersUpdate{Snapshot: snapshot, Event: ev, Open: sortedOrders(open), Seq: seq})
+	return st.subscribeOrders(ref, func(snapshot bool, ev *OrderEvent, open map[uint64]Order, seq uint64) func() {
+		u := OrdersUpdate{Snapshot: snapshot, Event: ev, Open: sortedOrders(open), Seq: seq}
+		return func() { fn(u) }
 	})
 }
 
@@ -275,16 +276,14 @@ type OrderChange struct {
 // SubscribeOrderChanges 与 [Stream.SubscribeOrders] 订同一个频道,快照、校验与对不上时重订都相同;
 // 只是增量帧不再附带全部在挂单,只给这一张单应用之后的状态。
 func (st *Stream) SubscribeOrderChanges(ref AccountRef, fn func(OrderChange)) (*Subscription, error) {
-	return st.subscribeOrders(ref, func(snapshot bool, ev *OrderEvent, open map[uint64]Order, seq uint64) {
-		if snapshot {
-			fn(OrderChange{Snapshot: true, Open: sortedOrders(open), Seq: seq})
-			return
-		}
+	return st.subscribeOrders(ref, func(snapshot bool, ev *OrderEvent, open map[uint64]Order, seq uint64) func() {
 		c := OrderChange{Event: ev, Seq: seq}
-		if o, ok := open[ev.OrderID]; ok {
+		if snapshot {
+			c = OrderChange{Snapshot: true, Open: sortedOrders(open), Seq: seq}
+		} else if o, ok := open[ev.OrderID]; ok {
 			c.Order = &o
 		}
-		fn(c)
+		return func() { fn(c) }
 	})
 }
 
@@ -297,13 +296,13 @@ func sortedOrders(open map[uint64]Order) []Order {
 	return list
 }
 
-func (st *Stream) subscribeOrders(ref AccountRef, emitTo func(snapshot bool, ev *OrderEvent, open map[uint64]Order, seq uint64)) (*Subscription, error) {
+func (st *Stream) subscribeOrders(ref AccountRef, emitTo func(snapshot bool, ev *OrderEvent, open map[uint64]Order, seq uint64) func()) (*Subscription, error) {
 	sub, err := accountSub("orders", ref, true)
 	if err != nil {
 		return nil, err
 	}
 	open := map[uint64]Order{}
-	emit := func(snapshot bool, ev *OrderEvent, seq uint64) { emitTo(snapshot, ev, open, seq) }
+	emit := func(snapshot bool, ev *OrderEvent, seq uint64) { st.deliverData(sub, emitTo(snapshot, ev, open, seq)) }
 	sub.apply = func(f *wsFrame) error {
 		var seq uint64
 		if f.Seq != nil {

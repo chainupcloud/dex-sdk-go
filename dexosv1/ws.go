@@ -117,14 +117,13 @@ type StreamOptions struct {
 	// CatchUpWait 补拉的上界还没写进执行历史(400 GatewayHistoryIncomplete)时最多等多久,缺省 10s;
 	// 等不到就把订阅置为 Syncing、稍后再试。
 	CatchUpWait time.Duration
-	// OnState 订阅状态变化。在 Run 的 goroutine 里调用,不要阻塞。
-	OnState func(StateEvent)
+	OnState     func(StateEvent)
 	// OnConnError 连接层的错误(连不上、读写失败、心跳超时、协议错误)。在 Run 的 goroutine 里调用。
-	OnConnError func(error)
+	OnConnError  func(error)
+	PrivateQueue int
 }
 
-// Stream 一条 v1 WS 连接。Subscribe* 可在 Run 之前或运行中从任意 goroutine 调用;
-// 数据回调与 OnState 都在 Run 的 goroutine 里按序调用。
+// Stream 一条 v1 WS 连接。Subscribe* 可在 Run 之前或运行中从任意 goroutine 调用。
 type Stream struct {
 	c   *Client
 	cat atomic.Pointer[Catalog]
@@ -137,6 +136,8 @@ type Stream struct {
 	due     chan func()
 	quit    chan struct{}
 	started atomic.Bool
+	priv    chan delivery
+	latest  *latestQueue
 
 	// 以下只在 Run 的 goroutine 里读写
 	ctx     context.Context
@@ -187,12 +188,17 @@ func NewStream(c *Client, cat *Catalog, opt StreamOptions) (*Stream, error) {
 	def(&opt.ReconnectMin, 500*time.Millisecond)
 	def(&opt.ReconnectMax, 30*time.Second)
 	def(&opt.CatchUpWait, 10*time.Second)
+	if opt.PrivateQueue <= 0 {
+		opt.PrivateQueue = 65536
+	}
 	st := &Stream{
 		c: c, opt: opt, url: opt.URL,
-		subs: map[*Subscription]struct{}{},
-		wake: make(chan struct{}, 1),
-		due:  make(chan func(), 256),
-		quit: make(chan struct{}),
+		subs:   map[*Subscription]struct{}{},
+		wake:   make(chan struct{}, 1),
+		due:    make(chan func(), 256),
+		quit:   make(chan struct{}),
+		priv:   make(chan delivery, opt.PrivateQueue),
+		latest: newLatestQueue(),
 	}
 	st.cat.Store(cat)
 	return st, nil
@@ -345,6 +351,8 @@ func (st *Stream) Run(ctx context.Context) error {
 	}
 	defer close(st.quit)
 	st.ctx = ctx
+	go st.deliverPrivate()
+	go st.deliverLatest()
 	backoff := st.opt.ReconnectMin
 	for {
 		var header http.Header
@@ -390,7 +398,8 @@ func (st *Stream) setState(sub *Subscription, s State, err error) {
 		return
 	}
 	if st.opt.OnState != nil {
-		st.opt.OnState(StateEvent{Sub: sub, State: s, Err: err})
+		ev := StateEvent{Sub: sub, State: s, Err: err}
+		st.enqueue(sub, func() { st.opt.OnState(ev) }, false)
 	}
 }
 
