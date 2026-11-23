@@ -57,3 +57,21 @@ func TestAwaitCommandHandsBackWhatTheGatewayKnowsWhenThereIsNoMatchReceipt(t *te
 		t.Fatalf("a refused query is an error, not an unknown outcome: %v", err)
 	}
 }
+
+func TestReceiptQueriesAnsweredWithAProxyNotFoundPageAreHTTPErrors(t *testing.T) {
+	id := Hash{0xcf}
+	for _, page := range []string{"404 page not found", "<html><body><h1>404 Not Found</h1></body></html>"} {
+		c, _ := awaitServer(t, http.StatusNotFound, page)
+		queries := map[string]func() (CommandReceipt, error){
+			"CommandReceipt": func() (CommandReceipt, error) { return c.CommandReceipt(context.Background(), id, Hash{0x01}, 0) },
+			"AwaitCommand":   func() (CommandReceipt, error) { return c.AwaitCommand(context.Background(), id) },
+		}
+		for name, query := range queries {
+			_, err := query()
+			var e *Error
+			if !errors.As(err, &e) || e.Status != http.StatusNotFound || e.Code != "" || e.Body != page {
+				t.Fatalf("%s answered %q: %v", name, page, err)
+			}
+		}
+	}
+}

@@ -626,6 +626,9 @@ func (c *Client) CommandReceipt(ctx context.Context, actionID, digest Hash, minS
 	switch resp.StatusCode {
 	case http.StatusOK, http.StatusNotFound, http.StatusConflict:
 		r, err := decodeReceipt(raw)
+		if err != nil && resp.StatusCode == http.StatusNotFound {
+			return CommandReceipt{}, &Error{Status: resp.StatusCode, Code: securityErrorCode(raw), Body: string(raw)}
+		}
 		if err != nil {
 			return CommandReceipt{}, fmt.Errorf("dexosv1: 回执解析失败(HTTP %d): %w: %s", resp.StatusCode, err, raw)
 		}
@@ -680,6 +683,9 @@ func (c *Client) AwaitCommand(ctx context.Context, actionID Hash) (CommandReceip
 		return CommandReceipt{}, &Error{Status: resp.StatusCode, Code: securityErrorCode(raw), Body: string(raw)}
 	}
 	r, err := decodeReceipt(raw)
+	if err != nil && resp.StatusCode == http.StatusNotFound {
+		return CommandReceipt{}, &Error{Status: resp.StatusCode, Code: securityErrorCode(raw), Body: string(raw)}
+	}
 	if err != nil {
 		return CommandReceipt{}, fmt.Errorf("dexosv1: 回执解析失败(HTTP %d): %w: %s", resp.StatusCode, err, raw)
 	}
