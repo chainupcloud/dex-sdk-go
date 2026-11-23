@@ -537,6 +537,18 @@ type CommandReceipt struct {
 	Items            []json.RawMessage
 }
 
+func receiptShaped(raw []byte) bool {
+	if !json.Valid(raw) {
+		return false
+	}
+	var w map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &w); err != nil || w == nil {
+		return true
+	}
+	_, ok := w["status"]
+	return ok
+}
+
 func decodeReceipt(raw []byte) (CommandReceipt, error) {
 	var w struct {
 		Status         CommandStatus `json:"status"`
@@ -599,9 +611,6 @@ func (e *ReadViewBehindError) Error() string {
 
 // CommandReceipt 按 actionId 查一份原件的回执。digest 是这份原件的签名摘要;minSeq 非 0 时读视图必须
 // 覆盖到这个位号,否则返回 [*ReadViewBehindError]。
-//
-// 404 回 Status = [CommandUnknown] 而不是错误:原件过期(账本认证时间超过 ValidUntilMs)之后,以那一刻
-// [SecurityTime].HostLogIndex 作 minSeq 查到 Unknown,说明这份原件没有、也永远不会被执行。
 func (c *Client) CommandReceipt(ctx context.Context, actionID, digest Hash, minSeq uint64) (CommandReceipt, error) {
 	u := c.BaseURL + "/v1/requests/" + actionID.Hex() + "?" + url.Values{"digest": {digest.Hex()}}.Encode()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
@@ -626,7 +635,7 @@ func (c *Client) CommandReceipt(ctx context.Context, actionID, digest Hash, minS
 	switch resp.StatusCode {
 	case http.StatusOK, http.StatusNotFound, http.StatusConflict:
 		r, err := decodeReceipt(raw)
-		if err != nil && resp.StatusCode == http.StatusNotFound {
+		if err != nil && resp.StatusCode == http.StatusNotFound && !receiptShaped(raw) {
 			return CommandReceipt{}, &Error{Status: resp.StatusCode, Code: securityErrorCode(raw), Body: string(raw)}
 		}
 		if err != nil {
@@ -683,7 +692,7 @@ func (c *Client) AwaitCommand(ctx context.Context, actionID Hash) (CommandReceip
 		return CommandReceipt{}, &Error{Status: resp.StatusCode, Code: securityErrorCode(raw), Body: string(raw)}
 	}
 	r, err := decodeReceipt(raw)
-	if err != nil && resp.StatusCode == http.StatusNotFound {
+	if err != nil && resp.StatusCode == http.StatusNotFound && !receiptShaped(raw) {
 		return CommandReceipt{}, &Error{Status: resp.StatusCode, Code: securityErrorCode(raw), Body: string(raw)}
 	}
 	if err != nil {

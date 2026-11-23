@@ -75,3 +75,21 @@ func TestReceiptQueriesAnsweredWithAProxyNotFoundPageAreHTTPErrors(t *testing.T)
 		}
 	}
 }
+
+func TestReceiptQueriesAnsweredWithAMalformedReceiptOn404StayExplicitErrors(t *testing.T) {
+	id := Hash{0xd0}
+	for _, body := range []string{`{"status":"Vanished"}`, `{"status":"Unknown","digest":"0x12"}`, `null`, `[]`} {
+		c, _ := awaitServer(t, http.StatusNotFound, body)
+		queries := map[string]func() (CommandReceipt, error){
+			"CommandReceipt": func() (CommandReceipt, error) { return c.CommandReceipt(context.Background(), id, Hash{0x01}, 0) },
+			"AwaitCommand":   func() (CommandReceipt, error) { return c.AwaitCommand(context.Background(), id) },
+		}
+		for name, query := range queries {
+			_, err := query()
+			var e *Error
+			if err == nil || errors.As(err, &e) {
+				t.Fatalf("%s answered %s: a 404 that speaks the receipt contract but breaks it is a contract error, not a proxy page: %v", name, body, err)
+			}
+		}
+	}
+}
