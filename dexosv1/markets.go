@@ -88,7 +88,9 @@ type Market struct {
 	BaseToken  *uint32
 	QuoteToken *uint32
 	BasePerLot *uint64
-	// MinNotional 最小名义额(USDC 十进制);"0" = 不限。
+	// SettleToken 结算 token:永续是所属 dex 的抵押 token,现货是计价 token。MinNotional 按它计。
+	SettleToken SettleToken
+	// MinNotional 最小名义额(结算 token 十进制);"0" = 不限。
 	MinNotional string
 	// MaxLeverage nil = 现货。
 	MaxLeverage *uint32
@@ -109,6 +111,14 @@ type Market struct {
 	AggTicks []uint64
 }
 
+// SettleToken 市场的结算 token。Symbol / Decimals 为 nil = 服务端没有这个 token 的元数据。
+type SettleToken struct {
+	// ID 账本 token 号(0 = USDC)。
+	ID       uint32  `json:"id"`
+	Symbol   *string `json:"symbol"`
+	Decimals *uint8  `json:"decimals"`
+}
+
 // MarketFees 市场的费率(十进制比例,maker 为负 = 返佣)。
 type MarketFees struct {
 	// RateSource "market" | "tier"。
@@ -122,33 +132,34 @@ type MarketFees struct {
 // wireMarket `components.schemas.Market` 的线上形状。
 type wireMarket struct {
 	rulesPresent        bool
-	Symbol              string      `json:"symbol"`
-	SigningMarketID     uint16      `json:"signingMarketId"`
-	Kind                string      `json:"kind"`
-	Status              string      `json:"status"`
-	MarginMode          string      `json:"marginMode"`
-	StrictIsolated      bool        `json:"strictIsolated"`
-	PriceDecimals       uint8       `json:"priceDecimals"`
-	SizeDecimals        uint8       `json:"sizeDecimals"`
-	QuotePerTickLot     string      `json:"quotePerTickLot"`
-	TickSize            *string     `json:"tickSize"`
-	SubticksPerTick     *uint32     `json:"subticksPerTick"`
-	TradingRulesVersion *string     `json:"tradingRulesVersion"`
-	TickChangePending   *bool       `json:"tickChangePending"`
-	BaseToken           *uint32     `json:"baseToken"`
-	QuoteToken          *uint32     `json:"quoteToken"`
-	BasePerLot          *string     `json:"basePerLot"`
-	MinNotional         string      `json:"minNotional"`
-	MaxLeverage         *uint32     `json:"maxLeverage"`
-	LastPrice           string      `json:"lastPrice"`
-	OraclePrice         *string     `json:"oraclePrice"`
-	MarkPrice           *string     `json:"markPrice"`
-	BestBid             *string     `json:"bestBid"`
-	BestAsk             *string     `json:"bestAsk"`
-	OpenInterest        *string     `json:"openInterest"`
-	FundingRate         *string     `json:"fundingRate"`
-	Fees                *MarketFees `json:"fees"`
-	AggTicks            []uint64    `json:"aggTicks"`
+	Symbol              string       `json:"symbol"`
+	SigningMarketID     uint16       `json:"signingMarketId"`
+	Kind                string       `json:"kind"`
+	Status              string       `json:"status"`
+	MarginMode          string       `json:"marginMode"`
+	StrictIsolated      bool         `json:"strictIsolated"`
+	PriceDecimals       uint8        `json:"priceDecimals"`
+	SizeDecimals        uint8        `json:"sizeDecimals"`
+	QuotePerTickLot     string       `json:"quotePerTickLot"`
+	TickSize            *string      `json:"tickSize"`
+	SubticksPerTick     *uint32      `json:"subticksPerTick"`
+	TradingRulesVersion *string      `json:"tradingRulesVersion"`
+	TickChangePending   *bool        `json:"tickChangePending"`
+	BaseToken           *uint32      `json:"baseToken"`
+	QuoteToken          *uint32      `json:"quoteToken"`
+	BasePerLot          *string      `json:"basePerLot"`
+	SettleToken         *SettleToken `json:"settleToken"`
+	MinNotional         string       `json:"minNotional"`
+	MaxLeverage         *uint32      `json:"maxLeverage"`
+	LastPrice           string       `json:"lastPrice"`
+	OraclePrice         *string      `json:"oraclePrice"`
+	MarkPrice           *string      `json:"markPrice"`
+	BestBid             *string      `json:"bestBid"`
+	BestAsk             *string      `json:"bestAsk"`
+	OpenInterest        *string      `json:"openInterest"`
+	FundingRate         *string      `json:"fundingRate"`
+	Fees                *MarketFees  `json:"fees"`
+	AggTicks            []uint64     `json:"aggTicks"`
 }
 
 func (w wireMarket) market() (Market, error) {
@@ -171,6 +182,10 @@ func (w wireMarket) market() (Market, error) {
 	if w.Symbol == "" {
 		return Market{}, fmt.Errorf("dexosv1: 市场缺 symbol")
 	}
+	if w.SettleToken == nil {
+		return Market{}, fmt.Errorf("dexosv1: %s 缺 settleToken", w.Symbol)
+	}
+	m.SettleToken = *w.SettleToken
 	var err error
 	if m.QuotePerTickLot, err = strconv.ParseUint(w.QuotePerTickLot, 10, 64); err != nil {
 		return Market{}, fmt.Errorf("dexosv1: %s quotePerTickLot: %w", w.Symbol, err)

@@ -153,6 +153,48 @@ func TestCatalogAndBookScaleToTicksAndLots(t *testing.T) {
 	}
 }
 
+// 每个市场带结算 token:永续取所属 dex 的抵押 token,现货取计价 token;服务端没有元数据时符号与小数位为 nil。
+// 缺 settleToken 的行整份目录报错,不按 USDC 猜。
+func TestCatalogCarriesSettleTokenOfEachMarket(t *testing.T) {
+	var doc struct {
+		Markets []map[string]any `json:"markets"`
+	}
+	if err := json.Unmarshal(fixture(t, "markets.json"), &doc); err != nil {
+		t.Fatal(err)
+	}
+	doc.Markets[1]["settleToken"] = map[string]any{"id": 4, "symbol": "USDT", "decimals": 6}
+	doc.Markets[2]["settleToken"] = map[string]any{"id": 9, "symbol": nil, "decimals": nil}
+	serveDoc := func(doc any) *Client {
+		body, err := json.Marshal(doc)
+		if err != nil {
+			t.Fatal(err)
+		}
+		f, c := newFake(t)
+		f.routes["/v1/markets"] = func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write(body) }
+		return c
+	}
+	cat, err := serveDoc(doc).Catalog(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	btc, _ := cat.Market("BTC-USD")
+	eth, _ := cat.Market("ETH-USD")
+	spot, _ := cat.Market("BTC-USDC")
+	if btc.SettleToken.ID != 0 || *btc.SettleToken.Symbol != "USDC" || *btc.SettleToken.Decimals != 6 {
+		t.Fatalf("BTC-USD 结算 token 不对: %+v", btc.SettleToken)
+	}
+	if eth.SettleToken.ID != 4 || *eth.SettleToken.Symbol != "USDT" || *eth.SettleToken.Decimals != 6 {
+		t.Fatalf("ETH-USD 结算 token 不对: %+v", eth.SettleToken)
+	}
+	if spot.SettleToken.ID != 9 || spot.SettleToken.Symbol != nil || spot.SettleToken.Decimals != nil {
+		t.Fatalf("没有元数据的结算 token 应当 symbol / decimals 为 nil: %+v", spot.SettleToken)
+	}
+	delete(doc.Markets[1], "settleToken")
+	if _, err := serveDoc(doc).Catalog(context.Background()); err == nil || !strings.Contains(err.Error(), "settleToken") {
+		t.Fatalf("缺 settleToken 应当报错,得到 %v", err)
+	}
+}
+
 // 价格没对齐 tick、整数字段不是整数:响应不能被悄悄舍入或截断,整份目录报错。
 func TestCatalogRejectsMisalignedPrice(t *testing.T) {
 	for _, c := range []struct{ from, to, want string }{

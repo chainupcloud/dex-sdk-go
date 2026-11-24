@@ -10,7 +10,7 @@ import (
 )
 
 func rulesMarketWire() map[string]any {
-	return map[string]any{"symbol": "BTC-USD", "signingMarketId": 1, "kind": "perp", "status": "Active", "priceDecimals": 1, "sizeDecimals": 3, "quotePerTickLot": "100", "lastPrice": "80000.1", "tickSize": "1", "subticksPerTick": 10, "tradingRulesVersion": "7", "tickChangePending": false, "aggTicks": []int{10, 100, 1000}}
+	return map[string]any{"symbol": "BTC-USD", "signingMarketId": 1, "kind": "perp", "status": "Active", "priceDecimals": 1, "sizeDecimals": 3, "quotePerTickLot": "100", "lastPrice": "80000.1", "tickSize": "1", "subticksPerTick": 10, "tradingRulesVersion": "7", "tickChangePending": false, "aggTicks": []int{10, 100, 1000}, "settleToken": map[string]any{"id": 0, "symbol": "USDC", "decimals": 6}}
 }
 
 func readRulesMarket(t *testing.T, row map[string]any) (*Market, error) {
