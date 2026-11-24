@@ -67,6 +67,8 @@ type RiskGroup struct {
 	MMR             string `json:"mmr"`
 	OpenOrderMargin string `json:"openOrderMargin"`
 	Withdrawable    string `json:"withdrawable"`
+	// IsolatedEquity 本组逐仓仓位的权益合计;Equity 只含全仓部分。
+	IsolatedEquity string `json:"isolatedEquity"`
 }
 
 // MarketLeverage 一个市场上设过的杠杆倍数。Kind 是市场类型(合约与现货可以同名);"" = dex-os#318 之前的节点没给。

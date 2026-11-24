@@ -424,7 +424,7 @@ func TestAccountReads(t *testing.T) {
 		t.Fatalf("账户汇总不对: %+v", a)
 	}
 	if a.Epoch != "k1-1" || a.AsOfSeq != 231461888 || a.OpenOrderMargin != "12.5" || len(a.Groups) != 1 ||
-		a.Groups[0] != (RiskGroup{"USDC", "-1282.814453", "13928.966644", "760.656", "456.3936", "12.5", "13168.310644"}) {
+		a.Groups[0] != (RiskGroup{"USDC", "-1282.814453", "13928.966644", "760.656", "456.3936", "12.5", "13168.310644", "0"}) {
 		t.Fatalf("账户风险头不对: %+v", a)
 	}
 	if a.Fees.Builder == nil || *a.Fees.Builder != 1 || len(a.Fees.Markets) != 2 ||
