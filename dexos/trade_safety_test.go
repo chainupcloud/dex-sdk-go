@@ -52,7 +52,8 @@ func TestBatchOutcomeKernelBoundaries(t *testing.T) {
 		{"first_order", 0, 10, false, false},
 		{"reduce_only_clamped", 9, 3, true, false},
 		{"reduce_only_cannot_increase", 9, 11, true, true},
-		{"non_reduce_cannot_shrink", 9, 3, false, true},
+		{"spot_unbacked_freeze_shrinks", 9, 3, false, false},
+		{"non_reduce_cannot_increase", 9, 11, false, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			data := fmt.Sprintf(`{"account":42,"market":7,"orderSeq":%d,"price":100,"lots":%d,"filledLots":0,"resting":true}`, tc.seq, tc.lots)
@@ -65,6 +66,9 @@ func TestBatchOutcomeKernelBoundaries(t *testing.T) {
 			err := checkBatchOutcome(receipt, 42, []BatchOrder{{Market: 7, Price: 100, Lots: 10, ReduceOnly: tc.reduceOnly}}, nil)
 			if (err != nil) != tc.fail {
 				t.Fatalf("正常内核边界与不完整判据不符: %v", err)
+			}
+			if !tc.fail && (receipt.Items[0].Lots == nil || *receipt.Items[0].Lots != tc.lots) {
+				t.Fatalf("被接受的下单项应带上 OrderAccepted 的接受手数 %d: %v", tc.lots, receipt.Items[0].Lots)
 			}
 		})
 	}
