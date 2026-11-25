@@ -116,7 +116,16 @@ type Network struct {
 	ChainID      uint64
 	Verifier     dexos.Address
 	ManifestHash Hash
+	Profile      NetworkProfile
 }
+
+type NetworkProfile uint8
+
+const (
+	ProfileProduction       NetworkProfile = 1
+	ProfileTestnetBacked    NetworkProfile = 2
+	ProfileTestnetSimulated NetworkProfile = 3
+)
 
 // Authorization 一条 139 的授权参数。ValidUntilMs 按账本认证时间判(GET /v1/time/certified),
 // 过期的原件永远不会被受理。
