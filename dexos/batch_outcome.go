@@ -16,6 +16,8 @@ var ErrIncompleteBatch = errors.New("dexos: 批次逐项结果缺失或与输入
 // 身份是 (Kind, InputIndex):撤单与下单**各自**从 0 编号,对应调用方传入的两个切片的下标。
 // OrderID 是订单序号的十进制串:下单项 = 进了簿的新单号(被拒的没有),撤单项 = 要撤的那张单。
 // 按引用撤单(BatchReplace3)的项回显 Ref;引用解析成功时 OrderID 是解析出的单号,解析失败的没有。
+// Lots 是被接受的下单项实际进簿的手数,取自同号 OrderAccepted.lots,逐项核对通过后由 SDK 填上:
+// 只减仓单按仓位截短、现货单借来的冻结没兜住时缩减(dex-os LEDGER 15),都可能小于请求量;挂单与成交按它记,不按请求量。
 type BatchItem struct {
 	InputIndex   uint32      `json:"inputIndex"`
 	Kind         string      `json:"kind"`
@@ -29,6 +31,7 @@ type BatchItem struct {
 	Resting      *bool       `json:"resting,omitempty"`
 	CanceledLots *uint64     `json:"canceledLots,omitempty"`
 	Ref          *CommandRef `json:"ref,omitempty"`
+	Lots         *uint64     `json:"lots,omitempty"`
 }
 
 // UnmarshalJSON 坐标、归属与结局缺一即解析失败:缺字段的项不能被零值冒充成「第 0 项 / 账户 0」。
@@ -90,7 +93,8 @@ func deref(s *string) string {
 // checkBatchOutcome 以逐项结果判批次结局,并用事件与聚合交叉核对。
 //
 //   - 每个输入恰好一项,坐标、账户、市场、撤单目标与输入逐一对上;
-//   - 被接受的下单必须在事件里有同号的 OrderAccepted 且价量与输入一致,被撤的单必须有 OrderCanceled;
+//   - 被接受的下单必须在事件里有同号的 OrderAccepted,价格与输入相同、手数不超过输入(接受手数写回该项的 Lots),
+//     被撤的单必须有 OrderCanceled;
 //     事件里不能多出逐项结果解释不了的接受;
 //   - 聚合计数只能与逐项一致,不能替代它。
 //
@@ -282,10 +286,12 @@ func checkItemEvents(events []EventEnvelope, account uint32, orders []BatchOrder
 		}
 		a, ok := accepted[NewOrderID(orders[i].Market, seq)]
 		o := orders[i]
-		lotsMatch := ok && (*a.Lots == o.Lots || (o.ReduceOnly && *a.Lots < o.Lots))
+		lotsMatch := ok && *a.Lots <= o.Lots && (it.Lots == nil || *it.Lots == *a.Lots)
 		if !ok || *a.Price != o.Price || !lotsMatch || *a.Filled != *it.FilledLots || *a.Resting != *it.Resting {
 			return fmt.Errorf("%w: place#%d 被接受却没有一致的 OrderAccepted", ErrIncompleteBatch, i)
 		}
+		lots := *a.Lots
+		it.Lots = &lots
 		explained++
 	}
 	if explained != len(accepted) {
