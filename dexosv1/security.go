@@ -64,6 +64,7 @@ func (c *Client) SecurityNetwork(ctx context.Context) (Network, error) {
 		NodeChainID  Hash   `json:"nodeChainId"`
 		NodeVerifier string `json:"nodeVerifier"`
 		ManifestHash Hash   `json:"manifestHash"`
+		Profile      uint8  `json:"profile"`
 	}
 	if err := c.get(ctx, networkPath, nil, marketRead, &w); err != nil {
 		return Network{}, err
@@ -79,7 +80,7 @@ func (c *Client) SecurityNetwork(ctx context.Context) (Network, error) {
 	if w.NetworkID.IsZero() || w.GenesisHash.IsZero() || w.ManifestHash.IsZero() {
 		return Network{}, fmt.Errorf("dexosv1: /v1/network 缺网络身份")
 	}
-	n := Network{NetworkID: w.NetworkID, GenesisHash: w.GenesisHash, LedgerEpoch: uint64(w.LedgerEpoch), ChainID: chain.Uint64(), Verifier: verifier, ManifestHash: w.ManifestHash}
+	n := Network{NetworkID: w.NetworkID, GenesisHash: w.GenesisHash, LedgerEpoch: uint64(w.LedgerEpoch), ChainID: chain.Uint64(), Verifier: verifier, ManifestHash: w.ManifestHash, Profile: NetworkProfile(w.Profile)}
 	c.pinLedger(n)
 	return n, nil
 }

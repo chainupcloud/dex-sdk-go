@@ -774,9 +774,9 @@ func TestNewLedgerDropsTheOldLedgerSeq(t *testing.T) {
 func serveNetwork(epoch, genesis string) http.HandlerFunc {
 	return func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("content-type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]string{"networkId": "0x" + strings.Repeat("11", 32), "genesisHash": "0x" + genesis,
+		_ = json.NewEncoder(w).Encode(map[string]any{"networkId": "0x" + strings.Repeat("11", 32), "genesisHash": "0x" + genesis,
 			"ledgerEpoch": epoch, "nodeChainId": "0x" + strings.Repeat("00", 29) + "aa36a7",
-			"nodeVerifier": testAgent, "manifestHash": "0x" + strings.Repeat("33", 32)})
+			"nodeVerifier": testAgent, "manifestHash": "0x" + strings.Repeat("33", 32), "profile": 3})
 	}
 }
 
